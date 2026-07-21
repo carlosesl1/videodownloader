@@ -19,6 +19,14 @@ function networkError(url, status) {
   );
 }
 
+function cancellationError(url) {
+  return new HlsError(
+    'HLS_NETWORK',
+    'A operação HLS foi cancelada.',
+    { url },
+  );
+}
+
 function validateUrl(url) {
   if (typeof url !== 'string') {
     throw invalid('A URL HLS informada é inválida.');
@@ -60,9 +68,38 @@ function validateAllowedOrigins(allowedOrigins) {
   }
 }
 
+function segmentOrigin(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error();
+    return parsed.origin;
+  } catch {
+    throw invalid('A URL de um segmento HLS é inválida.');
+  }
+}
+
 function validatePositiveSafeInteger(value, name, maximum = Number.MAX_SAFE_INTEGER) {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw invalid(`A opção ${name} para HLS é inválida.`, { [name]: value });
+  }
+}
+
+async function awaitWithAbort(operation, signal, url) {
+  if (!signal) return operation;
+  if (signal.aborted) throw cancellationError(url);
+
+  let onAbort;
+  const aborted = new Promise((resolve, reject) => {
+    onAbort = () => reject(cancellationError(url));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    const result = await Promise.race([operation, aborted]);
+    if (signal.aborted) throw cancellationError(url);
+    return result;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
   }
 }
 
@@ -72,7 +109,7 @@ async function fetchOk(url, fetchImpl, signal) {
 
   let response;
   try {
-    response = await fetchImpl(url, options);
+    response = await awaitWithAbort(fetchImpl(url, options), signal, url);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
@@ -82,18 +119,27 @@ async function fetchOk(url, fetchImpl, signal) {
   return response;
 }
 
-async function readText(response, url) {
+async function readText(response, url, signal) {
   try {
-    return await response.text();
+    return await awaitWithAbort(response.text(), signal, url);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
   }
 }
 
-async function readBytes(response, url) {
+async function readBytes(response, url, signal) {
   try {
-    return await response.arrayBuffer();
+    return await awaitWithAbort(response.arrayBuffer(), signal, url);
+  } catch (error) {
+    if (error instanceof HlsError) throw error;
+    throw networkError(url);
+  }
+}
+
+async function readStreamChunk(reader, url, signal) {
+  try {
+    return await awaitWithAbort(reader.read(), signal, url);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
@@ -102,7 +148,7 @@ async function readBytes(response, url) {
 
 async function fetchPlaylist(url, fetchImpl, signal) {
   const response = await fetchOk(url, fetchImpl, signal);
-  return parseHlsPlaylist(await readText(response, url), url);
+  return parseHlsPlaylist(await readText(response, url, signal), url);
 }
 
 export async function inspectHls(url, { fetchImpl = fetch, signal } = {}) {
@@ -137,13 +183,30 @@ export async function assembleHls(url, {
   validatePositiveSafeInteger(maxBytes, 'maxBytes');
   validatePositiveSafeInteger(concurrency, 'concurrency', MAX_CONCURRENCY);
 
+  let stopped = false;
+  let fatalError;
   const controller = new AbortController();
-  const relayAbort = () => controller.abort(signal?.reason);
+
+  const stop = (error) => {
+    if (!fatalError) fatalError = error;
+    stopped = true;
+    if (!controller.signal.aborted) controller.abort();
+    return fatalError;
+  };
+  const relayAbort = () => stop(cancellationError(url));
+  const assertRunning = (resourceUrl = url) => {
+    if (stopped || controller.signal.aborted) {
+      throw fatalError || cancellationError(resourceUrl);
+    }
+  };
+
   if (signal?.aborted) relayAbort();
   else signal?.addEventListener?.('abort', relayAbort, { once: true });
 
   try {
+    assertRunning();
     const playlist = await fetchPlaylist(url, fetchImpl, controller.signal);
+    assertRunning();
     if (playlist.kind === 'master') {
       throw new HlsError(
         'HLS_VARIANT_REQUIRED',
@@ -151,11 +214,11 @@ export async function assembleHls(url, {
       );
     }
 
+    const segmentOrigins = playlist.segments.map((segment) => segmentOrigin(segment.url));
     const permitted = new Set(allowedOrigins);
     const missingOrigins = [];
     const seenMissing = new Set();
-    for (const segment of playlist.segments) {
-      const origin = new URL(segment.url).origin;
+    for (const origin of segmentOrigins) {
       if (!permitted.has(origin) && !seenMissing.has(origin)) {
         seenMissing.add(origin);
         missingOrigins.push(origin);
@@ -172,11 +235,72 @@ export async function assembleHls(url, {
     const parts = new Array(playlist.segments.length);
     let nextIndex = 0;
     let total = 0;
-    let stopped = false;
 
-    const stop = () => {
-      stopped = true;
-      controller.abort();
+    const tooLargeError = () => new HlsError(
+      'HLS_TOO_LARGE',
+      'O vídeo HLS excede o limite de tamanho permitido.',
+      { maxBytes },
+    );
+    const reserve = (chunk, segmentChunks) => {
+      assertRunning();
+      if (!(chunk instanceof Uint8Array) && !(chunk instanceof ArrayBuffer)) {
+        throw networkError(url);
+      }
+      if (total + chunk.byteLength > maxBytes) {
+        const error = tooLargeError();
+        if (!fatalError) fatalError = error;
+        stop(error);
+        throw error;
+      }
+      total += chunk.byteLength;
+      segmentChunks.push(chunk);
+    };
+
+    const readSegment = async (response, segmentUrl) => {
+      const getReader = response.body?.getReader;
+      if (typeof getReader !== 'function') {
+        const bytes = await readBytes(response, segmentUrl, controller.signal);
+        assertRunning(segmentUrl);
+        const segmentChunks = [];
+        reserve(bytes, segmentChunks);
+        return segmentChunks;
+      }
+
+      const reader = getReader.call(response.body);
+      const segmentChunks = [];
+      let readerCancelled = false;
+      const cancelReader = () => {
+        if (readerCancelled) return;
+        readerCancelled = true;
+        try {
+          Promise.resolve(reader.cancel()).catch(() => {});
+        } catch {
+          // Cancellation is best-effort; the public operation error is preserved.
+        }
+      };
+
+      try {
+        while (true) {
+          assertRunning(segmentUrl);
+          const { done, value } = await readStreamChunk(reader, segmentUrl, controller.signal);
+          assertRunning(segmentUrl);
+          if (done) return segmentChunks;
+          if (!(value instanceof Uint8Array)) throw networkError(segmentUrl);
+
+          if (total + value.byteLength > maxBytes) {
+            const error = tooLargeError();
+            if (!fatalError) fatalError = error;
+            cancelReader();
+            stop(error);
+            throw error;
+          }
+          total += value.byteLength;
+          segmentChunks.push(value);
+        }
+      } catch (error) {
+        if (stopped || controller.signal.aborted) cancelReader();
+        throw error;
+      }
     };
 
     const worker = async () => {
@@ -188,29 +312,27 @@ export async function assembleHls(url, {
         const segment = playlist.segments[index];
         try {
           const response = await fetchOk(segment.url, fetchImpl, controller.signal);
-          const bytes = await readBytes(response, segment.url);
-          if (stopped) return;
-
-          if (total + bytes.byteLength > maxBytes) {
-            stop();
-            throw new HlsError(
-              'HLS_TOO_LARGE',
-              'O vídeo HLS excede o limite de tamanho permitido.',
-              { maxBytes },
-            );
-          }
-          total += bytes.byteLength;
-          parts[index] = bytes;
+          assertRunning(segment.url);
+          parts[index] = await readSegment(response, segment.url);
+          assertRunning(segment.url);
         } catch (error) {
-          if (!stopped) stop();
-          throw error;
+          const safeError = error instanceof HlsError ? error : networkError(segment.url);
+          throw stop(safeError);
         }
       }
     };
 
     const workerCount = Math.min(concurrency, playlist.segments.length);
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    const blob = new Blob(parts, { type: 'video/mp2t' });
+    const results = await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+    if (!fatalError) {
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed) fatalError = failed.reason instanceof HlsError ? failed.reason : networkError(url);
+    }
+    if (fatalError) throw fatalError;
+    assertRunning();
+    const orderedChunks = parts.flat();
+    assertRunning();
+    const blob = new Blob(orderedChunks, { type: 'video/mp2t' });
     return { blob, size: total };
   } finally {
     signal?.removeEventListener?.('abort', relayAbort);

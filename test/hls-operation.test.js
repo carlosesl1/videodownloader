@@ -17,6 +17,32 @@ function response(body, { ok = true, status = 200 } = {}) {
   };
 }
 
+function streamingResponse(chunks, { onCancel = () => {}, arrayBuffer = () => {
+  throw new Error('arrayBuffer must not be called for streaming responses');
+} } = {}) {
+  let index = 0;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index >= chunks.length) return { done: true, value: undefined };
+            const value = chunks[index];
+            index += 1;
+            return { done: false, value };
+          },
+          async cancel() {
+            onCancel();
+          },
+        };
+      },
+    },
+    arrayBuffer,
+  };
+}
+
 const mediaPlaylist = (...segments) => [
   '#EXTM3U',
   ...segments.flatMap((segment) => ['#EXTINF:4.0,', segment]),
@@ -130,6 +156,155 @@ test('assembleHls rejects when accumulated bytes exceed maxBytes', async () => {
       return true;
     },
   );
+});
+
+test('assembleHls accounts streaming chunks before retention and cancels on size breach', async () => {
+  let arrayBufferCalls = 0;
+  let cancelCalls = 0;
+  let blobConstructions = 0;
+  const OriginalBlob = globalThis.Blob;
+  globalThis.Blob = class TrackingBlob extends OriginalBlob {
+    constructor(...args) {
+      blobConstructions += 1;
+      super(...args);
+    }
+  };
+
+  try {
+    await assert.rejects(
+      assembleHls('https://cdn.test/media.m3u8', {
+        allowedOrigins: ['https://cdn.test'],
+        maxBytes: 5,
+        fetchImpl: async (url) => {
+          if (url.endsWith('.m3u8')) return response(mediaPlaylist('one.ts'));
+          return streamingResponse(
+            [new TextEncoder().encode('AAA'), new TextEncoder().encode('BBB')],
+            {
+              onCancel: () => { cancelCalls += 1; },
+              arrayBuffer: async () => {
+                arrayBufferCalls += 1;
+                return new TextEncoder().encode('AAABBB').buffer;
+              },
+            },
+          );
+        },
+      }),
+      assertHlsError('HLS_TOO_LARGE'),
+    );
+  } finally {
+    globalThis.Blob = OriginalBlob;
+  }
+
+  assert.equal(arrayBufferCalls, 0);
+  assert.equal(cancelCalls, 1);
+  assert.equal(blobConstructions, 0);
+});
+
+test('assembleHls rejects an external abort during a delayed read that ignores its signal', async () => {
+  const externalController = new AbortController();
+  let announceRead;
+  const readStarted = new Promise((resolve) => { announceRead = resolve; });
+  let releaseRead;
+  const delayedBytes = new Promise((resolve) => { releaseRead = resolve; });
+  let streamRead = false;
+  let blobConstructions = 0;
+  const OriginalBlob = globalThis.Blob;
+  globalThis.Blob = class TrackingBlob extends OriginalBlob {
+    constructor(...args) {
+      blobConstructions += 1;
+      super(...args);
+    }
+  };
+
+  const operation = assembleHls('https://cdn.test/media.m3u8', {
+    allowedOrigins: ['https://cdn.test'],
+    signal: externalController.signal,
+    fetchImpl: async (url) => {
+      if (url.endsWith('.m3u8')) return response(mediaPlaylist('one.ts'));
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (streamRead) return { done: true, value: undefined };
+                streamRead = true;
+                announceRead();
+                return { done: false, value: await delayedBytes };
+              },
+              async cancel() {},
+            };
+          },
+        },
+        async arrayBuffer() {
+          announceRead();
+          return (await delayedBytes).buffer;
+        },
+      };
+    },
+  });
+
+  await readStarted;
+  externalController.abort();
+  releaseRead(new TextEncoder().encode('ONE'));
+
+  let caught;
+  try {
+    await operation;
+  } catch (error) {
+    caught = error;
+  } finally {
+    globalThis.Blob = OriginalBlob;
+  }
+
+  assert.equal(caught?.code, 'HLS_NETWORK');
+  assert.doesNotMatch(caught?.message || '', /AbortError|stack|signal/i);
+  assert.equal(blobConstructions, 0);
+});
+
+test('assembleHls preserves HLS_TOO_LARGE when aborting a peer worker', async () => {
+  let announcePeer;
+  const peerStarted = new Promise((resolve) => { announcePeer = resolve; });
+  let releaseLarge;
+  const largeReady = new Promise((resolve) => { releaseLarge = resolve; });
+  const largeBytes = new TextEncoder().encode('TOO-LARGE');
+
+  const operation = assembleHls('https://cdn.test/media.m3u8', {
+    allowedOrigins: ['https://cdn.test'],
+    concurrency: 2,
+    maxBytes: 5,
+    fetchImpl: async (url, { signal }) => {
+      if (url.endsWith('.m3u8')) return response(mediaPlaylist('peer.ts', 'large.ts'));
+      if (url.endsWith('large.ts')) {
+        return streamingResponse([await largeReady], {
+          arrayBuffer: async () => (await largeReady).buffer,
+        });
+      }
+      announcePeer();
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('peer aborted')), { once: true });
+      });
+    },
+  });
+
+  await peerStarted;
+  releaseLarge(largeBytes);
+  await assert.rejects(operation, assertHlsError('HLS_TOO_LARGE'));
+});
+
+test('assembleHls rejects non-HTTP segment URLs before permission checks or segment fetches', async () => {
+  const calls = [];
+  await assert.rejects(
+    assembleHls('https://cdn.test/media.m3u8', {
+      fetchImpl: async (url) => {
+        calls.push(url);
+        return response(mediaPlaylist('data:video/mp2t;base64,QUFB'));
+      },
+    }),
+    assertHlsError('HLS_INVALID'),
+  );
+  assert.deepEqual(calls, ['https://cdn.test/media.m3u8']);
 });
 
 test('assembleHls requires selecting a media variant from a master playlist', async () => {
