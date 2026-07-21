@@ -16,8 +16,18 @@ export function scanPage() {
       return null;
     }
 
-    const mime = typeof type === 'string' ? type.toLowerCase() : '';
-    if (pathname.endsWith('.m3u8') || mime.includes('mpegurl')) return 'hls';
+    const mime = String(type || '').split(';', 1)[0].trim().toLowerCase();
+    if (
+      pathname.endsWith('.m3u8') ||
+      [
+        'application/vnd.apple.mpegurl',
+        'application/x-mpegurl',
+        'audio/mpegurl',
+        'audio/x-mpegurl',
+      ].includes(mime)
+    ) {
+      return 'hls';
+    }
     if (
       /\.(mp4|webm|mov)$/.test(pathname) ||
       ['video/mp4', 'video/webm', 'video/quicktime'].includes(mime)
@@ -36,33 +46,40 @@ export function scanPage() {
     const currentRawUrl = video.currentSrc || video.src;
     const currentUrl = resolveUrl(currentRawUrl);
     const currentType = video.getAttribute?.('type') || video.type || '';
+    const sources = Array.from(video.querySelectorAll('source')).map((source) => ({
+      url: resolveUrl(source.src || source.getAttribute?.('src')),
+      type: source.type || source.getAttribute?.('type') || '',
+    }));
+    const selectedSource = currentUrl && sources.find((source) => source.url === currentUrl);
+    let selectedType = currentType;
+    let currentKind = currentUrl && classify(currentUrl, selectedType);
+    if (!currentKind && selectedSource) {
+      selectedType = selectedSource.type;
+      currentKind = classify(currentUrl, selectedType);
+    }
 
     if (currentUrl) {
-      const kind = classify(currentUrl, currentType);
-      if (kind) {
+      if (currentKind) {
         candidates.push({
           url: currentUrl,
-          type: currentType,
+          type: selectedType,
           label,
           width: video.videoWidth || undefined,
           height: video.videoHeight || undefined,
-          kind,
+          kind: currentKind,
           source: 'dom-current',
           groupKey,
         });
       }
     }
 
-    video.querySelectorAll('source').forEach((source) => {
-      const sourceRawUrl = source.src || source.getAttribute?.('src');
-      const sourceUrl = resolveUrl(sourceRawUrl);
-      const type = source.type || source.getAttribute?.('type') || '';
-      if (!sourceUrl) return;
-      const kind = classify(sourceUrl, type);
+    sources.forEach((source) => {
+      if (!source.url) return;
+      const kind = classify(source.url, source.type);
       if (!kind) return;
       candidates.push({
-        url: sourceUrl,
-        type,
+        url: source.url,
+        type: source.type,
         label,
         kind,
         source: 'dom-source',

@@ -1,7 +1,23 @@
-function inferKind(url) {
+function inferKind(url, type) {
   const pathname = url.pathname.toLowerCase();
-  if (pathname.endsWith('.m3u8')) return 'hls';
-  if (/\.(mp4|webm|mov)$/.test(pathname)) return 'direct';
+  const mime = String(type || '').split(';', 1)[0].trim().toLowerCase();
+  if (
+    pathname.endsWith('.m3u8') ||
+    [
+      'application/vnd.apple.mpegurl',
+      'application/x-mpegurl',
+      'audio/mpegurl',
+      'audio/x-mpegurl',
+    ].includes(mime)
+  ) {
+    return 'hls';
+  }
+  if (
+    /\.(mp4|webm|mov)$/.test(pathname) ||
+    ['video/mp4', 'video/webm', 'video/quicktime'].includes(mime)
+  ) {
+    return 'direct';
+  }
   return null;
 }
 
@@ -38,7 +54,7 @@ export function normalizeCandidates(candidates) {
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
     parsed.hash = '';
-    const kind = candidate.kind || inferKind(parsed);
+    const kind = candidate.kind || inferKind(parsed, candidate.type);
     if (kind !== 'direct' && kind !== 'hls') continue;
 
     const normalized = { ...candidate, url: parsed.href, kind };

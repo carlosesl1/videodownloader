@@ -38,3 +38,12 @@ test('groups direct variants by group key and sorts known resolutions first', ()
   assert.equal(groups[2].kind, 'hls');
   assert.equal(groups[2].variants.length, 1);
 });
+
+test('infers extensionless media kinds from parameterized MIME types', () => {
+  const candidates = normalizeCandidates([
+    { url: 'https://cdn.test/playback', type: 'video/webm; codecs=vp9' },
+    { url: 'https://cdn.test/stream', type: 'application/x-mpegurl; charset=utf-8' },
+  ]);
+
+  assert.deepEqual(candidates.map((candidate) => candidate.kind), ['direct', 'hls']);
+});
