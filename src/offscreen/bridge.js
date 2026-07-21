@@ -22,12 +22,12 @@ export function createOffscreenBridge({
           allowedOrigins: message.payload.allowedOrigins,
         });
         if (!(result?.blob instanceof Blob) || !Number.isSafeInteger(result.size) || result.size < 0) {
-          throw new Error('Resultado HLS invÃ¡lido');
+          throw new Error('Resultado HLS inválido');
         }
 
         const blobUrl = createObjectURL(result.blob);
         if (typeof blobUrl !== 'string' || !/^blob:\S+$/.test(blobUrl)) {
-          throw new Error('URL de blob invÃ¡lida');
+          throw new Error('URL de blob inválida');
         }
         ownedBlobUrls.add(blobUrl);
         return { blobUrl, size: result.size };

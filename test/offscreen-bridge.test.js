@@ -129,6 +129,7 @@ test('does not retain URLs when assembly or URL creation fails', async () => {
 
 test('rejects invalid assembled results and non-blob object URLs without retaining ownership', async () => {
   const revoked = [];
+  let createCalls = 0;
   const invalidResults = [
     { blob: 'not-a-blob', size: 1 },
     { blob: new Blob(['X']), size: -1 },
@@ -138,22 +139,25 @@ test('rejects invalid assembled results and non-blob object URLs without retaini
   for (const result of invalidResults) {
     const bridge = createOffscreenBridge({
       assemble: async () => result,
-      createObjectURL: () => { throw new Error('must not create a URL'); },
+      createObjectURL: () => { createCalls += 1; throw new Error('must not create a URL'); },
       revokeObjectURL: (url) => revoked.push(url),
     });
     await assert.rejects(bridge.handle(downloadMessage()));
   }
+  assert.equal(createCalls, 0);
 
-  for (const blobUrl of ['', 'blob:', 'https://extension.test/file', 'data:text/plain,video']) {
+  for (const blobUrl of ['', 'blob:', 'blob: ', 'https://extension.test/file', 'data:text/plain,video']) {
     const bridge = createOffscreenBridge({
       assemble: async () => ({ blob: new Blob(['X']), size: 1 }),
       createObjectURL: () => blobUrl,
       revokeObjectURL: (url) => revoked.push(url),
     });
     await assert.rejects(bridge.handle(downloadMessage()));
-    assert.deepEqual(await bridge.handle({
-      target: 'offscreen', action: ACTIONS.RELEASE_BLOB, payload: { blobUrl: 'blob:extension.test/unowned' },
-    }), { released: false });
+    if (blobUrl.startsWith('blob:')) {
+      assert.deepEqual(await bridge.handle({
+        target: 'offscreen', action: ACTIONS.RELEASE_BLOB, payload: { blobUrl },
+      }), { released: false });
+    }
   }
   assert.deepEqual(revoked, []);
 });
@@ -238,12 +242,36 @@ test('registers an async offscreen listener and keeps its nested safe error cont
       ok: false,
       error: {
         code: 'HLS_UNKNOWN',
-        message: 'NÃ£o foi possÃ­vel processar a operaÃ§Ã£o HLS.',
+        message: 'Não foi possível processar a operação HLS.',
         details: {},
       },
     });
     assert.equal('stack' in arbitraryError.error, false);
     assert.equal('cause' in arbitraryError.error, false);
+
+    const cyclic = {};
+    cyclic.self = cyclic;
+    const throwingToJson = { toJSON() { throw new Error('secret serializer'); } };
+    const unsafeCases = [
+      { code: 'unsafe-code', details: { value: 1 }, expectedCode: 'HLS_UNKNOWN', expectedDetails: { value: 1 } },
+      { code: 123, details: { value: 2 }, expectedCode: 'HLS_UNKNOWN', expectedDetails: { value: 2 } },
+      { code: 'HLS_CYCLIC', details: cyclic, expectedCode: 'HLS_CYCLIC', expectedDetails: {} },
+      { code: 'HLS_BIGINT', details: { size: 1n }, expectedCode: 'HLS_BIGINT', expectedDetails: {} },
+      { code: 'HLS_TO_JSON', details: throwingToJson, expectedCode: 'HLS_TO_JSON', expectedDetails: {} },
+      { code: 'HLS_PRIMITIVE', details: 'not-an-object', expectedCode: 'HLS_PRIMITIVE', expectedDetails: {} },
+    ];
+    for (const { code, details, expectedCode, expectedDetails } of unsafeCases) {
+      const error = new HlsError(code, 'Falha HLS segura', details);
+      const unsafeListener = main.createOffscreenMessageListener({
+        handle: async () => { throw error; },
+      });
+      const response = await new Promise((resolve) => unsafeListener({ target: 'offscreen' }, {}, resolve));
+      assert.deepEqual(response, {
+        ok: false,
+        error: { code: expectedCode, message: 'Falha HLS segura', details: expectedDetails },
+      });
+      assert.doesNotThrow(() => JSON.stringify(response));
+    }
   } finally {
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;
