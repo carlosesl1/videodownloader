@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Vídeo Radar",
+  "description": "Detecte e baixe vídeos disponíveis nas páginas que você visita.",
+  "version": "1.0.0",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "offscreen",
+    "scripting",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Vídeo Radar"
+  },
+  "background": {
+    "service_worker": "src/background/main.js",
+    "type": "module"
+  },
+  "minimum_chrome_version": "116"
+}
