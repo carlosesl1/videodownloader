@@ -1,0 +1,7 @@
+#EXTM3U
+#EXT-X-VERSION:3
+#EXTINF:9.009,
+seg-1.ts
+#EXTINF:8.5,
+seg-2.ts
+#EXT-X-ENDLIST
