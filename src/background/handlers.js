@@ -439,6 +439,9 @@ export function createBackgroundHandlers({
       }
 
       if (message.payload.error) {
+        if (record.state !== 'starting' && record.state !== 'assembling') {
+          return { acknowledged: true };
+        }
         const failed = { ...record, state: 'failed', error: message.payload.error };
         await storageSession.set({ [operationKey(operationId)]: failed });
         await cleanupTerminal(failed);

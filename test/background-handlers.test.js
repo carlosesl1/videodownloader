@@ -54,6 +54,17 @@ function completion(operationId, blobUrl = `blob:extension.test/${operationId}`)
   };
 }
 
+function failedCompletion(operationId) {
+  return {
+    target: 'background',
+    action: ACTIONS.HLS_COMPLETED,
+    payload: {
+      operationId,
+      error: { code: 'HLS_NETWORK', message: 'Falha HLS tardia', details: { status: 503 } },
+    },
+  };
+}
+
 function memorySession(initial = {}) {
   const values = structuredClone(initial);
   const calls = { get: [], set: [], remove: [] };
@@ -202,6 +213,30 @@ test('duplicate completion never redownloads when Chrome search no longer return
   await handlers.handle(completion(started.operationId));
   await handlers.handle(completion(started.operationId));
   assert.equal(env.downloadsStarted.length, 1);
+});
+
+test('late assembly error cannot regress a downloading operation or release its active blob', async () => {
+  const env = defaultDependencies();
+  const handlers = createBackgroundHandlers(env.dependencies);
+  const started = await handlers.handle(downloadMessage());
+  await handlers.handle(completion(started.operationId));
+  const removesBefore = env.session.calls.remove.length;
+  const releasesBefore = env.sent.filter(({ action }) => action === ACTIONS.RELEASE_BLOB).length;
+
+  assert.deepEqual(await handlers.handle(failedCompletion(started.operationId)), { acknowledged: true });
+
+  const record = Object.values(env.session.values).find(
+    (value) => value?.operationId === started.operationId && value?.state,
+  );
+  assert.equal(record.state, 'downloading');
+  assert.equal(record.downloadId, 41);
+  assert.equal(env.session.values['hlsDownloadBlob:41'].operationId, started.operationId);
+  assert.equal(env.session.calls.remove.length, removesBefore);
+  assert.equal(
+    env.sent.filter(({ action }) => action === ACTIONS.RELEASE_BLOB).length,
+    releasesBefore,
+  );
+  assert.deepEqual(env.removed, []);
 });
 
 test('an unknown successful completion releases its blob and acknowledges it', async () => {
