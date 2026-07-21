@@ -15,11 +15,15 @@ function safeError(error) {
   };
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.target !== 'offscreen') return false;
+export function createOffscreenMessageListener(listenerBridge) {
+  return (message, _sender, sendResponse) => {
+    if (message?.target !== 'offscreen') return false;
 
-  bridge.handle(message)
-    .then((value) => sendResponse({ ok: true, value }))
-    .catch((error) => sendResponse({ ok: false, error: safeError(error) }));
-  return true;
-});
+    listenerBridge.handle(message)
+      .then((value) => sendResponse({ ok: true, value }))
+      .catch((error) => sendResponse({ ok: false, error: safeError(error) }));
+    return true;
+  };
+}
+
+chrome.runtime.onMessage.addListener(createOffscreenMessageListener(bridge));

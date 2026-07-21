@@ -26,7 +26,7 @@ export function createOffscreenBridge({
         }
 
         const blobUrl = createObjectURL(result.blob);
-        if (typeof blobUrl !== 'string' || !blobUrl) {
+        if (typeof blobUrl !== 'string' || !blobUrl.startsWith('blob:')) {
           throw new Error('URL de blob invÃ¡lida');
         }
         ownedBlobUrls.add(blobUrl);

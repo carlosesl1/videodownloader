@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { HlsError } from '../src/hls/parse-playlist.js';
 import { ACTIONS } from '../src/shared/messages.js';
 import { createOffscreenBridge } from '../src/offscreen/bridge.js';
 
@@ -126,6 +127,37 @@ test('does not retain URLs when assembly or URL creation fails', async () => {
   assert.deepEqual(revoked, []);
 });
 
+test('rejects invalid assembled results and non-blob object URLs without retaining ownership', async () => {
+  const revoked = [];
+  const invalidResults = [
+    { blob: 'not-a-blob', size: 1 },
+    { blob: new Blob(['X']), size: -1 },
+    { blob: new Blob(['X']), size: Number.MAX_SAFE_INTEGER + 1 },
+  ];
+
+  for (const result of invalidResults) {
+    const bridge = createOffscreenBridge({
+      assemble: async () => result,
+      createObjectURL: () => { throw new Error('must not create a URL'); },
+      revokeObjectURL: (url) => revoked.push(url),
+    });
+    await assert.rejects(bridge.handle(downloadMessage()));
+  }
+
+  for (const blobUrl of ['', 'https://extension.test/file', 'data:text/plain,video']) {
+    const bridge = createOffscreenBridge({
+      assemble: async () => ({ blob: new Blob(['X']), size: 1 }),
+      createObjectURL: () => blobUrl,
+      revokeObjectURL: (url) => revoked.push(url),
+    });
+    await assert.rejects(bridge.handle(downloadMessage()));
+    assert.deepEqual(await bridge.handle({
+      target: 'offscreen', action: ACTIONS.RELEASE_BLOB, payload: { blobUrl: 'blob:extension.test/unowned' },
+    }), { released: false });
+  }
+  assert.deepEqual(revoked, []);
+});
+
 test('owns simultaneous HLS downloads independently', async () => {
   let nextUrl = 0;
   const revoked = [];
@@ -147,4 +179,73 @@ test('owns simultaneous HLS downloads independently', async () => {
     target: 'offscreen', action: ACTIONS.RELEASE_BLOB, payload: { blobUrl: first.blobUrl },
   }), { released: true });
   assert.deepEqual(revoked, [second.blobUrl, first.blobUrl]);
+});
+
+test('registers an async offscreen listener and keeps its nested safe error contract', async () => {
+  const originalChrome = globalThis.chrome;
+  let listener;
+  globalThis.chrome = {
+    runtime: {
+      onMessage: {
+        addListener(handler) {
+          listener = handler;
+        },
+      },
+    },
+  };
+
+  try {
+    const main = await import('../src/offscreen/main.js?listener-contract');
+    assert.equal(typeof listener, 'function');
+    let ignored = false;
+    assert.equal(listener({ target: 'background' }, {}, () => { ignored = true; }), false);
+    assert.equal(ignored, false);
+
+    const response = await new Promise((resolve) => {
+      assert.equal(listener({
+        target: 'offscreen',
+        action: ACTIONS.RELEASE_BLOB,
+        payload: { blobUrl: 'blob:extension.test/unowned' },
+      }, {}, resolve), true);
+    });
+    assert.deepEqual(response, { ok: true, value: { released: false } });
+
+    const errorListener = main.createOffscreenMessageListener({
+      handle: async () => { throw new HlsError('HLS_NETWORK', 'Falha HLS segura', { status: 503 }); },
+    });
+    const hlsError = await new Promise((resolve) => errorListener({ target: 'offscreen' }, {}, resolve));
+    assert.deepEqual(hlsError, {
+      ok: false,
+      error: { code: 'HLS_NETWORK', message: 'Falha HLS segura', details: { status: 503 } },
+    });
+
+    const regularErrorListener = main.createOffscreenMessageListener({
+      handle: async () => { throw new Error('Falha comum segura'); },
+    });
+    const regularError = await new Promise((resolve) => regularErrorListener({ target: 'offscreen' }, {}, resolve));
+    assert.deepEqual(regularError, {
+      ok: false,
+      error: { code: 'HLS_UNKNOWN', message: 'Falha comum segura', details: {} },
+    });
+    assert.equal('stack' in regularError.error, false);
+    assert.equal('cause' in regularError.error, false);
+
+    const arbitraryListener = main.createOffscreenMessageListener({
+      handle: async () => { throw { stack: 'secret stack', cause: 'secret cause' }; },
+    });
+    const arbitraryError = await new Promise((resolve) => arbitraryListener({ target: 'offscreen' }, {}, resolve));
+    assert.deepEqual(arbitraryError, {
+      ok: false,
+      error: {
+        code: 'HLS_UNKNOWN',
+        message: 'NÃ£o foi possÃ­vel processar a operaÃ§Ã£o HLS.',
+        details: {},
+      },
+    });
+    assert.equal('stack' in arbitraryError.error, false);
+    assert.equal('cause' in arbitraryError.error, false);
+  } finally {
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+  }
 });
