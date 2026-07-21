@@ -384,7 +384,9 @@ export function createBackgroundHandlers({
   }
 
   async function finalizeTerminal(record) {
-    await removeUnusedPermissions(record.permissionPatterns ?? []);
+    if (!record.permissionsReleased) {
+      await removeUnusedPermissions(record.permissionPatterns ?? []);
+    }
     const dedupeKeyName = dedupeStorageKey(record.dedupeKey);
     const indexed = await storageSession.get(dedupeKeyName);
     const keys = [];

@@ -333,6 +333,23 @@ test('assembly completion durably releases host permissions before terminal brow
   assert.equal(env.sent.some(({ action }) => action === ACTIONS.RELEASE_BLOB), false);
 });
 
+test('terminal recovery still removes permissions when no assembly-release marker exists', async () => {
+  const env = defaultDependencies();
+  const handlers = createBackgroundHandlers(env.dependencies);
+  const started = await handlers.handle(downloadMessage());
+
+  await handlers.handle(failedCompletion(started.operationId));
+  const record = env.session.values[`hlsOperation:${started.operationId}`];
+  assert.equal(record.state, 'failed');
+  assert.equal(record.cleanupPending, false);
+  assert.equal(record.permissionsReleased, true);
+  assert.deepEqual(env.removed, [{ origins: ['https://cdn.test/*'] }]);
+
+  const recreated = createBackgroundHandlers(env.dependencies);
+  await recreated.ready;
+  assert.equal(env.removed.length, 1);
+});
+
 test('terminal cleanup keeps publishable status and finalizes only after durable HLS_RELEASED', async () => {
   const env = defaultDependencies();
   let nextId = 0;
@@ -359,6 +376,7 @@ test('terminal cleanup keeps publishable status and finalizes only after durable
   assert.equal(Object.hasOwn(record, 'blobUrl'), false);
   assert.equal(Object.hasOwn(env.session.values, 'hlsDownloadBlob:41'), false);
   assert.equal(Object.keys(env.session.values).some((key) => key.startsWith('hlsDedupe:')), false);
+  assert.deepEqual(env.removed, [{ origins: ['https://cdn.test/*'] }]);
 
   const next = await handlers.handle(downloadMessage());
   assert.notEqual(next.operationId, started.operationId);
