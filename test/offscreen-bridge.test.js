@@ -4,6 +4,16 @@ import { HlsError } from '../src/hls/parse-playlist.js';
 import { ACTIONS } from '../src/shared/messages.js';
 import { createOffscreenBridge } from '../src/offscreen/bridge.js';
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function downloadMessage(url = 'https://cdn.test/video.m3u8') {
   return {
     target: 'offscreen',
@@ -67,6 +77,28 @@ test('does not revoke unowned URLs or an already released URL', async () => {
   assert.deepEqual(await bridge.handle(owned), { released: true });
   assert.deepEqual(await bridge.handle(owned), { released: false });
   assert.deepEqual(revoked, ['blob:extension.test/owned']);
+});
+
+test('keeps blob ownership when revocation fails so terminal cleanup can retry', async () => {
+  let revokeCalls = 0;
+  const bridge = createOffscreenBridge({
+    assemble: async () => ({ blob: new Blob(['X']), size: 1 }),
+    createObjectURL: () => 'blob:extension.test/retry-release',
+    revokeObjectURL: () => {
+      revokeCalls += 1;
+      if (revokeCalls === 1) throw new Error('revogação temporariamente indisponível');
+    },
+  });
+  await bridge.handle(downloadMessage());
+  const release = {
+    target: 'offscreen',
+    action: ACTIONS.RELEASE_BLOB,
+    payload: { blobUrl: 'blob:extension.test/retry-release' },
+  };
+
+  await assert.rejects(bridge.handle(release), /temporariamente/);
+  assert.deepEqual(await bridge.handle(release), { released: true });
+  assert.equal(revokeCalls, 2);
 });
 
 test('delegates HLS inspection with its URL and returns variants', async () => {
@@ -183,6 +215,89 @@ test('owns simultaneous HLS downloads independently', async () => {
     target: 'offscreen', action: ACTIONS.RELEASE_BLOB, payload: { blobUrl: first.blobUrl },
   }), { released: true });
   assert.deepEqual(revoked, [second.blobUrl, first.blobUrl]);
+});
+
+test('START_HLS acknowledges before assembly settles and delivers completion later', async () => {
+  const assembly = deferred();
+  const completionDelivered = deferred();
+  const bridge = createOffscreenBridge({
+    assemble: async () => assembly.promise,
+    createObjectURL: () => 'blob:extension.test/operation-1',
+    sendCompletion: async (message) => {
+      completionDelivered.resolve(message);
+      return { ok: true, value: { acknowledged: true } };
+    },
+  });
+  const start = {
+    target: 'offscreen',
+    action: ACTIONS.START_HLS,
+    payload: {
+      operationId: 'operation-1',
+      url: 'https://cdn.test/video.m3u8',
+      allowedOrigins: ['https://cdn.test'],
+    },
+  };
+
+  assert.deepEqual(await bridge.handle(start), { operationId: 'operation-1', state: 'assembling' });
+  let delivered = false;
+  completionDelivered.promise.then(() => { delivered = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered, false);
+
+  assembly.resolve({ blob: new Blob(['HLS']), size: 3 });
+  assert.deepEqual(await completionDelivered.promise, {
+    target: 'background',
+    action: ACTIONS.HLS_COMPLETED,
+    payload: {
+      operationId: 'operation-1',
+      result: { blobUrl: 'blob:extension.test/operation-1', size: 3 },
+    },
+  });
+});
+
+test('repeated START_HLS reuses one assembly and retries completion until explicit ack', async () => {
+  let assembleCalls = 0;
+  let completionCalls = 0;
+  let retryCalls = 0;
+  const delivered = deferred();
+  const bridge = createOffscreenBridge({
+    assemble: async () => {
+      assembleCalls += 1;
+      return { blob: new Blob(['X']), size: 1 };
+    },
+    createObjectURL: () => 'blob:extension.test/shared',
+    scheduleRetry: async () => { retryCalls += 1; },
+    sendCompletion: async () => {
+      completionCalls += 1;
+      if (completionCalls === 1) throw new Error('worker suspenso');
+      delivered.resolve();
+      return { ok: true, value: { acknowledged: true } };
+    },
+  });
+  const message = {
+    target: 'offscreen',
+    action: ACTIONS.START_HLS,
+    payload: {
+      operationId: 'same-operation',
+      url: 'https://cdn.test/video.m3u8',
+      allowedOrigins: ['https://cdn.test'],
+    },
+  };
+
+  assert.deepEqual(await Promise.all([bridge.handle(message), bridge.handle(message)]), [
+    { operationId: 'same-operation', state: 'assembling' },
+    { operationId: 'same-operation', state: 'assembling' },
+  ]);
+  await delivered.promise;
+  assert.equal(assembleCalls, 1);
+  assert.equal(completionCalls, 2);
+  assert.equal(retryCalls, 1);
+
+  assert.deepEqual(await bridge.handle({
+    target: 'offscreen',
+    action: ACTIONS.RELEASE_BLOB,
+    payload: { operationId: 'same-operation', blobUrl: 'blob:extension.test/shared' },
+  }), { released: true });
 });
 
 test('registers an async offscreen listener and keeps its nested safe error contract', async () => {

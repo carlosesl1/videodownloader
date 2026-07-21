@@ -13,7 +13,12 @@ export function createOffscreenSender({
   async function ensureDocument() {
     if (!creatingDocument) {
       creatingDocument = (async () => {
-        if (await offscreen.hasDocument()) return;
+        const documentUrl = runtime.getURL('offscreen.html');
+        const contexts = await runtime.getContexts({
+          contextTypes: ['OFFSCREEN_DOCUMENT'],
+          documentUrls: [documentUrl],
+        });
+        if (contexts.length > 0) return;
         await offscreen.createDocument({
           url: 'offscreen.html',
           reasons: ['BLOBS'],
@@ -35,7 +40,11 @@ export function createOffscreenSender({
 
 const sendOffscreen = createOffscreenSender();
 const handlers = createBackgroundHandlers({ sendOffscreen });
-const handleTerminalDownload = createTerminalDownloadHandler({ sendOffscreen });
+const handleTerminalDownload = createTerminalDownloadHandler(handlers);
+
+handlers.ready.catch(() => {
+  // Durable records remain available for the next wake-up/reconciliation pass.
+});
 
 chrome.runtime.onMessage.addListener(createBackgroundMessageListener(handlers));
 chrome.downloads.onChanged.addListener((delta) => {

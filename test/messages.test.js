@@ -102,3 +102,56 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
     /Mensagem inválida/,
   );
 });
+
+test('accepts internal acknowledged HLS operation messages', () => {
+  const start = {
+    target: 'offscreen',
+    action: ACTIONS.START_HLS,
+    payload: {
+      operationId: 'operation-1',
+      url: 'https://cdn.test/video.m3u8?token=abc',
+      allowedOrigins: ['https://cdn.test'],
+    },
+  };
+  const completed = {
+    target: 'background',
+    action: ACTIONS.HLS_COMPLETED,
+    payload: {
+      operationId: 'operation-1',
+      result: { blobUrl: 'blob:extension.test/operation-1', size: 12 },
+    },
+  };
+  const failed = {
+    ...completed,
+    payload: {
+      operationId: 'operation-2',
+      error: { code: 'HLS_NETWORK', message: 'Falha HLS segura', details: { status: 503 } },
+    },
+  };
+
+  assert.equal(assertOffscreenMessage(start), start);
+  assert.equal(assertBackgroundMessage(completed), completed);
+  assert.equal(assertBackgroundMessage(failed), failed);
+});
+
+test('rejects malformed or metadata-bearing HLS completions', () => {
+  const valid = {
+    target: 'background',
+    action: ACTIONS.HLS_COMPLETED,
+    payload: {
+      operationId: 'operation-1',
+      result: { blobUrl: 'blob:extension.test/operation-1', size: 12 },
+    },
+  };
+
+  for (const payload of [
+    { operationId: '', result: valid.payload.result },
+    { operationId: 'operation-1', result: { ...valid.payload.result, filename: 'untrusted.ts' } },
+    { operationId: 'operation-1', result: { blobUrl: 'https://cdn.test/video.ts', size: 12 } },
+    { operationId: 'operation-1', result: valid.payload.result, error: { code: 'HLS_BAD', message: 'x', details: {} } },
+    { operationId: 'operation-1', error: { code: 'bad-code', message: 'x', details: {} } },
+    { operationId: 'operation-1', error: { code: 'HLS_BAD', message: 'x', details: { value: 1n } } },
+  ]) {
+    assert.throws(() => assertBackgroundMessage({ ...valid, payload }), /Mensagem inválida/);
+  }
+});
