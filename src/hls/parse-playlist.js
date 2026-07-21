@@ -11,6 +11,19 @@ function invalid(details) {
   return new HlsError('HLS_INVALID', 'Invalid HLS playlist', { reason: details });
 }
 
+const MEDIA_ONLY_TAG_PREFIXES = [
+  '#EXTINF:', '#EXT-X-TARGETDURATION:', '#EXT-X-MEDIA-SEQUENCE:',
+  '#EXT-X-DISCONTINUITY-SEQUENCE:', '#EXT-X-PLAYLIST-TYPE:', '#EXT-X-BYTERANGE:',
+  '#EXT-X-KEY:', '#EXT-X-MAP:', '#EXT-X-PROGRAM-DATE-TIME:', '#EXT-X-DATERANGE:',
+];
+const MEDIA_ONLY_TAGS = new Set([
+  '#EXT-X-ENDLIST', '#EXT-X-I-FRAMES-ONLY', '#EXT-X-DISCONTINUITY',
+]);
+const MASTER_ONLY_TAG_PREFIXES = [
+  '#EXT-X-MEDIA:', '#EXT-X-STREAM-INF:', '#EXT-X-I-FRAME-STREAM-INF:',
+  '#EXT-X-SESSION-DATA:', '#EXT-X-SESSION-KEY:',
+];
+
 function parseAttributes(value) {
   const attributes = {};
   let index = 0;
@@ -80,7 +93,7 @@ function parseStreamVariant(attributes, uri, playlistUrl) {
     throw invalid('Malformed EXT-X-STREAM-INF bandwidth');
   }
   const bandwidth = Number(attributes.BANDWIDTH);
-  const resolution = /^([1-9]\d*)x([1-9]\d*)$/i.exec(attributes.RESOLUTION || '');
+  const resolution = /^(\d+)x(\d+)$/i.exec(attributes.RESOLUTION || '');
   if (!Number.isSafeInteger(bandwidth) || bandwidth < 1 || !resolution) {
     throw invalid('Malformed EXT-X-STREAM-INF');
   }
@@ -123,12 +136,11 @@ function rejectUnsupportedTags(lines) {
     }
     if (line.startsWith('#EXT-X-KEY:')) {
       const attributes = parseAttributes(tagValue(line, '#EXT-X-KEY:'));
-      if (attributes.METHOD?.toUpperCase() === 'NONE' && (
-        attributes.URI || attributes.IV || attributes.KEYFORMAT
-      )) {
-        throw invalid('METHOD=NONE must not include key material attributes');
-      }
-      if (attributes.METHOD?.toUpperCase() !== 'NONE') {
+      if (attributes.METHOD === 'NONE') {
+        if (Object.keys(attributes).length !== 1) {
+          throw invalid('METHOD=NONE must be the only key attribute');
+        }
+      } else {
         throw new HlsError('HLS_ENCRYPTED', 'Encrypted HLS playlists are not supported');
       }
     }
@@ -184,7 +196,7 @@ function parseMedia(lines, playlistUrl) {
     let uri;
     for (index += 1; index < lines.length; index += 1) {
       const candidate = lines[index];
-      if (candidate.startsWith('#EXTINF:')) throw invalid('Missing URI after EXTINF');
+      if (isMediaOnlyTag(candidate)) throw invalid('Missing URI after EXTINF');
       if (!candidate.startsWith('#')) {
         uri = candidate;
         break;
@@ -207,22 +219,11 @@ function parseMedia(lines, playlistUrl) {
 }
 
 function isMediaOnlyTag(line) {
-  return [
-    '#EXTINF:',
-    '#EXT-X-TARGETDURATION:',
-    '#EXT-X-MEDIA-SEQUENCE:',
-    '#EXT-X-DISCONTINUITY-SEQUENCE:',
-    '#EXT-X-PLAYLIST-TYPE:',
-    '#EXT-X-BYTERANGE:',
-    '#EXT-X-KEY:',
-    '#EXT-X-MAP:',
-    '#EXT-X-PROGRAM-DATE-TIME:',
-    '#EXT-X-DATERANGE:',
-  ].some((prefix) => line.startsWith(prefix)) || [
-    '#EXT-X-ENDLIST',
-    '#EXT-X-I-FRAMES-ONLY',
-    '#EXT-X-DISCONTINUITY',
-  ].includes(line);
+  return MEDIA_ONLY_TAG_PREFIXES.some((prefix) => line.startsWith(prefix)) || MEDIA_ONLY_TAGS.has(line);
+}
+
+function isMasterOnlyTag(line) {
+  return MASTER_ONLY_TAG_PREFIXES.some((prefix) => line.startsWith(prefix));
 }
 
 export function parseHlsPlaylist(text, playlistUrl) {
@@ -240,7 +241,7 @@ export function parseHlsPlaylist(text, playlistUrl) {
   }
 
   const hasMasterVariants = lines.some((line) => line.startsWith('#EXT-X-STREAM-INF:'));
-  if (hasMasterVariants && lines.some(isMediaOnlyTag)) {
+  if (lines.some(isMasterOnlyTag) && lines.some(isMediaOnlyTag)) {
     throw invalid('Mixed master and media playlist');
   }
   rejectUnsupportedTags(lines);
