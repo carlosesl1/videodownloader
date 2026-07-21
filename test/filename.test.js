@@ -21,3 +21,22 @@ test('builds filenames for direct and HLS media', () => {
     'master.ts',
   );
 });
+
+test('falls back when a URL leaf sanitizes to nothing', () => {
+  assert.equal(
+    buildDownloadFilename({
+      url: 'https://cdn.test/%3C%3E.mp4',
+      kind: 'direct',
+      pageTitle: 'Minha aula',
+    }),
+    'Minha aula.mp4',
+  );
+  assert.match(
+    buildDownloadFilename({
+      url: 'https://cdn.test/%3C%3E.mp4',
+      kind: 'direct',
+      pageTitle: '   ',
+    }),
+    /^video-\d+\.mp4$/,
+  );
+});
