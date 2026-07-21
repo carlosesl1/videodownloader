@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture de vídeos</title>
+  </head>
+  <body>
+    <video aria-label="Demonstração" controls>
+      <source src="/media/demo-720.mp4" type="video/mp4" />
+      <source src="/media/demo-480.webm" type="video/webm" />
+    </video>
+    <video src="/media/clip.mov" controls></video>
+    <script>
+      fetch('/hls/browser-master.m3u8').then(() => performance.mark('fixture-ready'));
+    </script>
+  </body>
+</html>

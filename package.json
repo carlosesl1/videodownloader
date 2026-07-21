@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
-    "check": "node scripts/validate-extension.mjs && node --test"
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/validate-extension.mjs && node --test test/*.test.js"
   }
 }
