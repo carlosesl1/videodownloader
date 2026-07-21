@@ -220,17 +220,62 @@ for (const masterOnlyTag of [
   });
 }
 
-test('rejects ENDLIST between EXTINF and its segment URI', () => {
-  assert.throws(
-    () => parseHlsPlaylist([
+test('allows media tags between EXTINF and its segment URI', () => {
+  const result = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXTINF:4.0,',
+    '#EXT-X-PROGRAM-DATE-TIME:2026-07-21T12:00:00Z',
+    'dated-segment.ts',
+    '#EXT-X-ENDLIST',
+  ].join('\n'), 'https://cdn.test/playlist.m3u8');
+
+  assert.deepEqual(result.segments, [{
+    url: 'https://cdn.test/dated-segment.ts', duration: 4,
+  }]);
+});
+
+test('allows discontinuity and unencrypted key tags between EXTINF and its URI', () => {
+  const result = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXTINF:4.0,',
+    '#EXT-X-DISCONTINUITY',
+    '#EXT-X-KEY:METHOD=NONE',
+    'segment.ts',
+    '#EXT-X-ENDLIST',
+  ].join('\n'), 'https://cdn.test/playlist.m3u8');
+
+  assert.equal(result.segments[0].url, 'https://cdn.test/segment.ts');
+});
+
+test('allows ENDLIST between EXTINF and its segment URI', () => {
+  const result = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXTINF:4.0,',
+    '#EXT-X-ENDLIST',
+    'segment.ts',
+  ].join('\n'), 'https://cdn.test/playlist.m3u8');
+
+  assert.equal(result.kind, 'media');
+  assert.equal(result.segments.length, 1);
+});
+
+for (const interveningTag of [
+  '#EXTINF:5.0,',
+  '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"',
+]) {
+  test(`rejects ${interveningTag.split(':', 1)[0]} between EXTINF and its URI`, () => {
+    assert.throws(
+      () => parseHlsPlaylist([
       '#EXTM3U',
       '#EXTINF:4.0,',
-      '#EXT-X-ENDLIST',
+      interveningTag,
       'segment.ts',
+      '#EXT-X-ENDLIST',
     ].join('\n'), 'https://cdn.test/playlist.m3u8'),
-    (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
-  );
-});
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  });
+}
 
 for (const [name, playlist] of [
   ['exponent bandwidth', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1e3,RESOLUTION=640x360\nvariant.m3u8'],

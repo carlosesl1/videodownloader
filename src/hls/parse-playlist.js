@@ -196,7 +196,13 @@ function parseMedia(lines, playlistUrl) {
     let uri;
     for (index += 1; index < lines.length; index += 1) {
       const candidate = lines[index];
-      if (isMediaOnlyTag(candidate)) throw invalid('Missing URI after EXTINF');
+      if (candidate.startsWith('#EXTINF:') || isMasterOnlyTag(candidate)) {
+        throw invalid('Missing URI after EXTINF');
+      }
+      if (candidate === '#EXT-X-ENDLIST') {
+        hasEndList = true;
+        continue;
+      }
       if (!candidate.startsWith('#')) {
         uri = candidate;
         break;
