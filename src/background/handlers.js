@@ -3,8 +3,9 @@ import { ACTIONS, assertBackgroundMessage } from '../shared/messages.js';
 const OPERATION_PREFIX = 'hlsOperation:';
 const DEDUPE_PREFIX = 'hlsDedupe:';
 const TRACKING_PREFIX = 'hlsDownloadBlob:';
-const EARLY_TERMINAL_PREFIX = 'hlsEarlyTerminal:';
+const INSPECTION_PREFIX = 'hlsInspection:';
 const ACTIVE_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
+const PERMISSION_STATES = new Set(['starting', 'assembling']);
 const TERMINAL_STATES = new Set(['complete', 'interrupted', 'failed']);
 const SAFE_CODE = /^[A-Z0-9_]{1,64}$/;
 const MAX_MESSAGE_LENGTH = 500;
@@ -102,8 +103,8 @@ function trackingKey(downloadId) {
   return `${TRACKING_PREFIX}${downloadId}`;
 }
 
-function earlyTerminalKey(downloadId) {
-  return `${EARLY_TERMINAL_PREFIX}${downloadId}`;
+function inspectionKey(inspectionId) {
+  return `${INSPECTION_PREFIX}${inspectionId}`;
 }
 
 function canonicalMediaUrl(rawUrl) {
@@ -175,10 +176,10 @@ export function createBackgroundHandlers({
   permissions = globalThis.chrome?.permissions,
   sendOffscreen = (message) => globalThis.chrome.runtime.sendMessage(message),
   createOperationId = defaultOperationId,
+  createInspectionId = defaultOperationId,
   scheduleRetry = (callback) => setTimeout(() => Promise.resolve(callback()).catch(() => {}), 1_000),
 } = {}) {
   let queue = Promise.resolve();
-  const inspectionCounts = new Map();
   const scheduledCleanup = new Set();
 
   function serialized(operation) {
@@ -208,6 +209,13 @@ export function createBackgroundHandlers({
       .map(([, value]) => value);
   }
 
+  async function allInspectionLeases() {
+    const entries = await storageSession.get(null);
+    return Object.entries(entries ?? {})
+      .filter(([key, value]) => key.startsWith(INSPECTION_PREFIX) && isObject(value))
+      .map(([, value]) => value);
+  }
+
   async function permissionsContain(patterns) {
     if (patterns.length === 0 || typeof permissions?.contains !== 'function') return true;
     return permissions.contains({ origins: patterns });
@@ -219,11 +227,12 @@ export function createBackgroundHandlers({
     const records = await allRecords();
     const used = new Set();
     for (const record of records) {
-      if (!ACTIVE_STATES.has(record.state)) continue;
+      if (!PERMISSION_STATES.has(record.state)) continue;
       for (const pattern of record.permissionPatterns ?? []) used.add(pattern);
     }
-    for (const [pattern, count] of inspectionCounts) {
-      if (count > 0) used.add(pattern);
+    for (const lease of await allInspectionLeases()) {
+      if (lease.state !== 'active') continue;
+      for (const pattern of lease.permissionPatterns ?? []) used.add(pattern);
     }
     const removable = candidates.filter((pattern) => !used.has(pattern));
     if (removable.length > 0) await permissions.remove({ origins: removable });
@@ -231,6 +240,7 @@ export function createBackgroundHandlers({
 
   async function inspectHls(message) {
     const patterns = normalizePatterns(message.payload.permissionPatterns);
+    const inspectionId = createInspectionId();
     await serialized(async () => {
       if (!(await permissionsContain(patterns))) {
         throw new BackgroundError(
@@ -238,9 +248,13 @@ export function createBackgroundHandlers({
           'A permissão temporária expirou antes do processamento HLS.',
         );
       }
-      for (const pattern of patterns) {
-        inspectionCounts.set(pattern, (inspectionCounts.get(pattern) ?? 0) + 1);
-      }
+      await storageSession.set({
+        [inspectionKey(inspectionId)]: {
+          inspectionId,
+          permissionPatterns: patterns,
+          state: 'active',
+        },
+      });
     });
 
     let operationError;
@@ -256,12 +270,12 @@ export function createBackgroundHandlers({
 
     try {
       await serialized(async () => {
-        for (const pattern of patterns) {
-          const remaining = (inspectionCounts.get(pattern) ?? 1) - 1;
-          if (remaining <= 0) inspectionCounts.delete(pattern);
-          else inspectionCounts.set(pattern, remaining);
-        }
+        const key = inspectionKey(inspectionId);
+        await storageSession.set({
+          [key]: { inspectionId, permissionPatterns: patterns, state: 'releasing' },
+        });
         await removeUnusedPermissions(patterns);
+        await storageSession.remove(key);
       });
     } catch (cleanupError) {
       if (!operationError) operationError = cleanupError;
@@ -334,7 +348,7 @@ export function createBackgroundHandlers({
 
   async function findDownload(blobUrl, downloadId) {
     if (typeof downloads?.search !== 'function') return undefined;
-    const query = downloadId === undefined ? { url: exactUrlQuery(blobUrl) } : { id: downloadId };
+    const query = downloadId === undefined ? { urlRegex: exactUrlQuery(blobUrl) } : { id: downloadId };
     const matches = await downloads.search(query);
     if (!Array.isArray(matches)) return undefined;
     return matches.find((item) => (
@@ -352,34 +366,64 @@ export function createBackgroundHandlers({
       scheduledCleanup.delete(operationId);
       return serialized(async () => {
         const record = await getRecord(operationId);
-        if (isObject(record) && TERMINAL_STATES.has(record.state)) await cleanupTerminal(record);
+        if (isObject(record) && TERMINAL_STATES.has(record.state) && record.cleanupPending) {
+          await beginTerminalCleanup(record);
+        }
       });
     });
   }
 
-  async function cleanupTerminal(record) {
+  async function requestBlobRelease(record) {
+    const value = await sendAndUnwrap(sendOffscreen, releaseMessage(record, record.blobUrl));
+    if (
+      !isObject(value)
+      || value.operationId !== record.operationId
+      || value.state !== 'releasing'
+      || Object.keys(value).some((key) => key !== 'operationId' && key !== 'state')
+    ) throw malformedOffscreenResponse();
+  }
+
+  async function finalizeTerminal(record) {
+    await removeUnusedPermissions(record.permissionPatterns ?? []);
+    const dedupeKeyName = dedupeStorageKey(record.dedupeKey);
+    const indexed = await storageSession.get(dedupeKeyName);
+    const keys = [];
+    if (safelyRead(indexed, dedupeKeyName) === record.operationId) keys.push(dedupeKeyName);
+    if (Number.isInteger(record.downloadId)) keys.push(trackingKey(record.downloadId));
+    if (keys.length > 0) await storageSession.remove(keys);
+
+    const finalized = { ...record, cleanupPending: false, permissionsReleased: true };
+    delete finalized.blobUrl;
+    delete finalized.size;
+    delete finalized.downloadId;
+    await storageSession.set({ [operationKey(record.operationId)]: finalized });
+    return finalized;
+  }
+
+  async function beginTerminalCleanup(record) {
+    if (!record.blobUrl) {
+      await finalizeTerminal(record);
+      return;
+    }
     try {
-      if (record.blobUrl) {
-        await sendAndUnwrap(sendOffscreen, releaseMessage(record, record.blobUrl));
-      }
-      await removeUnusedPermissions(record.permissionPatterns ?? []);
-      const dedupeKeyName = dedupeStorageKey(record.dedupeKey);
-      const indexed = await storageSession.get(dedupeKeyName);
-      const keys = [operationKey(record.operationId)];
-      if (safelyRead(indexed, dedupeKeyName) === record.operationId) keys.push(dedupeKeyName);
-      if (Number.isInteger(record.downloadId)) {
-        keys.push(trackingKey(record.downloadId), earlyTerminalKey(record.downloadId));
-      }
-      await storageSession.remove(keys);
+      await requestBlobRelease(record);
     } catch {
       scheduleCleanupRetry(record.operationId);
     }
   }
 
   async function markTerminal(record, state) {
-    const terminal = { ...record, state };
+    const terminal = { ...record, state, cleanupPending: true };
     await storageSession.set({ [operationKey(record.operationId)]: terminal });
-    await cleanupTerminal(terminal);
+    await beginTerminalCleanup(terminal);
+  }
+
+  async function releaseAssemblyPermissions(record) {
+    if (record.permissionsReleased) return record;
+    await removeUnusedPermissions(record.permissionPatterns ?? []);
+    const updated = { ...record, permissionsReleased: true };
+    await storageSession.set({ [operationKey(record.operationId)]: updated });
+    return updated;
   }
 
   async function persistDownloadMapping(record, download) {
@@ -392,10 +436,7 @@ export function createBackgroundHandlers({
       [operationKey(record.operationId)]: mapped,
       [trackingKey(download.id)]: tracked,
     });
-    const earlyKey = earlyTerminalKey(download.id);
-    const earlyResult = await storageSession.get(earlyKey);
-    const early = safelyRead(earlyResult, earlyKey);
-    const terminalState = early?.state ?? download.state;
+    const terminalState = download.state;
     if (terminalState === 'complete' || terminalState === 'interrupted') {
       await markTerminal(mapped, terminalState);
     }
@@ -433,7 +474,7 @@ export function createBackgroundHandlers({
       let record = await getRecord(operationId);
       if (!isObject(record) || !ACTIVE_STATES.has(record.state)) {
         if (message.payload.result) {
-          await sendAndUnwrap(sendOffscreen, releaseMessage(operationId, message.payload.result.blobUrl));
+          await requestBlobRelease({ operationId, blobUrl: message.payload.result.blobUrl });
         }
         return { acknowledged: true };
       }
@@ -442,22 +483,36 @@ export function createBackgroundHandlers({
         if (record.state !== 'starting' && record.state !== 'assembling') {
           return { acknowledged: true };
         }
-        const failed = { ...record, state: 'failed', error: message.payload.error };
-        await storageSession.set({ [operationKey(operationId)]: failed });
-        await cleanupTerminal(failed);
+        await markTerminal({ ...record, error: message.payload.error }, 'failed');
         return { acknowledged: true };
       }
 
       const { blobUrl, size } = message.payload.result;
       if (record.blobUrl && record.blobUrl !== blobUrl) {
-        await sendAndUnwrap(sendOffscreen, releaseMessage(operationId, blobUrl));
         return { acknowledged: true };
       }
       if (!record.blobUrl) {
         record = { ...record, state: 'assembled', blobUrl, size };
         await storageSession.set({ [operationKey(operationId)]: record });
       }
+      record = await releaseAssemblyPermissions(record);
       await handoffAssembled(record);
+      return { acknowledged: true };
+    });
+  }
+
+  async function releasedHls(message) {
+    return serialized(async () => {
+      const { operationId, blobUrl } = message.payload;
+      const record = await getRecord(operationId);
+      if (!isObject(record) || !record.cleanupPending) return { acknowledged: true };
+      if (!TERMINAL_STATES.has(record.state) || record.blobUrl !== blobUrl) {
+        throw new BackgroundError(
+          'BACKGROUND_RELEASE_MISMATCH',
+          'A confirmação de liberação HLS não corresponde à operação.',
+        );
+      }
+      await finalizeTerminal(record);
       return { acknowledged: true };
     });
   }
@@ -470,24 +525,49 @@ export function createBackgroundHandlers({
       const result = await storageSession.get(key);
       const tracked = safelyRead(result, key);
       if (!isObject(tracked) || typeof tracked.operationId !== 'string') {
-        await storageSession.set({ [earlyTerminalKey(delta.id)]: { state } });
+        if (typeof downloads?.search !== 'function') return;
+        const matches = await downloads.search({ id: delta.id });
+        const item = Array.isArray(matches) && matches.find(({ id }) => id === delta.id);
+        if (!isObject(item) || typeof item.url !== 'string' || !item.url.startsWith('blob:')) return;
+        const record = (await allRecords()).find((candidate) => (
+          ACTIVE_STATES.has(candidate.state) && candidate.blobUrl === item.url
+        ));
+        if (!record) return;
+        const mapped = { ...record, downloadId: delta.id };
+        await storageSession.set({
+          [operationKey(record.operationId)]: mapped,
+          [key]: { operationId: record.operationId, blobUrl: record.blobUrl },
+        });
+        await markTerminal(mapped, state);
         return;
       }
       const record = await getRecord(tracked.operationId);
-      if (!isObject(record) || TERMINAL_STATES.has(record.state)) return;
+      if (!isObject(record)) return;
+      if (TERMINAL_STATES.has(record.state)) {
+        if (record.cleanupPending) await beginTerminalCleanup(record);
+        return;
+      }
       await markTerminal(record, state);
     });
   }
 
   async function reconcileLocked() {
+    for (const lease of await allInspectionLeases()) {
+      const key = inspectionKey(lease.inspectionId);
+      const releasing = { ...lease, state: 'releasing' };
+      await storageSession.set({ [key]: releasing });
+      await removeUnusedPermissions(releasing.permissionPatterns ?? []);
+      await storageSession.remove(key);
+    }
     const records = await allRecords();
     for (let record of records) {
-      if (record.state === 'starting') {
+      if (record.state === 'starting' || record.state === 'assembling') {
         record = await sendStartAndMark(record);
       } else if (record.state === 'assembled' || record.state === 'downloading') {
+        record = await releaseAssemblyPermissions(record);
         await handoffAssembled(record);
-      } else if (TERMINAL_STATES.has(record.state)) {
-        await cleanupTerminal(record);
+      } else if (TERMINAL_STATES.has(record.state) && record.cleanupPending) {
+        await beginTerminalCleanup(record);
       }
     }
   }
@@ -511,7 +591,8 @@ export function createBackgroundHandlers({
       }
       if (message.action === ACTIONS.INSPECT_HLS) return inspectHls(message);
       if (message.action === ACTIONS.DOWNLOAD_HLS) return startHls(message);
-      return completeHls(message);
+      if (message.action === ACTIONS.HLS_COMPLETED) return completeHls(message);
+      return releasedHls(message);
     },
   };
 }

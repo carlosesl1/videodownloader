@@ -48,12 +48,12 @@ test('accepts complete HLS background and offscreen messages', () => {
   assert.equal(assertBackgroundMessage(inspect), inspect);
   assert.equal(assertBackgroundMessage(download), download);
   assert.equal(assertOffscreenMessage({ ...inspect, target: 'offscreen' }).target, 'offscreen');
-  assert.equal(assertOffscreenMessage({ ...download, target: 'offscreen' }).target, 'offscreen');
+  assert.throws(() => assertOffscreenMessage({ ...download, target: 'offscreen' }), /Mensagem inválida/);
   assert.equal(
     assertOffscreenMessage({
       target: 'offscreen',
       action: ACTIONS.RELEASE_BLOB,
-      payload: { blobUrl: 'blob:https://extension.test/abc' },
+      payload: { operationId: 'operation-1', blobUrl: 'blob:https://extension.test/abc' },
     }).action,
     ACTIONS.RELEASE_BLOB,
   );
@@ -97,7 +97,7 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
       assertOffscreenMessage({
         target: 'offscreen',
         action: ACTIONS.RELEASE_BLOB,
-        payload: { blobUrl: 'https://extension.test/not-a-blob' },
+        payload: { operationId: 'operation-1', blobUrl: 'https://extension.test/not-a-blob' },
       }),
     /Mensagem inválida/,
   );
@@ -132,6 +132,12 @@ test('accepts internal acknowledged HLS operation messages', () => {
   assert.equal(assertOffscreenMessage(start), start);
   assert.equal(assertBackgroundMessage(completed), completed);
   assert.equal(assertBackgroundMessage(failed), failed);
+  const released = {
+    target: 'background',
+    action: ACTIONS.HLS_RELEASED,
+    payload: { operationId: 'operation-1', blobUrl: 'blob:extension.test/operation-1' },
+  };
+  assert.equal(assertBackgroundMessage(released), released);
 });
 
 test('rejects malformed or metadata-bearing HLS completions', () => {

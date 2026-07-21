@@ -11,24 +11,23 @@ export function createOffscreenBridge({
     setTimeout(resolve, Math.min(250 * (2 ** attempt), 5_000));
   }),
 } = {}) {
-  const ownedBlobUrls = new Set();
   const operations = new Map();
 
-  async function deliverCompletion(message, operationId) {
+  async function deliverUntilAcknowledged(message, operationId) {
     let attempt = 0;
     while (operations.has(operationId)) {
       try {
         const response = await sendCompletion(message);
         if (response?.ok === true && response.value?.acknowledged === true) return;
       } catch {
-        // A suspended worker or dropped response is retried below.
+        // The offscreen document remains alive and retries after worker suspension.
       }
       await scheduleRetry(attempt);
       attempt += 1;
     }
   }
 
-  async function runOperation(payload) {
+  async function runAssembly(payload) {
     const { operationId, url, allowedOrigins } = payload;
     let completion;
     let blobUrl;
@@ -37,13 +36,17 @@ export function createOffscreenBridge({
       if (!(result?.blob instanceof Blob) || !Number.isSafeInteger(result.size) || result.size < 0) {
         throw new Error('Resultado HLS inválido');
       }
-
       blobUrl = createObjectURL(result.blob);
       if (typeof blobUrl !== 'string' || !/^blob:\S+$/.test(blobUrl)) {
         throw new Error('URL de blob inválida');
       }
-      ownedBlobUrls.add(blobUrl);
-      operations.get(operationId).blobUrl = blobUrl;
+      const operation = operations.get(operationId);
+      if (!operation) {
+        revokeObjectURL(blobUrl);
+        return;
+      }
+      operation.blobUrl = blobUrl;
+      operation.state = 'assembled';
       completion = {
         target: 'background',
         action: ACTIONS.HLS_COMPLETED,
@@ -57,57 +60,56 @@ export function createOffscreenBridge({
       };
     }
 
-    await deliverCompletion(completion, operationId);
+    await deliverUntilAcknowledged(completion, operationId);
     if (!blobUrl) operations.delete(operationId);
+  }
+
+  async function runRelease(operationId, operation) {
+    let attempt = 0;
+    while (operations.get(operationId) === operation && !operation.revoked) {
+      try {
+        revokeObjectURL(operation.blobUrl);
+        operation.revoked = true;
+      } catch {
+        await scheduleRetry(attempt);
+        attempt += 1;
+      }
+    }
+    if (!operation.revoked || operations.get(operationId) !== operation) return;
+
+    await deliverUntilAcknowledged({
+      target: 'background',
+      action: ACTIONS.HLS_RELEASED,
+      payload: { operationId, blobUrl: operation.blobUrl },
+    }, operationId);
+    if (operations.get(operationId) === operation) operations.delete(operationId);
   }
 
   return {
     async handle(raw) {
       const message = assertOffscreenMessage(raw);
-
-      if (message.action === ACTIONS.INSPECT_HLS) {
-        return inspect(message.payload.url);
-      }
+      if (message.action === ACTIONS.INSPECT_HLS) return inspect(message.payload.url);
 
       if (message.action === ACTIONS.START_HLS) {
         const { operationId } = message.payload;
         if (!operations.has(operationId)) {
-          const operation = { blobUrl: undefined, promise: undefined };
+          const operation = { state: 'assembling', blobUrl: undefined, revoked: false, promise: undefined };
           operations.set(operationId, operation);
-          operation.promise = runOperation(message.payload).catch(() => {
-            // Completion delivery owns its retry policy and must not reject globally.
-          });
+          operation.promise = runAssembly(message.payload).catch(() => {});
         }
         return { operationId, state: 'assembling' };
       }
 
-      if (message.action === ACTIONS.DOWNLOAD_HLS) {
-        const result = await assemble(message.payload.url, {
-          allowedOrigins: message.payload.allowedOrigins,
-        });
-        if (!(result?.blob instanceof Blob) || !Number.isSafeInteger(result.size) || result.size < 0) {
-          throw new Error('Resultado HLS inválido');
-        }
-
-        const blobUrl = createObjectURL(result.blob);
-        if (typeof blobUrl !== 'string' || !/^blob:\S+$/.test(blobUrl)) {
-          throw new Error('URL de blob inválida');
-        }
-        ownedBlobUrls.add(blobUrl);
-        return { blobUrl, size: result.size };
+      const { operationId, blobUrl } = message.payload;
+      const operation = operations.get(operationId);
+      if (!operation || operation.blobUrl !== blobUrl) {
+        throw new Error('O blob informado não pertence à operação HLS.');
       }
-
-      const { blobUrl, operationId } = message.payload;
-      if (!ownedBlobUrls.has(blobUrl)) return { released: false };
-      revokeObjectURL(blobUrl);
-      ownedBlobUrls.delete(blobUrl);
-      if (operationId) operations.delete(operationId);
-      else {
-        for (const [id, operation] of operations) {
-          if (operation.blobUrl === blobUrl) operations.delete(id);
-        }
+      if (operation.state !== 'releasing') {
+        operation.state = 'releasing';
+        operation.promise = runRelease(operationId, operation).catch(() => {});
       }
-      return { released: true };
+      return { operationId, state: 'releasing' };
     },
   };
 }

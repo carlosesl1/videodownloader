@@ -4,6 +4,7 @@ export const ACTIONS = Object.freeze({
   DOWNLOAD_HLS: 'DOWNLOAD_HLS',
   START_HLS: 'START_HLS',
   HLS_COMPLETED: 'HLS_COMPLETED',
+  HLS_RELEASED: 'HLS_RELEASED',
   RELEASE_BLOB: 'RELEASE_BLOB',
 });
 
@@ -12,10 +13,10 @@ const BACKGROUND_ACTIONS = new Set([
   ACTIONS.INSPECT_HLS,
   ACTIONS.DOWNLOAD_HLS,
   ACTIONS.HLS_COMPLETED,
+  ACTIONS.HLS_RELEASED,
 ]);
 const OFFSCREEN_ACTIONS = new Set([
   ACTIONS.INSPECT_HLS,
-  ACTIONS.DOWNLOAD_HLS,
   ACTIONS.START_HLS,
   ACTIONS.RELEASE_BLOB,
 ]);
@@ -23,6 +24,7 @@ const OFFSCREEN_ACTIONS = new Set([
 export function assertBackgroundMessage(message) {
   assertMessageShape(message, 'background', BACKGROUND_ACTIONS);
   if (message.action === ACTIONS.HLS_COMPLETED) assertHlsCompletion(message.payload);
+  else if (message.action === ACTIONS.HLS_RELEASED) assertHlsReleased(message.payload);
   else assertPayloadForAction(message.action, message.payload);
   return message;
 }
@@ -35,8 +37,8 @@ export function assertOffscreenMessage(message) {
       !isObject(message.payload)
       || typeof message.payload.blobUrl !== 'string'
       || !message.payload.blobUrl.startsWith('blob:')
-      || (Object.hasOwn(message.payload, 'operationId') && !isOperationId(message.payload.operationId))
-      || !hasNoOtherKeys(message.payload, ['blobUrl', 'operationId'])
+      || !isOperationId(message.payload.operationId)
+      || !hasOnlyKeys(message.payload, ['blobUrl', 'operationId'])
     ) {
       throw new Error('Mensagem inválida');
     }
@@ -47,6 +49,16 @@ export function assertOffscreenMessage(message) {
   }
 
   return message;
+}
+
+function assertHlsReleased(payload) {
+  if (
+    !isObject(payload)
+    || !isOperationId(payload.operationId)
+    || typeof payload.blobUrl !== 'string'
+    || !/^blob:\S+$/.test(payload.blobUrl)
+    || !hasOnlyKeys(payload, ['operationId', 'blobUrl'])
+  ) throw new Error('Mensagem inválida');
 }
 
 function assertStartHls(payload) {
@@ -116,9 +128,6 @@ function hasOnlyKeys(value, allowed) {
   return keys.length === allowed.length && keys.every((key) => allowed.includes(key));
 }
 
-function hasNoOtherKeys(value, allowed) {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
 
 function assertMessageShape(message, target, actions) {
   if (!isObject(message) || message.target !== target || !actions.has(message.action)) {
