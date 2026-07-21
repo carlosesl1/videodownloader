@@ -16,13 +16,15 @@ function parseAttributes(value) {
   let index = 0;
 
   while (index < value.length) {
-    while (value[index] === ',' || /\s/.test(value[index] || '')) index += 1;
-    if (index >= value.length) break;
+    if (value[index] === ',' || /\s/.test(value[index] || '')) {
+      throw invalid('Whitespace or trailing separator in HLS attribute list');
+    }
 
     const nameStart = index;
     while (/[A-Z0-9-]/i.test(value[index] || '')) index += 1;
     const name = value.slice(nameStart, index);
     if (!name || value[index] !== '=') throw invalid('Invalid HLS attribute list');
+    if (name !== name.toUpperCase()) throw invalid('HLS attribute names must be uppercase');
     index += 1;
 
     let attributeValue = '';
@@ -35,8 +37,11 @@ function parseAttributes(value) {
       index += 1;
     } else {
       const valueStart = index;
-      while (index < value.length && value[index] !== ',') index += 1;
-      attributeValue = value.slice(valueStart, index).trim();
+      while (index < value.length && value[index] !== ',') {
+        if (/\s/.test(value[index])) throw invalid('Whitespace in unquoted HLS attribute');
+        index += 1;
+      }
+      attributeValue = value.slice(valueStart, index);
     }
 
     if (!attributeValue) throw invalid('Empty HLS attribute');
@@ -46,7 +51,12 @@ function parseAttributes(value) {
     }
     attributes[normalizedName] = attributeValue;
     if (index < value.length && value[index] !== ',') throw invalid('Invalid HLS attribute separator');
-    if (value[index] === ',') index += 1;
+    if (value[index] === ',') {
+      index += 1;
+      if (index >= value.length || value[index] === ',' || /\s/.test(value[index] || '')) {
+        throw invalid('Whitespace or trailing separator in HLS attribute list');
+      }
+    }
   }
 
   return attributes;
@@ -66,12 +76,12 @@ function resolveUri(uri, playlistUrl) {
 }
 
 function parseStreamVariant(attributes, uri, playlistUrl) {
-  if (!/^[1-9]\d*$/.test(attributes.BANDWIDTH || '')) {
+  if (!/^\d+$/.test(attributes.BANDWIDTH || '')) {
     throw invalid('Malformed EXT-X-STREAM-INF bandwidth');
   }
   const bandwidth = Number(attributes.BANDWIDTH);
   const resolution = /^([1-9]\d*)x([1-9]\d*)$/i.exec(attributes.RESOLUTION || '');
-  if (!Number.isSafeInteger(bandwidth) || !resolution) {
+  if (!Number.isSafeInteger(bandwidth) || bandwidth < 1 || !resolution) {
     throw invalid('Malformed EXT-X-STREAM-INF');
   }
 
@@ -113,6 +123,11 @@ function rejectUnsupportedTags(lines) {
     }
     if (line.startsWith('#EXT-X-KEY:')) {
       const attributes = parseAttributes(tagValue(line, '#EXT-X-KEY:'));
+      if (attributes.METHOD?.toUpperCase() === 'NONE' && (
+        attributes.URI || attributes.IV || attributes.KEYFORMAT
+      )) {
+        throw invalid('METHOD=NONE must not include key material attributes');
+      }
       if (attributes.METHOD?.toUpperCase() !== 'NONE') {
         throw new HlsError('HLS_ENCRYPTED', 'Encrypted HLS playlists are not supported');
       }
@@ -120,8 +135,17 @@ function rejectUnsupportedTags(lines) {
   }
 }
 
+function assertNoUnpairedUris(lines, consumedUriIndices) {
+  for (let index = 1; index < lines.length; index += 1) {
+    if (!lines[index].startsWith('#') && !consumedUriIndices.has(index)) {
+      throw invalid('Unpaired HLS URI');
+    }
+  }
+}
+
 function parseMaster(lines, playlistUrl) {
   const variants = [];
+  const consumedUriIndices = new Set();
 
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index];
@@ -131,10 +155,12 @@ function parseMaster(lines, playlistUrl) {
     if (!uri || uri.startsWith('#')) throw invalid('Missing URI after EXT-X-STREAM-INF');
     const attributes = parseAttributes(tagValue(line, '#EXT-X-STREAM-INF:'));
     variants.push(parseStreamVariant(attributes, uri, playlistUrl));
+    consumedUriIndices.add(index + 1);
     index += 1;
   }
 
   if (variants.length === 0) throw invalid('Master playlist has no variants');
+  assertNoUnpairedUris(lines, consumedUriIndices);
   variants.sort((left, right) => (
     right.height - left.height || right.width - left.width || right.bandwidth - left.bandwidth
   ));
@@ -143,6 +169,7 @@ function parseMaster(lines, playlistUrl) {
 
 function parseMedia(lines, playlistUrl) {
   const segments = [];
+  const consumedUriIndices = new Set();
   let hasEndList = false;
 
   for (let index = 1; index < lines.length; index += 1) {
@@ -164,6 +191,7 @@ function parseMedia(lines, playlistUrl) {
       }
     }
     if (!uri) throw invalid('Missing URI after EXTINF');
+    consumedUriIndices.add(index);
     const url = resolveUri(uri, playlistUrl);
     const pathname = new URL(url).pathname;
     if (/\.[^/.]+$/.test(pathname) && !/\.ts$/i.test(pathname)) {
@@ -174,7 +202,27 @@ function parseMedia(lines, playlistUrl) {
 
   if (!hasEndList) throw new HlsError('HLS_LIVE', 'Live HLS playlists are not supported');
   if (segments.length === 0) throw new HlsError('HLS_EMPTY', 'HLS playlist contains no segments');
+  assertNoUnpairedUris(lines, consumedUriIndices);
   return { kind: 'media', segments };
+}
+
+function isMediaOnlyTag(line) {
+  return [
+    '#EXTINF:',
+    '#EXT-X-TARGETDURATION:',
+    '#EXT-X-MEDIA-SEQUENCE:',
+    '#EXT-X-DISCONTINUITY-SEQUENCE:',
+    '#EXT-X-PLAYLIST-TYPE:',
+    '#EXT-X-BYTERANGE:',
+    '#EXT-X-KEY:',
+    '#EXT-X-MAP:',
+    '#EXT-X-PROGRAM-DATE-TIME:',
+    '#EXT-X-DATERANGE:',
+  ].some((prefix) => line.startsWith(prefix)) || [
+    '#EXT-X-ENDLIST',
+    '#EXT-X-I-FRAMES-ONLY',
+    '#EXT-X-DISCONTINUITY',
+  ].includes(line);
 }
 
 export function parseHlsPlaylist(text, playlistUrl) {
@@ -191,10 +239,11 @@ export function parseHlsPlaylist(text, playlistUrl) {
     throw invalid('Invalid playlist URL');
   }
 
-  rejectUnsupportedTags(lines);
   const hasMasterVariants = lines.some((line) => line.startsWith('#EXT-X-STREAM-INF:'));
-  const hasMediaSegments = lines.some((line) => line.startsWith('#EXTINF:'));
-  if (hasMasterVariants && hasMediaSegments) throw invalid('Mixed master and media playlist');
+  if (hasMasterVariants && lines.some(isMediaOnlyTag)) {
+    throw invalid('Mixed master and media playlist');
+  }
+  rejectUnsupportedTags(lines);
   return hasMasterVariants
     ? parseMaster(lines, playlistUrl)
     : parseMedia(lines, playlistUrl);

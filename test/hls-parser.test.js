@@ -61,6 +61,28 @@ test('accepts an explicitly unencrypted media playlist', () => {
   assert.equal(result.segments.length, 1);
 });
 
+test('rejects METHOD=NONE when key material attributes are present', () => {
+  for (const attribute of ['URI="key.bin"', 'IV=0x1234', 'KEYFORMAT="identity"']) {
+    assert.throws(
+      () => parseHlsPlaylist(
+        `#EXTM3U\n#EXT-X-KEY:METHOD=NONE,${attribute}\n#EXT-X-ENDLIST`,
+        'https://cdn.test/playlist.m3u8',
+      ),
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  }
+});
+
+test('accepts a positive bandwidth with leading zeros', () => {
+  const result = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXT-X-STREAM-INF:BANDWIDTH=0001800,RESOLUTION=1280x720',
+    'variant.m3u8',
+  ].join('\n'), 'https://cdn.test/master.m3u8');
+
+  assert.equal(result.variants[0].bandwidth, 1800);
+});
+
 for (const [name, playlist, expectedCode] of [
   ['encrypted AES-128', '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.key"\n#EXT-X-ENDLIST', 'HLS_ENCRYPTED'],
   ['fMP4 initialization map', '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXT-X-ENDLIST', 'HLS_FMP4'],
@@ -91,6 +113,21 @@ test('rejects duplicate attributes before encryption can be hidden', () => {
   );
 });
 
+for (const attributes of [
+  'bandwidth=1000,RESOLUTION=640x360',
+  'BANDWIDTH=1000, RESOLUTION=640x360',
+]) {
+  test(`rejects non-canonical HLS attributes: ${attributes}`, () => {
+    assert.throws(
+      () => parseHlsPlaylist(
+        `#EXTM3U\n#EXT-X-STREAM-INF:${attributes}\nvariant.m3u8`,
+        'https://cdn.test/playlist.m3u8',
+      ),
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  });
+}
+
 test('rejects mixed master and media playlists', () => {
   assert.throws(
     () => parseHlsPlaylist([
@@ -99,6 +136,33 @@ test('rejects mixed master and media playlists', () => {
       'variant.m3u8',
       '#EXTINF:4.0,',
       'segment.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n'), 'https://cdn.test/playlist.m3u8'),
+    (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+  );
+});
+
+for (const mediaOnlyTag of ['#EXT-X-ENDLIST', '#EXT-X-TARGETDURATION:6']) {
+  test(`rejects a master playlist containing ${mediaOnlyTag}`, () => {
+    assert.throws(
+      () => parseHlsPlaylist([
+        '#EXTM3U',
+        '#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360',
+        'variant.m3u8',
+        mediaOnlyTag,
+      ].join('\n'), 'https://cdn.test/playlist.m3u8'),
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  });
+}
+
+test('rejects an unpaired URI after a valid media segment', () => {
+  assert.throws(
+    () => parseHlsPlaylist([
+      '#EXTM3U',
+      '#EXTINF:4.0,',
+      'segment.ts',
+      'unexpected.ts',
       '#EXT-X-ENDLIST',
     ].join('\n'), 'https://cdn.test/playlist.m3u8'),
     (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
