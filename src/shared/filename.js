@@ -44,7 +44,8 @@ function getUrlLeaf(value) {
 
 function removeExtension(filename) {
   const dotIndex = filename.lastIndexOf('.');
-  return dotIndex > 0 ? filename.slice(0, dotIndex) : '';
+  if (dotIndex === 0) return '';
+  return dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
 }
 
 function getDirectExtension(filename) {

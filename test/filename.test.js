@@ -15,6 +15,10 @@ test('builds filenames for direct and HLS media', () => {
     'aula.mp4',
   );
   assert.equal(
+    buildDownloadFilename({ url: 'https://cdn.test/aula', kind: 'direct' }),
+    'aula.mp4',
+  );
+  assert.equal(
     buildDownloadFilename({
       url: 'https://cdn.test/master.m3u8',
       kind: 'hls',
