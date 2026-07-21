@@ -53,7 +53,7 @@ function assertPayloadForAction(action, payload) {
 
   if (action === ACTIONS.INSPECT_HLS) {
     assertMediaUrl(payload.url);
-    if (!Array.isArray(payload.permissionPatterns)) throw new Error('Mensagem inválida');
+    if (!isNonEmptyStringArray(payload.permissionPatterns)) throw new Error('Mensagem inválida');
     return;
   }
 
@@ -62,8 +62,8 @@ function assertPayloadForAction(action, payload) {
     if (
       typeof payload.filename !== 'string' ||
       !payload.filename ||
-      !Array.isArray(payload.allowedOrigins) ||
-      !Array.isArray(payload.permissionPatterns)
+      !isNonEmptyStringArray(payload.allowedOrigins) ||
+      !isNonEmptyStringArray(payload.permissionPatterns)
     ) {
       throw new Error('Mensagem inválida');
     }
@@ -71,6 +71,8 @@ function assertPayloadForAction(action, payload) {
 }
 
 function assertMediaUrl(value) {
+  if (typeof value !== 'string') throw new Error('URL inválida');
+
   try {
     const { protocol } = new URL(value);
     if (protocol === 'http:' || protocol === 'https:') return;
@@ -83,4 +85,8 @@ function assertMediaUrl(value) {
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isNonEmptyStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0);
 }

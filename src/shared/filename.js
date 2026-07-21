@@ -12,7 +12,7 @@ export function buildDownloadFilename({ url, kind, pageTitle } = {}) {
   const sourceName =
     sanitizeFilenamePart(removeExtension(leaf)) ||
     sanitizeFilenamePart(pageTitle) ||
-    `video-${Date.now()}`;
+    `video-${formatTimestamp()}`;
 
   return `${sourceName}${extension}`;
 }
@@ -26,7 +26,7 @@ function sanitizeFilenamePart(value) {
 
   if (!filename) return '';
 
-  const dotIndex = filename.lastIndexOf('.');
+  const dotIndex = filename.indexOf('.');
   const baseName = dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
 
   return RESERVED_WINDOWS_BASENAME.test(baseName) ? `video-${filename}` : filename;
@@ -44,11 +44,17 @@ function getUrlLeaf(value) {
 
 function removeExtension(filename) {
   const dotIndex = filename.lastIndexOf('.');
-  return dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
+  return dotIndex > 0 ? filename.slice(0, dotIndex) : '';
 }
 
 function getDirectExtension(filename) {
   const dotIndex = filename.lastIndexOf('.');
   const extension = dotIndex > 0 ? filename.slice(dotIndex).toLowerCase() : '';
   return DIRECT_EXTENSIONS.has(extension) ? extension : '.mp4';
+}
+
+function formatTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join('-') +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
