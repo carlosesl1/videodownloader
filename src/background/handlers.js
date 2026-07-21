@@ -238,6 +238,25 @@ export function createBackgroundHandlers({
     if (removable.length > 0) await permissions.remove({ origins: removable });
   }
 
+  async function armInspectionCleanup(leaseId) {
+    const value = await sendAndUnwrap(sendOffscreen, {
+      target: 'offscreen',
+      action: ACTIONS.ARM_INSPECTION_CLEANUP,
+      payload: { leaseId },
+    });
+    if (
+      !isObject(value)
+      || value.leaseId !== leaseId
+      || value.state !== 'armed'
+      || Object.keys(value).some((key) => key !== 'leaseId' && key !== 'state')
+    ) throw malformedOffscreenResponse();
+  }
+
+  async function cleanupInspectionLease(lease) {
+    await removeUnusedPermissions(lease.permissionPatterns ?? []);
+    await storageSession.remove(inspectionKey(lease.inspectionId));
+  }
+
   async function inspectHls(message) {
     const patterns = normalizePatterns(message.payload.permissionPatterns);
     const inspectionId = createInspectionId();
@@ -274,8 +293,8 @@ export function createBackgroundHandlers({
         await storageSession.set({
           [key]: { inspectionId, permissionPatterns: patterns, state: 'releasing' },
         });
-        await removeUnusedPermissions(patterns);
-        await storageSession.remove(key);
+        await armInspectionCleanup(inspectionId);
+        await cleanupInspectionLease({ inspectionId, permissionPatterns: patterns, state: 'releasing' });
       });
     } catch (cleanupError) {
       if (!operationError) operationError = cleanupError;
@@ -553,13 +572,24 @@ export function createBackgroundHandlers({
     });
   }
 
+  async function inspectionCleanup(message) {
+    return serialized(async () => {
+      const key = inspectionKey(message.payload.leaseId);
+      const result = await storageSession.get(key);
+      const lease = safelyRead(result, key);
+      if (!isObject(lease) || lease.state !== 'releasing') return { acknowledged: true };
+      await cleanupInspectionLease(lease);
+      return { acknowledged: true };
+    });
+  }
+
   async function reconcileLocked() {
     for (const lease of await allInspectionLeases()) {
       const key = inspectionKey(lease.inspectionId);
       const releasing = { ...lease, state: 'releasing' };
       await storageSession.set({ [key]: releasing });
-      await removeUnusedPermissions(releasing.permissionPatterns ?? []);
-      await storageSession.remove(key);
+      await armInspectionCleanup(releasing.inspectionId);
+      await cleanupInspectionLease(releasing);
     }
     const records = await allRecords();
     for (let record of records) {
@@ -594,7 +624,8 @@ export function createBackgroundHandlers({
       if (message.action === ACTIONS.INSPECT_HLS) return inspectHls(message);
       if (message.action === ACTIONS.DOWNLOAD_HLS) return startHls(message);
       if (message.action === ACTIONS.HLS_COMPLETED) return completeHls(message);
-      return releasedHls(message);
+      if (message.action === ACTIONS.HLS_RELEASED) return releasedHls(message);
+      return inspectionCleanup(message);
     },
   };
 }

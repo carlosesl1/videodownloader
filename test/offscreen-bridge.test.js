@@ -164,6 +164,39 @@ test('offscreen retries revocation and HLS_RELEASED delivery without worker time
   assert.equal(retries, 2);
 });
 
+test('offscreen arms one inspection cleanup wake and retries until background ack', async () => {
+  let deliveries = 0;
+  let retries = 0;
+  const delivered = deferred();
+  const bridge = createOffscreenBridge({
+    scheduleRetry: async () => { retries += 1; },
+    sendCompletion: async (message) => {
+      assert.deepEqual(message, {
+        target: 'background',
+        action: ACTIONS.INSPECTION_CLEANUP,
+        payload: { leaseId: 'inspection-1' },
+      });
+      deliveries += 1;
+      if (deliveries === 1) throw new Error('worker suspenso');
+      delivered.resolve();
+      return { ok: true, value: { acknowledged: true } };
+    },
+  });
+  const arm = {
+    target: 'offscreen',
+    action: ACTIONS.ARM_INSPECTION_CLEANUP,
+    payload: { leaseId: 'inspection-1' },
+  };
+
+  assert.deepEqual(await Promise.all([bridge.handle(arm), bridge.handle(arm)]), [
+    { leaseId: 'inspection-1', state: 'armed' },
+    { leaseId: 'inspection-1', state: 'armed' },
+  ]);
+  await delivered.promise;
+  assert.equal(deliveries, 2);
+  assert.equal(retries, 1);
+});
+
 test('offscreen listener keeps bounded safe response envelopes', async () => {
   const originalChrome = globalThis.chrome;
   let listener;

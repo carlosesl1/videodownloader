@@ -138,6 +138,18 @@ test('accepts internal acknowledged HLS operation messages', () => {
     payload: { operationId: 'operation-1', blobUrl: 'blob:extension.test/operation-1' },
   };
   assert.equal(assertBackgroundMessage(released), released);
+  const armInspectionCleanup = {
+    target: 'offscreen',
+    action: ACTIONS.ARM_INSPECTION_CLEANUP,
+    payload: { leaseId: 'inspection-1' },
+  };
+  const inspectionCleanup = {
+    target: 'background',
+    action: ACTIONS.INSPECTION_CLEANUP,
+    payload: { leaseId: 'inspection-1' },
+  };
+  assert.equal(assertOffscreenMessage(armInspectionCleanup), armInspectionCleanup);
+  assert.equal(assertBackgroundMessage(inspectionCleanup), inspectionCleanup);
 });
 
 test('rejects malformed or metadata-bearing HLS completions', () => {
@@ -160,4 +172,17 @@ test('rejects malformed or metadata-bearing HLS completions', () => {
   ]) {
     assert.throws(() => assertBackgroundMessage({ ...valid, payload }), /Mensagem inválida/);
   }
+});
+
+test('rejects metadata-bearing inspection cleanup messages', () => {
+  assert.throws(() => assertOffscreenMessage({
+    target: 'offscreen',
+    action: ACTIONS.ARM_INSPECTION_CLEANUP,
+    payload: { leaseId: 'inspection-1', permissionPatterns: ['https://untrusted.test/*'] },
+  }), /Mensagem inválida/);
+  assert.throws(() => assertBackgroundMessage({
+    target: 'background',
+    action: ACTIONS.INSPECTION_CLEANUP,
+    payload: { leaseId: '', permissionPatterns: [] },
+  }), /Mensagem inválida/);
 });

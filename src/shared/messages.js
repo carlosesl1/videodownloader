@@ -5,6 +5,8 @@ export const ACTIONS = Object.freeze({
   START_HLS: 'START_HLS',
   HLS_COMPLETED: 'HLS_COMPLETED',
   HLS_RELEASED: 'HLS_RELEASED',
+  ARM_INSPECTION_CLEANUP: 'ARM_INSPECTION_CLEANUP',
+  INSPECTION_CLEANUP: 'INSPECTION_CLEANUP',
   RELEASE_BLOB: 'RELEASE_BLOB',
 });
 
@@ -14,10 +16,12 @@ const BACKGROUND_ACTIONS = new Set([
   ACTIONS.DOWNLOAD_HLS,
   ACTIONS.HLS_COMPLETED,
   ACTIONS.HLS_RELEASED,
+  ACTIONS.INSPECTION_CLEANUP,
 ]);
 const OFFSCREEN_ACTIONS = new Set([
   ACTIONS.INSPECT_HLS,
   ACTIONS.START_HLS,
+  ACTIONS.ARM_INSPECTION_CLEANUP,
   ACTIONS.RELEASE_BLOB,
 ]);
 
@@ -25,6 +29,7 @@ export function assertBackgroundMessage(message) {
   assertMessageShape(message, 'background', BACKGROUND_ACTIONS);
   if (message.action === ACTIONS.HLS_COMPLETED) assertHlsCompletion(message.payload);
   else if (message.action === ACTIONS.HLS_RELEASED) assertHlsReleased(message.payload);
+  else if (message.action === ACTIONS.INSPECTION_CLEANUP) assertInspectionCleanup(message.payload);
   else assertPayloadForAction(message.action, message.payload);
   return message;
 }
@@ -44,11 +49,21 @@ export function assertOffscreenMessage(message) {
     }
   } else if (message.action === ACTIONS.START_HLS) {
     assertStartHls(message.payload);
+  } else if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+    assertInspectionCleanup(message.payload);
   } else {
     assertPayloadForAction(message.action, message.payload);
   }
 
   return message;
+}
+
+function assertInspectionCleanup(payload) {
+  if (
+    !isObject(payload)
+    || !isOperationId(payload.leaseId)
+    || !hasOnlyKeys(payload, ['leaseId'])
+  ) throw new Error('Mensagem inválida');
 }
 
 function assertHlsReleased(payload) {

@@ -406,6 +406,9 @@ test('worker recreation removes stale persisted inspection leases without touchi
   env.dependencies.sendOffscreen = async (message) => {
     env.sent.push(message);
     if (message.action === ACTIONS.INSPECT_HLS) return inspection.promise;
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
     return { ok: true, value: { operationId: message.payload.operationId, state: 'assembling' } };
   };
   const first = createBackgroundHandlers(env.dependencies);
@@ -418,6 +421,74 @@ test('worker recreation removes stale persisted inspection leases without touchi
   await recreated.ready;
   assert.equal(Object.keys(env.session.values).some((key) => key.startsWith('hlsInspection:')), false);
   assert.deepEqual(env.removed, []);
+});
+
+test('offscreen cleanup wake recovers a failed inspection permission removal after worker recreation', async () => {
+  const session = memorySession();
+  const permissionCalls = [];
+  let removalAttempts = 0;
+  let cleanupWake;
+  const sendOffscreen = async (message) => {
+    if (message.action === ACTIONS.START_HLS) {
+      return { ok: true, value: { operationId: message.payload.operationId, state: 'assembling' } };
+    }
+    if (message.action === ACTIONS.INSPECT_HLS) {
+      return { ok: true, value: {
+        kind: 'media',
+        variants: [{
+          url: 'https://inspect.test/video.m3u8', label: 'Qualidade única',
+          width: 0, height: 0, bandwidth: 0, codecs: '',
+        }],
+      } };
+    }
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      cleanupWake = {
+        target: 'background',
+        action: ACTIONS.INSPECTION_CLEANUP,
+        payload: { leaseId: message.payload.leaseId },
+      };
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
+    throw new Error(`unexpected ${message.action}`);
+  };
+  const dependencies = {
+    storageSession: session,
+    downloads: { async search() { return []; }, async download() { return 1; } },
+    createOperationId: () => 'active-operation',
+    createInspectionId: () => 'inspection-retry',
+    sendOffscreen,
+    permissions: {
+      async contains() { return true; },
+      async remove(options) {
+        permissionCalls.push(options);
+        removalAttempts += 1;
+        if (removalAttempts === 1) throw new Error('falha transitória');
+        return true;
+      },
+    },
+  };
+  const first = createBackgroundHandlers(dependencies);
+  await first.handle({
+    ...downloadMessage('https://video.test/live.m3u8'),
+    payload: {
+      ...downloadMessage('https://video.test/live.m3u8').payload,
+      allowedOrigins: ['https://video.test'],
+      permissionPatterns: ['https://video.test/*'],
+    },
+  });
+  await assert.rejects(first.handle(inspectMessage(['https://inspect.test/*'])), /transitória/);
+  assert.equal(session.values['hlsInspection:inspection-retry'].state, 'releasing');
+  assert.ok(cleanupWake);
+
+  const recreated = createBackgroundHandlers(dependencies);
+  await recreated.ready;
+  assert.equal(Object.hasOwn(session.values, 'hlsInspection:inspection-retry'), false);
+  assert.deepEqual(permissionCalls, [
+    { origins: ['https://inspect.test/*'] },
+    { origins: ['https://inspect.test/*'] },
+  ]);
+  assert.equal(permissionCalls.some(({ origins }) => origins.includes('https://video.test/*')), false);
+  assert.deepEqual(await recreated.handle(cleanupWake), { acknowledged: true });
 });
 
 test('permission removal serialized ahead of a new start makes it fail before START_HLS', async () => {
@@ -444,16 +515,21 @@ test('permission removal serialized ahead of a new start makes it fail before ST
 
 test('inspection validates the complete result before returning and releases permissions', async () => {
   const env = defaultDependencies();
-  env.dependencies.sendOffscreen = async () => ({
-    ok: true,
-    value: {
-      kind: 'master',
-      variants: [{
-        url: 'javascript:alert(1)', label: '1080p', width: 1920, height: 1080,
-        bandwidth: 5_000_000, codecs: 'avc1',
-      }],
-    },
-  });
+  env.dependencies.sendOffscreen = async (message) => {
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
+    return {
+      ok: true,
+      value: {
+        kind: 'master',
+        variants: [{
+          url: 'javascript:alert(1)', label: '1080p', width: 1920, height: 1080,
+          bandwidth: 5_000_000, codecs: 'avc1',
+        }],
+      },
+    };
+  };
   const handlers = createBackgroundHandlers(env.dependencies);
 
   await assert.rejects(handlers.handle(inspectMessage()), (error) => (
@@ -471,7 +547,11 @@ test('inspection accepts a parser variant whose optional codecs metadata is null
       bandwidth: 5_000_000, codecs: null,
     }],
   };
-  env.dependencies.sendOffscreen = async () => ({ ok: true, value });
+  env.dependencies.sendOffscreen = async (message) => (
+    message.action === ACTIONS.ARM_INSPECTION_CLEANUP
+      ? { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } }
+      : { ok: true, value }
+  );
   const handlers = createBackgroundHandlers(env.dependencies);
 
   assert.deepEqual(await handlers.handle(inspectMessage()), value);

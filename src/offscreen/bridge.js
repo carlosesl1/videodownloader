@@ -12,6 +12,7 @@ export function createOffscreenBridge({
   }),
 } = {}) {
   const operations = new Map();
+  const inspectionCleanups = new Map();
 
   async function deliverUntilAcknowledged(message, operationId) {
     let attempt = 0;
@@ -85,6 +86,27 @@ export function createOffscreenBridge({
     if (operations.get(operationId) === operation) operations.delete(operationId);
   }
 
+  async function runInspectionCleanup(leaseId, cleanup) {
+    let attempt = 0;
+    while (inspectionCleanups.get(leaseId) === cleanup) {
+      try {
+        const response = await sendCompletion({
+          target: 'background',
+          action: ACTIONS.INSPECTION_CLEANUP,
+          payload: { leaseId },
+        });
+        if (response?.ok === true && response.value?.acknowledged === true) {
+          inspectionCleanups.delete(leaseId);
+          return;
+        }
+      } catch {
+        // Retried by the persistent offscreen document below.
+      }
+      await scheduleRetry(attempt);
+      attempt += 1;
+    }
+  }
+
   return {
     async handle(raw) {
       const message = assertOffscreenMessage(raw);
@@ -98,6 +120,16 @@ export function createOffscreenBridge({
           operation.promise = runAssembly(message.payload).catch(() => {});
         }
         return { operationId, state: 'assembling' };
+      }
+
+      if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+        const { leaseId } = message.payload;
+        if (!inspectionCleanups.has(leaseId)) {
+          const cleanup = { promise: undefined };
+          inspectionCleanups.set(leaseId, cleanup);
+          cleanup.promise = runInspectionCleanup(leaseId, cleanup).catch(() => {});
+        }
+        return { leaseId, state: 'armed' };
       }
 
       const { operationId, blobUrl } = message.payload;
