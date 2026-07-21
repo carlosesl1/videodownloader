@@ -1,6 +1,6 @@
 export class HlsError extends Error {
-  constructor(code, details) {
-    super(code);
+  constructor(code, message, details = {}) {
+    super(message);
     this.name = 'HlsError';
     this.code = code;
     this.details = details;
@@ -8,7 +8,7 @@ export class HlsError extends Error {
 }
 
 function invalid(details) {
-  return new HlsError('HLS_INVALID', details);
+  return new HlsError('HLS_INVALID', 'Invalid HLS playlist', { reason: details });
 }
 
 function parseAttributes(value) {
@@ -40,7 +40,11 @@ function parseAttributes(value) {
     }
 
     if (!attributeValue) throw invalid('Empty HLS attribute');
-    attributes[name.toUpperCase()] = attributeValue;
+    const normalizedName = name.toUpperCase();
+    if (Object.hasOwn(attributes, normalizedName)) {
+      throw invalid(`Duplicate HLS attribute: ${normalizedName}`);
+    }
+    attributes[normalizedName] = attributeValue;
     if (index < value.length && value[index] !== ',') throw invalid('Invalid HLS attribute separator');
     if (value[index] === ',') index += 1;
   }
@@ -62,9 +66,12 @@ function resolveUri(uri, playlistUrl) {
 }
 
 function parseStreamVariant(attributes, uri, playlistUrl) {
+  if (!/^[1-9]\d*$/.test(attributes.BANDWIDTH || '')) {
+    throw invalid('Malformed EXT-X-STREAM-INF bandwidth');
+  }
   const bandwidth = Number(attributes.BANDWIDTH);
-  const resolution = /^([0-9]+)x([0-9]+)$/i.exec(attributes.RESOLUTION || '');
-  if (!Number.isFinite(bandwidth) || bandwidth < 0 || !resolution) {
+  const resolution = /^([1-9]\d*)x([1-9]\d*)$/i.exec(attributes.RESOLUTION || '');
+  if (!Number.isSafeInteger(bandwidth) || !resolution) {
     throw invalid('Malformed EXT-X-STREAM-INF');
   }
 
@@ -86,8 +93,11 @@ function parseStreamVariant(attributes, uri, playlistUrl) {
 
 function parseDuration(line) {
   const durationText = tagValue(line, '#EXTINF:').split(',', 1)[0].trim();
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(durationText)) {
+    throw invalid('Invalid EXTINF duration');
+  }
   const duration = Number(durationText);
-  if (!durationText || !Number.isFinite(duration) || duration < 0) {
+  if (!Number.isFinite(duration) || duration < 0) {
     throw invalid('Invalid EXTINF duration');
   }
   return duration;
@@ -95,11 +105,17 @@ function parseDuration(line) {
 
 function rejectUnsupportedTags(lines) {
   for (const line of lines) {
-    if (line.startsWith('#EXT-X-MAP:')) throw new HlsError('HLS_FMP4');
-    if (line.startsWith('#EXT-X-BYTERANGE:')) throw new HlsError('HLS_BYTERANGE');
+    if (line.startsWith('#EXT-X-MAP:')) {
+      throw new HlsError('HLS_FMP4', 'fMP4 HLS playlists are not supported');
+    }
+    if (line.startsWith('#EXT-X-BYTERANGE:')) {
+      throw new HlsError('HLS_BYTERANGE', 'Byte-range HLS playlists are not supported');
+    }
     if (line.startsWith('#EXT-X-KEY:')) {
       const attributes = parseAttributes(tagValue(line, '#EXT-X-KEY:'));
-      if (attributes.METHOD?.toUpperCase() !== 'NONE') throw new HlsError('HLS_ENCRYPTED');
+      if (attributes.METHOD?.toUpperCase() !== 'NONE') {
+        throw new HlsError('HLS_ENCRYPTED', 'Encrypted HLS playlists are not supported');
+      }
     }
   }
 }
@@ -148,11 +164,16 @@ function parseMedia(lines, playlistUrl) {
       }
     }
     if (!uri) throw invalid('Missing URI after EXTINF');
-    segments.push({ url: resolveUri(uri, playlistUrl), duration });
+    const url = resolveUri(uri, playlistUrl);
+    const pathname = new URL(url).pathname;
+    if (/\.[^/.]+$/.test(pathname) && !/\.ts$/i.test(pathname)) {
+      throw invalid('Media segment is not MPEG-TS');
+    }
+    segments.push({ url, duration });
   }
 
-  if (!hasEndList) throw new HlsError('HLS_LIVE');
-  if (segments.length === 0) throw new HlsError('HLS_EMPTY');
+  if (!hasEndList) throw new HlsError('HLS_LIVE', 'Live HLS playlists are not supported');
+  if (segments.length === 0) throw new HlsError('HLS_EMPTY', 'HLS playlist contains no segments');
   return { kind: 'media', segments };
 }
 
@@ -171,7 +192,10 @@ export function parseHlsPlaylist(text, playlistUrl) {
   }
 
   rejectUnsupportedTags(lines);
-  return lines.some((line) => line.startsWith('#EXT-X-STREAM-INF:'))
+  const hasMasterVariants = lines.some((line) => line.startsWith('#EXT-X-STREAM-INF:'));
+  const hasMediaSegments = lines.some((line) => line.startsWith('#EXTINF:'));
+  if (hasMasterVariants && hasMediaSegments) throw invalid('Mixed master and media playlist');
+  return hasMasterVariants
     ? parseMaster(lines, playlistUrl)
     : parseMedia(lines, playlistUrl);
 }

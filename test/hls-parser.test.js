@@ -10,14 +10,30 @@ test('parses a master playlist into descending quality variants', async () => {
 
   assert.equal(result.kind, 'master');
   assert.deepEqual(result.variants.map((variant) => variant.label), ['1080p', '720p', '480p']);
-  assert.deepEqual(result.variants[0], {
-    url: 'https://cdn.test/1080p/index.m3u8',
-    width: 1920,
-    height: 1080,
-    bandwidth: 5200000,
-    codecs: 'avc1.640028,mp4a.40.2',
-    label: '1080p',
-  });
+  assert.deepEqual(result.variants, [
+    {
+      url: 'https://cdn.test/1080p/index.m3u8', width: 1920, height: 1080,
+      bandwidth: 5200000, codecs: 'avc1.640028,mp4a.40.2', label: '1080p',
+    },
+    {
+      url: 'https://cdn.test/720p/index.m3u8', width: 1280, height: 720,
+      bandwidth: 1800000, codecs: 'avc1.4d401f,mp4a.40.2', label: '720p',
+    },
+    {
+      url: 'https://cdn.test/480p/index.m3u8', width: 854, height: 480,
+      bandwidth: 800000, codecs: 'avc1.4d401e,mp4a.40.2', label: '480p',
+    },
+  ]);
+});
+
+test('preserves the public HlsError message and details contract', () => {
+  const error = new HlsError('HLS_INVALID', 'Invalid HLS playlist', { reason: 'missing header' });
+
+  assert.equal(error.name, 'HlsError');
+  assert.equal(error.message, 'Invalid HLS playlist');
+  assert.equal(error.code, 'HLS_INVALID');
+  assert.deepEqual(error.details, { reason: 'missing header' });
+  assert.deepEqual(new HlsError('HLS_LIVE', 'Live playlist').details, {});
 });
 
 test('parses a finite media playlist into ordered resolved MPEG-TS segments', async () => {
@@ -64,6 +80,56 @@ test('rejects the fMP4 fixture', async () => {
     (error) => error instanceof HlsError && error.code === 'HLS_FMP4',
   );
 });
+
+test('rejects duplicate attributes before encryption can be hidden', () => {
+  assert.throws(
+    () => parseHlsPlaylist(
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,METHOD=NONE\n#EXT-X-ENDLIST',
+      'https://cdn.test/playlist.m3u8',
+    ),
+    (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+  );
+});
+
+test('rejects mixed master and media playlists', () => {
+  assert.throws(
+    () => parseHlsPlaylist([
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360',
+      'variant.m3u8',
+      '#EXTINF:4.0,',
+      'segment.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n'), 'https://cdn.test/playlist.m3u8'),
+    (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+  );
+});
+
+for (const [name, playlist] of [
+  ['exponent bandwidth', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1e3,RESOLUTION=640x360\nvariant.m3u8'],
+  ['zero bandwidth', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=0,RESOLUTION=640x360\nvariant.m3u8'],
+  ['non-positive resolution', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x0\nvariant.m3u8'],
+  ['exponent EXTINF', '#EXTM3U\n#EXTINF:1e3,\nsegment.ts\n#EXT-X-ENDLIST'],
+]) {
+  test(`rejects ${name}`, () => {
+    assert.throws(
+      () => parseHlsPlaylist(playlist, 'https://cdn.test/playlist.m3u8'),
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  });
+}
+
+for (const segment of ['audio.aac', 'chunk.m4s', 'video.mp4']) {
+  test(`rejects non-MPEG-TS segment ${segment}`, () => {
+    assert.throws(
+      () => parseHlsPlaylist(
+        `#EXTM3U\n#EXTINF:4.0,\n${segment}?token=1\n#EXT-X-ENDLIST`,
+        'https://cdn.test/playlist.m3u8',
+      ),
+      (error) => error instanceof HlsError && error.code === 'HLS_INVALID',
+    );
+  });
+}
 
 for (const [name, playlist, expectedCode] of [
   ['a playlist without EXTM3U', '#EXTINF:4.0,\nsegment.ts\n#EXT-X-ENDLIST', 'HLS_INVALID'],
