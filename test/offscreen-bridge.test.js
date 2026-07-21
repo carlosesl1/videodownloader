@@ -144,7 +144,7 @@ test('rejects invalid assembled results and non-blob object URLs without retaini
     await assert.rejects(bridge.handle(downloadMessage()));
   }
 
-  for (const blobUrl of ['', 'https://extension.test/file', 'data:text/plain,video']) {
+  for (const blobUrl of ['', 'blob:', 'https://extension.test/file', 'data:text/plain,video']) {
     const bridge = createOffscreenBridge({
       assemble: async () => ({ blob: new Blob(['X']), size: 1 }),
       createObjectURL: () => blobUrl,
