@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using VideoRadar.NativeHost.Windows;
 
 namespace VideoRadar.NativeHost.Processes;
 
@@ -7,6 +8,10 @@ public sealed class ProcessRunner : IProcessRunner
 {
     public async Task<ProcessResult> RunAsync(string executable, IReadOnlyList<string> arguments, Func<string, Task>? onOutput, CancellationToken cancellationToken)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(executable);
+        ArgumentNullException.ThrowIfNull(arguments);
+        cancellationToken.ThrowIfCancellationRequested();
+
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo(executable)
@@ -20,14 +25,34 @@ public sealed class ProcessRunner : IProcessRunner
         };
         foreach (var argument in arguments) process.StartInfo.ArgumentList.Add(argument);
 
-        process.Start();
-        using var cancellationRegistration = cancellationToken.Register(() => KillIfRunning(process));
+        using var job = new ChildProcessJob();
+        if (!process.Start()) throw new InvalidOperationException("Unable to start child process.");
+        try
+        {
+            job.Assign(process);
+        }
+        catch
+        {
+            KillIfRunning(process);
+            throw;
+        }
+
+        using var cancellationRegistration = cancellationToken.Register(static state => ((ChildProcessJob)state!).Dispose(), job);
 
         var standardOutputTask = ReadStandardOutputAsync(process.StandardOutput, onOutput);
         var standardErrorTask = process.StandardError.ReadToEndAsync();
         var exitTask = process.WaitForExitAsync();
-        await Task.WhenAll(standardOutputTask, standardErrorTask, exitTask);
+        try
+        {
+            await Task.WhenAll(standardOutputTask, standardErrorTask, exitTask);
+        }
+        catch when (cancellationToken.IsCancellationRequested)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            throw;
+        }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return new ProcessResult(process.ExitCode, await standardOutputTask, await standardErrorTask);
     }
 

@@ -12,6 +12,7 @@ internal static partial class TestSuite
         ProtocolTests();
         YouTubeUrlTests();
         FormatCatalogTests();
+        DownloadTests();
     }
 
     private static void HostInfoTest()
