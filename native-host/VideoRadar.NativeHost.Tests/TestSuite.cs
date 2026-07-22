@@ -11,6 +11,7 @@ internal static partial class TestSuite
         DotnetWrapperForwardsPublishOutputArgumentsTest();
         ProtocolTests();
         YouTubeUrlTests();
+        FormatCatalogTests();
     }
 
     private static void HostInfoTest()
