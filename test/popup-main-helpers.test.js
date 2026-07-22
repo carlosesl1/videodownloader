@@ -141,3 +141,96 @@ test('boots one YouTube recovery request and one shared storage listener', async
     globalThis.document = previousDocument;
   }
 });
+
+test('clicking the rendered cancel control sends the active YouTube job id', async () => {
+  class InteractiveElement {
+    constructor(tagName = 'div') {
+      this.tagName = tagName;
+      this.dataset = {};
+      this.children = [];
+      this.listeners = new Map();
+      this.attributes = new Map();
+      this.parent = null;
+      this.className = '';
+      this.textContent = '';
+      this.disabled = false;
+    }
+
+    append(...children) {
+      for (const child of children) {
+        child.parent = this;
+        this.children.push(child);
+      }
+    }
+
+    replaceChildren(...children) {
+      this.children = [];
+      this.append(...children);
+    }
+
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+    }
+
+    addEventListener(type, listener) {
+      this.listeners.set(type, listener);
+    }
+
+    closest(selector) {
+      if (selector === '[data-cancel]' && Object.hasOwn(this.dataset, 'cancel')) return this;
+      return this.parent?.closest?.(selector) ?? null;
+    }
+  }
+
+  const find = (root, predicate) => {
+    for (const child of root.children) {
+      if (predicate(child)) return child;
+      const nested = find(child, predicate);
+      if (nested) return nested;
+    }
+    return null;
+  };
+
+  const snapshot = {
+    jobId: 'youtube-job-1', videoId: 'jNQXAC9IVRw', title: 'Me at the zoo',
+    url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw', height: 720,
+    format: { height: 720, label: '720p', container: 'mp4', combined: true },
+    stage: 'video', percent: 42, downloadedBytes: null, totalBytes: null,
+    speedBytesPerSecond: null, etaSeconds: null, path: null, error: null, updatedAt: 1,
+  };
+  const root = new InteractiveElement();
+  const announcer = new InteractiveElement();
+  const previousDocument = globalThis.document;
+  const messages = [];
+  const listeners = [];
+  globalThis.document = { createElement: (tagName) => new InteractiveElement(tagName) };
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        runtime: {
+          sendMessage: async (message) => {
+            messages.push(message);
+            if (message.action === 'YOUTUBE_GET_JOB') return { ok: true, value: snapshot };
+            return { ok: true, value: { requested: true, requestId: 'cancel-1' } };
+          },
+        },
+        storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cancel = find(root, (element) => Object.hasOwn(element.dataset, 'cancel'));
+    assert.ok(cancel, 'restored active YouTube job did not render a cancel control');
+    assert.equal(cancel.dataset.cancel, 'youtube:jNQXAC9IVRw', 'cancel control must identify the rendered item');
+    root.listeners.get('click')({ target: cancel });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(messages.at(-1), {
+      target: 'background', action: 'YOUTUBE_CANCEL_DOWNLOAD', payload: { jobId: 'youtube-job-1' },
+    });
+    assert.equal(listeners.length, 1);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});

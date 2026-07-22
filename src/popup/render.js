@@ -135,7 +135,7 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   const activeYoutube = item.kind === 'youtube' && item.active;
   if (activeYoutube) {
     const hasJobId = typeof item.jobId === 'string' && item.jobId.trim().length > 0;
-    const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.jobId : '');
+    const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.id : '');
     cancel.disabled = !hasJobId;
     row.append(cancel);
   } else {

@@ -158,7 +158,7 @@ test('renders a known active YouTube job as one announced stage with cancellable
   }));
 
   const cancel = one(root, '[data-cancel]');
-  assert.equal(cancel.getAttribute('data-cancel'), 'job-42');
+  assert.equal(cancel.getAttribute('data-cancel'), 'youtube:jNQXAC9IVRw');
   assert.equal(cancel.type, 'button');
   assert.equal(cancel.disabled, false);
   assert.equal(root.querySelectorAll('[data-download]').length, 0);

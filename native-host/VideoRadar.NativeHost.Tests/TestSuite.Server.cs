@@ -14,6 +14,7 @@ internal static partial class TestSuite
     private static void ServerTests()
     {
         NativeHostServerRunsTheFramedProtocol().GetAwaiter().GetResult();
+        NativeHostServerEmitsPersistentJobBeforeBlockedUpdateAndCancelsIt().GetAwaiter().GetResult();
         NativeHostServerRejectsBusyAndCancelsTheCurrentJob().GetAwaiter().GetResult();
         NativeHostServerCancelsAndAwaitsTheJobAtEof().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidPayloadsWithoutStopping().GetAwaiter().GetResult();
@@ -123,6 +124,41 @@ internal static partial class TestSuite
         Equal(jobId, cancelled.GetProperty("jobId").GetString());
         Equal(1, service.StartCallCount);
         Equal(1, service.CancelCallCount);
+    }
+
+    private static async Task NativeHostServerEmitsPersistentJobBeforeBlockedUpdateAndCancelsIt()
+    {
+        using var input = new AppendableInputStream();
+        using var output = new SignallingOutputStream();
+        var updater = new BlockingUpdatePolicy();
+        var service = new FakeYouTubeService();
+        var server = new NativeHostServer(new NativeMessageChannel(input, output), service, updater);
+        var run = server.RunAsync(CancellationToken.None);
+
+        input.Append(FrameCommands(
+            Command("startDownload", "r-blocked", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}")));
+        await output.WaitForMessageAsync("jobStarted", "r-blocked").WaitAsync(TimeSpan.FromSeconds(5));
+        var started = Message(ReadFrames(output), "jobStarted", "r-blocked");
+        var jobId = started.GetProperty("jobId").GetString()!;
+        True(started.GetProperty("job").GetProperty("stage").GetString() == "preparing", "jobStarted did not persist the preparing snapshot.");
+
+        await updater.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        input.Append(FrameCommands(Command("getJob", "r-persisted", "{}")));
+        await output.WaitForMessageAsync("ready", "r-persisted").WaitAsync(TimeSpan.FromSeconds(5));
+        var persisted = Message(ReadFrames(output), "ready", "r-persisted");
+        Equal(jobId, persisted.GetProperty("job").GetProperty("jobId").GetString());
+        Equal("preparing", persisted.GetProperty("job").GetProperty("stage").GetString());
+
+        input.Append(FrameCommands(Command("cancelDownload", "r-cancel-blocked", JsonSerializer.Serialize(new { jobId }))));
+        await updater.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await output.WaitForMessageAsync("jobCancelled", "r-blocked").WaitAsync(TimeSpan.FromSeconds(5));
+        input.Complete();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Equal(1, updater.CallCount);
+        Equal(1, service.CancelCallCount);
+        Equal(0, service.StartCallCount);
+        Equal(jobId, Message(ReadFrames(output), "jobCancelled", "r-blocked").GetProperty("jobId").GetString());
     }
 
     private static async Task NativeHostServerCancelsAndAwaitsTheJobAtEof()
@@ -351,6 +387,28 @@ internal static partial class TestSuite
             CallCount++;
             if (Error is not null) throw Error;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingUpdatePolicy : IUpdatePolicy
+    {
+        public int CallCount { get; private set; }
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task CheckAsync(CancellationToken cancellationToken)
+        {
+            CallCount++;
+            Started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                Cancelled.TrySetResult();
+                throw;
+            }
         }
     }
 

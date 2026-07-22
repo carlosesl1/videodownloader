@@ -170,8 +170,6 @@ public sealed class NativeHostServer(
                 throw new CommandFailureException("YOUTUBE_BUSY", "Já existe um download do YouTube em andamento.");
         }
 
-        await EnsureUpdateCheckedAsync(cancellationToken);
-
         var jobId = Guid.NewGuid().ToString("D");
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var initialSnapshot = new JobSnapshot(jobId, string.Empty, string.Empty, height, "preparing", null, null, null);
@@ -253,6 +251,7 @@ public sealed class NativeHostServer(
     {
         try
         {
+            await EnsureUpdateCheckedAsync(job.Cancellation.Token);
             var result = await youtubeService.StartDownloadAsync(
                 job.JobId,
                 url,
