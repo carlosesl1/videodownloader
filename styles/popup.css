@@ -345,9 +345,49 @@ h2 {
   max-width: 154px;
 }
 
+.button--cancel {
+  align-self: end;
+  min-height: 42px;
+  min-width: 104px;
+  max-width: 154px;
+  color: var(--danger);
+  background: #f9e9eb;
+}
+
+.button--cancel:hover {
+  color: #fff;
+  background: var(--danger);
+}
+
 .media-row__status {
   grid-column: 1 / -1;
   overflow-wrap: anywhere;
+}
+
+.media-row__stage,
+.media-row__path {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.media-row__stage {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.media-row__path {
+  display: -webkit-box;
+  max-height: 4.35em;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .media-row__progress {
@@ -370,6 +410,26 @@ h2 {
   background: linear-gradient(90deg, var(--green-dark), var(--green));
   border-radius: 999px;
   transition: width 180ms ease-out;
+}
+
+.media-row__progress:indeterminate,
+.media-row__progress:not([value]) {
+  background: linear-gradient(90deg, #dfe7f2 0%, var(--green) 45%, #dfe7f2 90%);
+  background-size: 180% 100%;
+  animation: radar-progress-indeterminate 1.1s linear infinite;
+}
+
+.media-row__progress:indeterminate::-webkit-progress-bar,
+.media-row__progress:not([value])::-webkit-progress-bar {
+  background: linear-gradient(90deg, #dfe7f2 0%, var(--green) 45%, #dfe7f2 90%);
+  background-size: 180% 100%;
+  animation: radar-progress-indeterminate 1.1s linear infinite;
+}
+
+@keyframes radar-progress-indeterminate {
+  to {
+    background-position: -180% 0;
+  }
 }
 
 .media-row__status--sent,
@@ -434,5 +494,12 @@ h2 {
   *::after {
     scroll-behavior: auto !important;
     transition: none !important;
+  }
+
+  .media-row__progress:indeterminate,
+  .media-row__progress:not([value]),
+  .media-row__progress:indeterminate::-webkit-progress-bar,
+  .media-row__progress:not([value])::-webkit-progress-bar {
+    animation: none !important;
   }
 }

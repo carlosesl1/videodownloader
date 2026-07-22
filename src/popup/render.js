@@ -82,9 +82,11 @@ function actionLabel(item, blockedByHls) {
 }
 
 function appendQualityControl(row, item) {
-  if (!item.inspected || item.variants.length <= 1) {
-    const quality = item.inspected
-      ? item.variants[0]?.label || 'Qualidade única'
+  const variants = item.variants ?? [];
+  const inspected = item.kind === 'youtube' || item.inspected;
+  if (!inspected || variants.length <= 1) {
+    const quality = inspected
+      ? variants[0]?.label || 'Qualidade única'
       : 'Qualidades disponíveis após verificar';
     row.append(node('span', 'quality-single', quality));
     return;
@@ -95,7 +97,8 @@ function appendQualityControl(row, item) {
   const select = node('select', 'quality__select');
   select.dataset.quality = item.id;
   select.setAttribute('aria-label', `Qualidade de ${item.filename}`);
-  item.variants.forEach((variant, index) => {
+  select.disabled = Boolean(item.kind === 'youtube' && item.active);
+  variants.forEach((variant, index) => {
     const option = node('option', '', variant.label || `Opção ${index + 1}`);
     option.value = String(index);
     option.selected = index === (item.selectedIndex ?? 0);
@@ -115,7 +118,9 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   const metadata = node(
     'span',
     'media-row__metadata',
-    item.kind === 'hls' ? 'HLS  /  SAÍDA .TS' : `${String(item.format || 'VÍDEO').toUpperCase()}  /  DIRETO`,
+    item.kind === 'youtube'
+      ? `YOUTUBE  /  SAÍDA .${String(item.predictedFormat || item.variants?.[item.selectedIndex]?.container || 'mp4').toUpperCase()}`
+      : item.kind === 'hls' ? 'HLS  /  SAÍDA .TS' : `${String(item.format || 'VÍDEO').toUpperCase()}  /  DIRETO`,
   );
   heading.append(name, metadata);
   row.append(heading);
@@ -127,24 +132,51 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     && item.inspected
     && hlsBusy
     && item.phase !== 'preparing';
-  const action = button(actionLabel(item, blockedByHls), 'button button--download');
-  action.dataset[needsInspection ? 'inspect' : 'download'] = item.id;
-  action.disabled = item.phase === 'preparing' || item.phase === 'permission' || blockedByHls;
-  row.append(action);
+  const activeYoutube = item.kind === 'youtube' && item.active;
+  if (activeYoutube) {
+    const hasJobId = typeof item.jobId === 'string' && item.jobId.trim().length > 0;
+    const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.jobId : '');
+    cancel.disabled = !hasJobId;
+    row.append(cancel);
+  } else {
+    const action = button(actionLabel(item, blockedByHls), 'button button--download');
+    action.dataset[needsInspection ? 'inspect' : 'download'] = item.id;
+    action.disabled = item.phase === 'preparing' || item.phase === 'permission' || blockedByHls;
+    row.append(action);
+  }
 
-  if (item.phase === 'preparing') {
+  if (activeYoutube || item.phase === 'preparing') {
     const progress = node('progress', 'media-row__progress');
     progress.max = 100;
-    progress.value = Number.isFinite(item.progress) ? item.progress : 0;
+    if (activeYoutube) {
+      if (Number.isFinite(item.progress)) progress.value = item.progress;
+    } else {
+      progress.value = Number.isFinite(item.progress) ? item.progress : 0;
+    }
     progress.setAttribute('aria-label', `Progresso de ${item.filename}`);
-    progress.setAttribute('aria-valuetext', `${progress.value}%`);
+    const stageLabel = item.statusLabel || 'Em andamento…';
+    progress.setAttribute(
+      'aria-valuetext',
+      activeYoutube && Number.isFinite(item.progress) ? `${stageLabel} ${item.progress}%` : activeYoutube ? stageLabel : `${progress.value}%`,
+    );
     row.append(progress);
   }
 
-  if (item.statusLabel) {
+  if (activeYoutube) {
+    const stage = node('p', 'media-row__stage', item.statusLabel || 'Em andamento…');
+    stage.setAttribute('role', 'status');
+    row.append(stage);
+  } else if (item.statusLabel) {
     const status = node('p', `media-row__status media-row__status--${item.phase || 'ready'}`, item.statusLabel);
     status.setAttribute('role', 'status');
     row.append(status);
+  }
+
+  const path = typeof item.path === 'string' ? item.path.trim() : '';
+  if (path) {
+    const pathNode = node('p', 'media-row__path', path);
+    pathNode.title = path;
+    row.append(pathNode);
   }
 
   if (pendingPermission?.id === item.id) {
