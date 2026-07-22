@@ -4,8 +4,6 @@ public sealed record JobProgress(string Stage, int? Percent, long? DownloadedByt
 
 public sealed record JobResult(string JobId, string Path);
 
-public sealed record JobSnapshot(string JobId, string VideoId, string Title, int Height, string Stage, int? Percent, string? Path, string? ErrorCode);
-
 public interface IYouTubeService
 {
     Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken);

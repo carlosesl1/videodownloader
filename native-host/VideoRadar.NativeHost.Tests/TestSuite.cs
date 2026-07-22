@@ -13,6 +13,7 @@ internal static partial class TestSuite
         YouTubeUrlTests();
         FormatCatalogTests();
         DownloadTests();
+        ServerTests();
     }
 
     private static void HostInfoTest()
@@ -32,9 +33,9 @@ internal static partial class TestSuite
 
         var result = RunProcess(executable, []);
 
-        Equal(0, result.ExitCode);
+        True(result.ExitCode == 0, $"Host browser mode failed.{Environment.NewLine}{result.StandardError}");
         Equal(string.Empty, result.StandardOutput);
-        Equal($"com.videoradar.helper v1{Environment.NewLine}", result.StandardError);
+        Equal(string.Empty, result.StandardError);
     }
 
     private static void DotnetWrapperForwardsInfoArgumentsTest()
@@ -94,6 +95,7 @@ internal static partial class TestSuite
             StartInfo = new System.Diagnostics.ProcessStartInfo(fileName)
             {
                 UseShellExecute = false,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 WorkingDirectory = workingDirectory ?? AppContext.BaseDirectory
@@ -104,6 +106,7 @@ internal static partial class TestSuite
         foreach (var argument in arguments) process.StartInfo.ArgumentList.Add(argument);
 
         process.Start();
+        process.StandardInput.Close();
         var standardOutput = process.StandardOutput.ReadToEnd();
         var standardError = process.StandardError.ReadToEnd();
         process.WaitForExit();
