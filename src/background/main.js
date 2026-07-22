@@ -3,6 +3,9 @@ import {
   createBackgroundMessageListener,
   createTerminalDownloadHandler,
 } from './handlers.js';
+import { createNativePortClient } from './native-port.js';
+import { createBackgroundRouter } from './router.js';
+import { createYouTubeCoordinator } from './youtube-coordinator.js';
 
 export function createOffscreenSender({
   offscreen = globalThis.chrome.offscreen,
@@ -39,14 +42,32 @@ export function createOffscreenSender({
 }
 
 const sendOffscreen = createOffscreenSender();
-const handlers = createBackgroundHandlers({ sendOffscreen });
-const handleTerminalDownload = createTerminalDownloadHandler(handlers);
+const hlsHandlers = createBackgroundHandlers({ sendOffscreen });
+let youtubeCoordinator;
+const nativeClient = createNativePortClient({
+  connectNative: (name) => globalThis.chrome.runtime.connectNative(name),
+  setTimeoutFn: (callback, delay) => globalThis.setTimeout(callback, delay),
+  clearTimeoutFn: (timer) => globalThis.clearTimeout(timer),
+  onEvent(event) {
+    youtubeCoordinator?.handleHostEvent(event).catch(() => {
+      // A persisted job is reconciled on the next worker wake-up.
+    });
+  },
+});
+youtubeCoordinator = createYouTubeCoordinator({
+  nativeClient,
+  storageLocal: globalThis.chrome.storage.local,
+  notifications: globalThis.chrome.notifications,
+  now: () => Date.now(),
+});
+const router = createBackgroundRouter({ hls: hlsHandlers, youtube: youtubeCoordinator });
+const handleTerminalDownload = createTerminalDownloadHandler(hlsHandlers);
 
-handlers.ready.catch(() => {
+router.ready.catch(() => {
   // Durable records remain available for the next wake-up/reconciliation pass.
 });
 
-chrome.runtime.onMessage.addListener(createBackgroundMessageListener(handlers));
+chrome.runtime.onMessage.addListener(createBackgroundMessageListener(router));
 chrome.downloads.onChanged.addListener((delta) => {
   handleTerminalDownload(delta).catch(() => {
     // Tracking is intentionally retained so a later terminal event can retry.

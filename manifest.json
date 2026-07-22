@@ -6,6 +6,8 @@
   "permissions": [
     "activeTab",
     "downloads",
+    "nativeMessaging",
+    "notifications",
     "offscreen",
     "scripting",
     "storage"
@@ -14,6 +16,9 @@
     "http://*/*",
     "https://*/*"
   ],
+  "icons": {
+    "128": "assets/icon-128.png"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Vídeo Radar"
@@ -22,5 +27,6 @@
     "service_worker": "src/background/main.js",
     "type": "module"
   },
-  "minimum_chrome_version": "116"
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjHP9NpmXgUFL4ixHl9xrAY8JQr+hdNDeWI5zuOnvOBue/eq2OaHvR12driHXPeLs4urFTPR8Wolqg2cf3aW62Z3XD4+XlNKyg4GnzGYRlU5XlnUzGxzMM0xaCDy/KlHeAWkLueCm7h/SENf/v1sIz43x0OjI9GhvQwZstLXk8Yuf9yTqr65bFiJkZBk6UesaUB8WbwHRh8/OPcPeBa46wSiEnkmGM5GcUl3eu+x//9m95nvcvQXKJ5OInFYd/NRRpAHHRRGkjUHgvCvSbCHnMqk7KxwLOCLeW+efvoSlUFXa/GO+aC80Ls87WaCIQYWNHr+B2daRcs8X8O14Zr/h1QIDAQAB"
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createPublicKey } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 test('manifest declares the Video Radar MV3 extension contract', async () => {
@@ -14,6 +15,21 @@ test('manifest declares the Video Radar MV3 extension contract', async () => {
   assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ['activeTab', 'downloads', 'offscreen', 'scripting', 'storage'],
+    ['activeTab', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage'],
   );
+
+  assert.deepEqual(manifest.icons, { 128: 'assets/icon-128.png' });
+  const icon = await readFile(new URL('../assets/icon-128.png', import.meta.url));
+  assert.deepEqual([...icon.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(icon.readUInt32BE(16), 128);
+  assert.equal(icon.readUInt32BE(20), 128);
+
+  assert.match(manifest.key, /^[A-Za-z0-9+/]+={0,2}$/);
+  const publicKey = createPublicKey({
+    key: Buffer.from(manifest.key, 'base64'),
+    format: 'der',
+    type: 'spki',
+  });
+  assert.equal(publicKey.asymmetricKeyType, 'rsa');
+  assert.equal(publicKey.asymmetricKeyDetails.modulusLength, 2048);
 });
