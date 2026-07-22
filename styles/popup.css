@@ -24,7 +24,7 @@ html,
 body {
   margin: 0;
   width: 380px;
-  max-width: 100vw;
+  min-width: 380px;
   min-height: 280px;
 }
 
