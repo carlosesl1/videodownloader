@@ -1,2 +1,6 @@
 .superpowers/
 .worktrees/
+.tools/
+dist/
+native-host/**/bin/
+native-host/**/obj/

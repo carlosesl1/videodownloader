@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node scripts/validate-extension.mjs && node --test test/*.test.js"
+    "check": "node scripts/validate-extension.mjs && node --test test/*.test.js",
+    "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dotnet.ps1 run --project native-host/VideoRadar.NativeHost.Tests",
+    "check:all": "npm run check && npm run test:native"
   }
 }
