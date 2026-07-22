@@ -35,10 +35,10 @@ Quando uma dessas condições for detectada, a interface deve explicar o limite 
 5. Quando houver variantes, a maior qualidade vem pré-selecionada e o usuário pode trocá-la.
 6. O usuário clica em **Baixar**.
 7. Arquivos diretos são entregues imediatamente ao gerenciador de downloads do Chrome.
-8. Para HLS, o botão muda temporariamente para **Preparando…** enquanto a extensão monta o arquivo `.ts`.
+8. Para HLS, o botão muda temporariamente para **Preparando…** e uma barra mostra o avanço por segmentos enquanto a extensão monta o arquivo `.ts`.
 9. Quando o arquivo for entregue ao Chrome, o popup mostra uma confirmação curta: **Download enviado ao Chrome**.
 
-Não haverá barra nem percentual de progresso no popup. O gerenciador de downloads do navegador será responsável por mostrar o andamento depois de receber o arquivo.
+A barra do popup cobre a etapa anterior ao download do Chrome, quando os segmentos HLS são baixados e unidos. Depois que o arquivo é entregue, o gerenciador de downloads do navegador assume o acompanhamento.
 
 ## 4. Detecção híbrida
 
@@ -189,7 +189,7 @@ O popup terá largura aproximada de 380 px e estes estados:
 
 O CTA inicial é único. Após a busca, cada mídia tem sua própria ação de download. A ação **Buscar novamente** repete a varredura sob demanda.
 
-Durante HLS, somente o botão do item muda de estado. Não existe barra de progresso. Mensagens de erro devem dizer o que ocorreu e qual ação o usuário pode tentar, sem códigos internos como texto principal.
+Durante HLS, o item ativo mostra percentual, contagem de segmentos e uma barra de progresso. Uma segunda montagem HLS aguarda a primeira terminar. Mensagens de erro devem dizer o que ocorreu e qual ação o usuário pode tentar, sem códigos internos como texto principal.
 
 ## 11. Direção visual
 
@@ -267,6 +267,6 @@ A primeira versão está pronta quando:
 6. salva arquivos diretos com a extensão original e HLS como `.ts`;
 7. continua preparando HLS após o popup ser fechado;
 8. remove permissões opcionais transitórias após a operação;
-9. não mostra barra de progresso no popup;
+9. mostra progresso por segmentos durante a montagem HLS;
 10. mostra falhas suportadas com mensagens acionáveis;
 11. passa nos testes automatizados e na verificação manual definida acima.

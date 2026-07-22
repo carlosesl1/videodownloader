@@ -6,6 +6,8 @@ const ERROR_MESSAGES = Object.freeze({
   HLS_BYTERANGE: 'Esta playlist usa intervalos de bytes não suportados.',
   HLS_LIVE: 'Transmissões HLS ao vivo não são suportadas nesta versão.',
   HLS_TOO_LARGE: 'O vídeo ultrapassa o limite seguro de 1 GiB para HLS.',
+  HLS_TIMEOUT: 'Um segmento demorou demais para responder. Tente novamente.',
+  HLS_BUSY: 'Aguarde o outro vídeo HLS terminar e tente novamente.',
   HLS_NETWORK: 'Não foi possível acessar todos os segmentos. Tente novamente.',
   HLS_PERMISSION: 'Este vídeo usa outro servidor de mídia. Autorize-o para continuar.',
   SCAN_FAILED: 'Não foi possível analisar esta aba. Recarregue a página e tente novamente.',
@@ -39,7 +41,24 @@ function updateOperation(items, operationId, record) {
 
 function operationView(record) {
   if (ACTIVE_OPERATION_STATES.has(record?.state)) {
-    return { phase: 'preparing', statusLabel: 'Preparando…' };
+    const progress = Number.isFinite(record.progress?.percent)
+      ? Math.max(0, Math.min(100, Math.floor(record.progress.percent)))
+      : 0;
+    const completedSegments = Number.isSafeInteger(record.progress?.completedSegments)
+      ? record.progress.completedSegments
+      : 0;
+    const totalSegments = Number.isSafeInteger(record.progress?.totalSegments)
+      ? record.progress.totalSegments
+      : 0;
+    return {
+      phase: 'preparing',
+      progress,
+      completedSegments,
+      totalSegments,
+      statusLabel: totalSegments > 0
+        ? `Baixando segmentos… ${progress}% · ${completedSegments}/${totalSegments}`
+        : 'Preparando a playlist…',
+    };
   }
   if (record?.state === 'downloading') {
     return { phase: 'sent', statusLabel: 'Download enviado ao Chrome' };
@@ -96,7 +115,10 @@ export function reduceState(state, event) {
     const items = updateItem(state.items, event.id, () => ({
       selectedIndex: event.selectedIndex ?? 0,
       phase: 'preparing',
-      statusLabel: 'Preparando…',
+      progress: 0,
+      completedSegments: 0,
+      totalSegments: 0,
+      statusLabel: 'Preparando a playlist…',
       error: undefined,
     }));
     return { ...state, items, busyId: event.id };
@@ -135,7 +157,10 @@ export function reduceState(state, event) {
       operationId: event.operationId,
       selectedIndex: event.selectedIndex,
       phase: 'preparing',
-      statusLabel: 'Preparando…',
+      progress: 0,
+      completedSegments: 0,
+      totalSegments: 0,
+      statusLabel: 'Preparando a playlist…',
       error: undefined,
     }));
     return { ...state, items, busyId: event.id, pendingPermission: null };

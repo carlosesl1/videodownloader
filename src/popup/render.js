@@ -72,8 +72,9 @@ function appendNoResults(surface, state) {
   appendScanAction(surface, 'Buscar novamente');
 }
 
-function actionLabel(item) {
+function actionLabel(item, blockedByHls) {
   if (item.phase === 'preparing') return 'Preparando…';
+  if (blockedByHls) return 'Aguarde';
   if (item.phase === 'permission') return 'Aguardando autorização';
   if (item.kind === 'hls' && !item.inspected) return 'Ver qualidades';
   if (item.phase === 'sent' || item.phase === 'complete' || item.phase === 'error') return 'Baixar novamente';
@@ -104,7 +105,7 @@ function appendQualityControl(row, item) {
   row.append(label);
 }
 
-function appendMediaItem(list, item, pendingPermission) {
+function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   const row = node('li', 'media-row');
   row.dataset.itemId = item.id;
 
@@ -122,10 +123,23 @@ function appendMediaItem(list, item, pendingPermission) {
   appendQualityControl(row, item);
 
   const needsInspection = item.kind === 'hls' && !item.inspected;
-  const action = button(actionLabel(item), 'button button--download');
+  const blockedByHls = item.kind === 'hls'
+    && item.inspected
+    && hlsBusy
+    && item.phase !== 'preparing';
+  const action = button(actionLabel(item, blockedByHls), 'button button--download');
   action.dataset[needsInspection ? 'inspect' : 'download'] = item.id;
-  action.disabled = item.phase === 'preparing' || item.phase === 'permission';
+  action.disabled = item.phase === 'preparing' || item.phase === 'permission' || blockedByHls;
   row.append(action);
+
+  if (item.phase === 'preparing') {
+    const progress = node('progress', 'media-row__progress');
+    progress.max = 100;
+    progress.value = Number.isFinite(item.progress) ? item.progress : 0;
+    progress.setAttribute('aria-label', `Progresso de ${item.filename}`);
+    progress.setAttribute('aria-valuetext', `${progress.value}%`);
+    row.append(progress);
+  }
 
   if (item.statusLabel) {
     const status = node('p', `media-row__status media-row__status--${item.phase || 'ready'}`, item.statusLabel);
@@ -157,7 +171,8 @@ function appendResults(surface, state) {
   surface.append(summary);
 
   const list = node('ul', 'media-list');
-  state.items.forEach((item) => appendMediaItem(list, item, state.pendingPermission));
+  const hlsBusy = state.items.some((item) => item.kind === 'hls' && item.phase === 'preparing');
+  state.items.forEach((item) => appendMediaItem(list, item, state.pendingPermission, hlsBusy));
   surface.append(list);
 }
 

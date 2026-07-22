@@ -174,6 +174,29 @@ test('rejects malformed or metadata-bearing HLS completions', () => {
   }
 });
 
+test('accepts bounded HLS progress messages and rejects invalid counters', () => {
+  const progress = {
+    target: 'background',
+    action: ACTIONS.HLS_PROGRESS,
+    payload: {
+      operationId: 'operation-1',
+      completedSegments: 12,
+      totalSegments: 30,
+      bytesReceived: 4096,
+    },
+  };
+
+  assert.equal(assertBackgroundMessage(progress), progress);
+  for (const payload of [
+    { ...progress.payload, completedSegments: 31 },
+    { ...progress.payload, totalSegments: 0 },
+    { ...progress.payload, bytesReceived: -1 },
+    { ...progress.payload, percent: 40 },
+  ]) {
+    assert.throws(() => assertBackgroundMessage({ ...progress, payload }), /Mensagem inv.lida/);
+  }
+});
+
 test('rejects metadata-bearing inspection cleanup messages', () => {
   assert.throws(() => assertOffscreenMessage({
     target: 'offscreen',

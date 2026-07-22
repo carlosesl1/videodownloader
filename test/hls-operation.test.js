@@ -141,6 +141,45 @@ test('assembleHls rejects unauthorized segment origins before fetching a segment
   assert.deepEqual(calls, ['https://cdn.test/media.m3u8']);
 });
 
+test('assembleHls reports monotonic segment and byte progress', async () => {
+  const progress = [];
+  const result = await assembleHls('https://cdn.test/media.m3u8', {
+    allowedOrigins: ['https://cdn.test'],
+    concurrency: 1,
+    onProgress: (value) => progress.push(structuredClone(value)),
+    fetchImpl: async (url) => (
+      url.endsWith('.m3u8')
+        ? response(mediaPlaylist('one.ts', 'two.ts'))
+        : response(url.endsWith('one.ts') ? 'ONE' : 'TWOO')
+    ),
+  });
+
+  assert.equal(result.size, 7);
+  assert.deepEqual(progress, [
+    { completedSegments: 0, totalSegments: 2, bytesReceived: 0 },
+    { completedSegments: 1, totalSegments: 2, bytesReceived: 3 },
+    { completedSegments: 2, totalSegments: 2, bytesReceived: 7 },
+  ]);
+});
+
+test('assembleHls fails a stalled segment with a safe timeout error', async () => {
+  await assert.rejects(
+    assembleHls('https://cdn.test/media.m3u8', {
+      allowedOrigins: ['https://cdn.test'],
+      requestTimeoutMs: 10,
+      fetchImpl: async (url) => {
+        if (url.endsWith('.m3u8')) return response(mediaPlaylist('stalled.ts'));
+        return new Promise(() => {});
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'HLS_TIMEOUT');
+      assert.equal(error.details.timeoutMs, 10);
+      return true;
+    },
+  );
+});
+
 test('assembleHls rejects when accumulated bytes exceed maxBytes', async () => {
   await assert.rejects(
     assembleHls('https://cdn.test/media.m3u8', {

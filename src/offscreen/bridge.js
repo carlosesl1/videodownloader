@@ -7,6 +7,7 @@ export function createOffscreenBridge({
   createObjectURL = URL.createObjectURL.bind(URL),
   revokeObjectURL = URL.revokeObjectURL.bind(URL),
   sendCompletion = (message) => globalThis.chrome.runtime.sendMessage(message),
+  sendProgress = sendCompletion,
   scheduleRetry = (attempt) => new Promise((resolve) => {
     setTimeout(resolve, Math.min(250 * (2 ** attempt), 5_000));
   }),
@@ -32,8 +33,23 @@ export function createOffscreenBridge({
     const { operationId, url, allowedOrigins } = payload;
     let completion;
     let blobUrl;
+    let lastProgressPercent = -1;
+    const onProgress = ({ completedSegments, totalSegments, bytesReceived }) => {
+      const percent = Math.floor((completedSegments / totalSegments) * 100);
+      if (percent <= lastProgressPercent) return;
+      lastProgressPercent = percent;
+      try {
+        Promise.resolve(sendProgress({
+          target: 'background',
+          action: ACTIONS.HLS_PROGRESS,
+          payload: { operationId, completedSegments, totalSegments, bytesReceived },
+        })).catch(() => {});
+      } catch {
+        // O progresso é informativo; a conclusão durável continua sendo obrigatória.
+      }
+    };
     try {
-      const result = await assemble(url, { allowedOrigins });
+      const result = await assemble(url, { allowedOrigins, onProgress });
       if (!(result?.blob instanceof Blob) || !Number.isSafeInteger(result.size) || result.size < 0) {
         throw new Error('Resultado HLS inválido');
       }

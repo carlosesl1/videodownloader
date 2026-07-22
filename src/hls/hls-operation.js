@@ -2,6 +2,7 @@ import { HlsError, parseHlsPlaylist } from './parse-playlist.js';
 
 const DEFAULT_MAX_BYTES = 1024 ** 3;
 const DEFAULT_CONCURRENCY = 4;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_CONCURRENCY = 4;
 
 function invalid(message, details = {}) {
@@ -24,6 +25,14 @@ function cancellationError(url) {
     'HLS_NETWORK',
     'A operação HLS foi cancelada.',
     { url },
+  );
+}
+
+function timeoutError(url, timeoutMs) {
+  return new HlsError(
+    'HLS_TIMEOUT',
+    'Um recurso HLS demorou demais para responder.',
+    { url, timeoutMs },
   );
 }
 
@@ -84,32 +93,36 @@ function validatePositiveSafeInteger(value, name, maximum = Number.MAX_SAFE_INTE
   }
 }
 
-async function awaitWithAbort(operation, signal, url) {
-  if (!signal) return operation;
-  if (signal.aborted) throw cancellationError(url);
+async function awaitWithAbort(operation, signal, url, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  if (signal?.aborted) throw cancellationError(url);
 
   let onAbort;
   const aborted = new Promise((resolve, reject) => {
     onAbort = () => reject(cancellationError(url));
-    signal.addEventListener('abort', onAbort, { once: true });
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  let timeoutId;
+  const timedOut = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => reject(timeoutError(url, timeoutMs)), timeoutMs);
   });
 
   try {
-    const result = await Promise.race([operation, aborted]);
-    if (signal.aborted) throw cancellationError(url);
+    const result = await Promise.race([operation, aborted, timedOut]);
+    if (signal?.aborted) throw cancellationError(url);
     return result;
   } finally {
-    signal.removeEventListener('abort', onAbort);
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
-async function fetchOk(url, fetchImpl, signal) {
+async function fetchOk(url, fetchImpl, signal, timeoutMs) {
   const options = { credentials: 'include' };
   if (signal !== undefined) options.signal = signal;
 
   let response;
   try {
-    response = await awaitWithAbort(fetchImpl(url, options), signal, url);
+    response = await awaitWithAbort(fetchImpl(url, options), signal, url, timeoutMs);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
@@ -119,42 +132,47 @@ async function fetchOk(url, fetchImpl, signal) {
   return response;
 }
 
-async function readText(response, url, signal) {
+async function readText(response, url, signal, timeoutMs) {
   try {
-    return await awaitWithAbort(response.text(), signal, url);
+    return await awaitWithAbort(response.text(), signal, url, timeoutMs);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
   }
 }
 
-async function readBytes(response, url, signal) {
+async function readBytes(response, url, signal, timeoutMs) {
   try {
-    return await awaitWithAbort(response.arrayBuffer(), signal, url);
+    return await awaitWithAbort(response.arrayBuffer(), signal, url, timeoutMs);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
   }
 }
 
-async function readStreamChunk(reader, url, signal) {
+async function readStreamChunk(reader, url, signal, timeoutMs) {
   try {
-    return await awaitWithAbort(reader.read(), signal, url);
+    return await awaitWithAbort(reader.read(), signal, url, timeoutMs);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
   }
 }
 
-async function fetchPlaylist(url, fetchImpl, signal) {
-  const response = await fetchOk(url, fetchImpl, signal);
-  return parseHlsPlaylist(await readText(response, url, signal), url);
+async function fetchPlaylist(url, fetchImpl, signal, timeoutMs) {
+  const response = await fetchOk(url, fetchImpl, signal, timeoutMs);
+  return parseHlsPlaylist(await readText(response, url, signal, timeoutMs), url);
 }
 
-export async function inspectHls(url, { fetchImpl = fetch, signal } = {}) {
+export async function inspectHls(url, {
+  fetchImpl = fetch,
+  signal,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+} = {}) {
   validateUrl(url);
   validateFetch(fetchImpl);
-  const playlist = await fetchPlaylist(url, fetchImpl, signal);
+  validatePositiveSafeInteger(requestTimeoutMs, 'requestTimeoutMs');
+  const playlist = await fetchPlaylist(url, fetchImpl, signal, requestTimeoutMs);
   if (playlist.kind === 'master') return playlist;
 
   return {
@@ -176,12 +194,18 @@ export async function assembleHls(url, {
   maxBytes = DEFAULT_MAX_BYTES,
   concurrency = DEFAULT_CONCURRENCY,
   signal,
+  onProgress,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 } = {}) {
   validateUrl(url);
   validateFetch(fetchImpl);
   validateAllowedOrigins(allowedOrigins);
   validatePositiveSafeInteger(maxBytes, 'maxBytes');
   validatePositiveSafeInteger(concurrency, 'concurrency', MAX_CONCURRENCY);
+  validatePositiveSafeInteger(requestTimeoutMs, 'requestTimeoutMs');
+  if (onProgress !== undefined && typeof onProgress !== 'function') {
+    throw invalid('A função de progresso HLS é inválida.');
+  }
 
   let stopped = false;
   let fatalError;
@@ -205,7 +229,7 @@ export async function assembleHls(url, {
 
   try {
     assertRunning();
-    const playlist = await fetchPlaylist(url, fetchImpl, controller.signal);
+    const playlist = await fetchPlaylist(url, fetchImpl, controller.signal, requestTimeoutMs);
     assertRunning();
     if (playlist.kind === 'master') {
       throw new HlsError(
@@ -235,6 +259,19 @@ export async function assembleHls(url, {
     const parts = new Array(playlist.segments.length);
     let nextIndex = 0;
     let total = 0;
+    let completedSegments = 0;
+    const notifyProgress = () => {
+      try {
+        onProgress?.({
+          completedSegments,
+          totalSegments: playlist.segments.length,
+          bytesReceived: total,
+        });
+      } catch {
+        // A falha da interface não deve interromper a montagem do vídeo.
+      }
+    };
+    notifyProgress();
 
     const tooLargeError = () => new HlsError(
       'HLS_TOO_LARGE',
@@ -259,7 +296,7 @@ export async function assembleHls(url, {
     const readSegment = async (response, segmentUrl) => {
       const getReader = response.body?.getReader;
       if (typeof getReader !== 'function') {
-        const bytes = await readBytes(response, segmentUrl, controller.signal);
+        const bytes = await readBytes(response, segmentUrl, controller.signal, requestTimeoutMs);
         assertRunning(segmentUrl);
         const segmentChunks = [];
         reserve(bytes, segmentChunks);
@@ -282,7 +319,12 @@ export async function assembleHls(url, {
       try {
         while (true) {
           assertRunning(segmentUrl);
-          const { done, value } = await readStreamChunk(reader, segmentUrl, controller.signal);
+          const { done, value } = await readStreamChunk(
+            reader,
+            segmentUrl,
+            controller.signal,
+            requestTimeoutMs,
+          );
           assertRunning(segmentUrl);
           if (done) return segmentChunks;
           if (!(value instanceof Uint8Array)) throw networkError(segmentUrl);
@@ -311,10 +353,17 @@ export async function assembleHls(url, {
 
         const segment = playlist.segments[index];
         try {
-          const response = await fetchOk(segment.url, fetchImpl, controller.signal);
+          const response = await fetchOk(
+            segment.url,
+            fetchImpl,
+            controller.signal,
+            requestTimeoutMs,
+          );
           assertRunning(segment.url);
           parts[index] = await readSegment(response, segment.url);
           assertRunning(segment.url);
+          completedSegments += 1;
+          notifyProgress();
         } catch (error) {
           const safeError = error instanceof HlsError ? error : networkError(segment.url);
           throw stop(safeError);

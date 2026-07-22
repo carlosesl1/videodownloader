@@ -44,7 +44,7 @@ test('moves from idle through scanning to results and empty', () => {
   assert.match(empty.message, /Nenhum vídeo/);
 });
 
-test('tracks only per-item preparation and contains no progress value', () => {
+test('starts HLS preparation with a visible zero progress value', () => {
   const state = reduceState(
     { ...initialState, status: 'results', items: [hlsItem] },
     { type: 'DOWNLOAD_STARTED', id: hlsItem.id, selectedIndex: 0 },
@@ -53,7 +53,7 @@ test('tracks only per-item preparation and contains no progress value', () => {
   assert.equal(state.busyId, hlsItem.id);
   assert.equal(state.items[0].phase, 'preparing');
   assert.equal(state.items[0].selectedIndex, 0);
-  assert.equal(JSON.stringify(state).includes('progress'), false);
+  assert.equal(state.items[0].progress, 0);
 });
 
 test('maps supported failures to actionable Portuguese copy', () => {
@@ -93,9 +93,23 @@ test('moves an asynchronous HLS operation from queued to downloading and complet
   });
   assert.equal(queued.items[0].operationId, 'op-42');
   assert.equal(queued.items[0].phase, 'preparing');
-  assert.equal(queued.items[0].statusLabel, 'Preparando…');
+  assert.equal(queued.items[0].statusLabel, 'Preparando a playlist…');
 
-  const downloading = reduceState(queued, {
+  const progressing = reduceState(queued, {
+    type: 'HLS_OPERATION_UPDATED',
+    operationId: 'op-42',
+    record: {
+      state: 'assembling',
+      progress: { completedSegments: 12, totalSegments: 30, bytesReceived: 4096, percent: 40 },
+    },
+  });
+  assert.equal(progressing.items[0].progress, 40);
+  assert.equal(progressing.items[0].completedSegments, 12);
+  assert.equal(progressing.items[0].totalSegments, 30);
+  assert.match(progressing.items[0].statusLabel, /40%/);
+  assert.match(progressing.items[0].statusLabel, /12\/30/);
+
+  const downloading = reduceState(progressing, {
     type: 'HLS_OPERATION_UPDATED',
     operationId: 'op-42',
     record: { state: 'downloading' },

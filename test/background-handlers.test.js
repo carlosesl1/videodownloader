@@ -54,6 +54,14 @@ function completion(operationId, blobUrl = `blob:extension.test/${operationId}`)
   };
 }
 
+function progressMessage(operationId, completedSegments, totalSegments, bytesReceived) {
+  return {
+    target: 'background',
+    action: ACTIONS.HLS_PROGRESS,
+    payload: { operationId, completedSegments, totalSegments, bytesReceived },
+  };
+}
+
 function failedCompletion(operationId) {
   return {
     target: 'background',
@@ -222,6 +230,32 @@ test('a recreated coordinator reuses an assembling operation and handles complet
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.equal(env.downloadsStarted.length, 1);
+});
+
+test('progress updates persist monotonically and a different HLS start waits', async () => {
+  const env = defaultDependencies();
+  let nextId = 0;
+  env.dependencies.createOperationId = () => `operation-${++nextId}`;
+  const handlers = createBackgroundHandlers(env.dependencies);
+  const started = await handlers.handle(downloadMessage());
+
+  assert.deepEqual(await handlers.handle(progressMessage(started.operationId, 12, 30, 4096)), {
+    acknowledged: true,
+  });
+  assert.deepEqual(env.session.values[`hlsOperation:${started.operationId}`].progress, {
+    completedSegments: 12,
+    totalSegments: 30,
+    bytesReceived: 4096,
+    percent: 40,
+  });
+  await handlers.handle(progressMessage(started.operationId, 10, 30, 2048));
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].progress.percent, 40);
+
+  await assert.rejects(
+    handlers.handle(downloadMessage('https://cdn.test/other.m3u8')),
+    (error) => error.code === 'HLS_BUSY',
+  );
+  assert.equal(env.sent.filter(({ action }) => action === ACTIONS.START_HLS).length, 1);
 });
 
 test('duplicate completion never redownloads when Chrome search no longer returns the mapped item', async () => {

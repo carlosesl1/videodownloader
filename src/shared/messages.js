@@ -3,6 +3,7 @@ export const ACTIONS = Object.freeze({
   INSPECT_HLS: 'INSPECT_HLS',
   DOWNLOAD_HLS: 'DOWNLOAD_HLS',
   START_HLS: 'START_HLS',
+  HLS_PROGRESS: 'HLS_PROGRESS',
   HLS_COMPLETED: 'HLS_COMPLETED',
   HLS_RELEASED: 'HLS_RELEASED',
   ARM_INSPECTION_CLEANUP: 'ARM_INSPECTION_CLEANUP',
@@ -14,6 +15,7 @@ const BACKGROUND_ACTIONS = new Set([
   ACTIONS.DOWNLOAD_DIRECT,
   ACTIONS.INSPECT_HLS,
   ACTIONS.DOWNLOAD_HLS,
+  ACTIONS.HLS_PROGRESS,
   ACTIONS.HLS_COMPLETED,
   ACTIONS.HLS_RELEASED,
   ACTIONS.INSPECTION_CLEANUP,
@@ -27,11 +29,32 @@ const OFFSCREEN_ACTIONS = new Set([
 
 export function assertBackgroundMessage(message) {
   assertMessageShape(message, 'background', BACKGROUND_ACTIONS);
-  if (message.action === ACTIONS.HLS_COMPLETED) assertHlsCompletion(message.payload);
+  if (message.action === ACTIONS.HLS_PROGRESS) assertHlsProgress(message.payload);
+  else if (message.action === ACTIONS.HLS_COMPLETED) assertHlsCompletion(message.payload);
   else if (message.action === ACTIONS.HLS_RELEASED) assertHlsReleased(message.payload);
   else if (message.action === ACTIONS.INSPECTION_CLEANUP) assertInspectionCleanup(message.payload);
   else assertPayloadForAction(message.action, message.payload);
   return message;
+}
+
+function assertHlsProgress(payload) {
+  if (
+    !isObject(payload)
+    || !isOperationId(payload.operationId)
+    || !Number.isSafeInteger(payload.completedSegments)
+    || payload.completedSegments < 0
+    || !Number.isSafeInteger(payload.totalSegments)
+    || payload.totalSegments < 1
+    || payload.completedSegments > payload.totalSegments
+    || !Number.isSafeInteger(payload.bytesReceived)
+    || payload.bytesReceived < 0
+    || !hasOnlyKeys(payload, [
+      'operationId',
+      'completedSegments',
+      'totalSegments',
+      'bytesReceived',
+    ])
+  ) throw new Error('Mensagem inválida');
 }
 
 export function assertOffscreenMessage(message) {

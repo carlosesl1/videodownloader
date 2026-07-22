@@ -97,6 +97,33 @@ test('repeated START_HLS owns one assembly and retries completion to explicit ac
   assert.equal(retries, 1);
 });
 
+test('offscreen forwards throttled integer HLS progress to the background', async () => {
+  const progressMessages = [];
+  const completed = deferred();
+  const bridge = createOffscreenBridge({
+    assemble: async (_url, { onProgress }) => {
+      onProgress({ completedSegments: 0, totalSegments: 200, bytesReceived: 0 });
+      onProgress({ completedSegments: 1, totalSegments: 200, bytesReceived: 10 });
+      onProgress({ completedSegments: 2, totalSegments: 200, bytesReceived: 20 });
+      return { blob: new Blob(['X']), size: 1 };
+    },
+    createObjectURL: () => 'blob:extension.test/progress',
+    sendProgress: async (message) => { progressMessages.push(message); },
+    sendCompletion: async () => {
+      completed.resolve();
+      return { ok: true, value: { acknowledged: true } };
+    },
+  });
+
+  await bridge.handle(startMessage());
+  await completed.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(progressMessages.map(({ payload }) => payload), [
+    { operationId: 'operation-1', completedSegments: 0, totalSegments: 200, bytesReceived: 0 },
+    { operationId: 'operation-1', completedSegments: 2, totalSegments: 200, bytesReceived: 20 },
+  ]);
+});
+
 test('release verifies operation ownership and cannot revoke another operation blob', async () => {
   const revoked = [];
   const completions = [];

@@ -5,6 +5,7 @@ const DEDUPE_PREFIX = 'hlsDedupe:';
 const TRACKING_PREFIX = 'hlsDownloadBlob:';
 const INSPECTION_PREFIX = 'hlsInspection:';
 const ACTIVE_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
+const ASSEMBLY_STATES = new Set(['starting', 'assembling', 'assembled']);
 const PERMISSION_STATES = new Set(['starting', 'assembling']);
 const TERMINAL_STATES = new Set(['complete', 'interrupted', 'failed']);
 const SAFE_CODE = /^[A-Z0-9_]{1,64}$/;
@@ -339,6 +340,16 @@ export function createBackgroundHandlers({
         }
       }
 
+      const activeAssembly = (await allRecords()).find((record) => (
+        isObject(record) && ASSEMBLY_STATES.has(record.state)
+      ));
+      if (activeAssembly) {
+        throw new BackgroundError(
+          'HLS_BUSY',
+          'Aguarde a montagem do outro vídeo HLS terminar.',
+        );
+      }
+
       const permissionPatterns = normalizePatterns(message.payload.permissionPatterns);
       if (!(await permissionsContain(permissionPatterns))) {
         throw new BackgroundError(
@@ -355,6 +366,12 @@ export function createBackgroundHandlers({
         allowedOrigins: [...message.payload.allowedOrigins],
         permissionPatterns,
         state: 'starting',
+        progress: {
+          completedSegments: 0,
+          totalSegments: 0,
+          bytesReceived: 0,
+          percent: 0,
+        },
       };
       await storageSession.set({
         [operationKey(operationId)]: record,
@@ -513,11 +530,49 @@ export function createBackgroundHandlers({
         return { acknowledged: true };
       }
       if (!record.blobUrl) {
-        record = { ...record, state: 'assembled', blobUrl, size };
+        record = {
+          ...record,
+          state: 'assembled',
+          blobUrl,
+          size,
+          progress: {
+            completedSegments: record.progress?.totalSegments ?? 0,
+            totalSegments: record.progress?.totalSegments ?? 0,
+            bytesReceived: size,
+            percent: 100,
+          },
+        };
         await storageSession.set({ [operationKey(operationId)]: record });
       }
       record = await releaseAssemblyPermissions(record);
       await handoffAssembled(record);
+      return { acknowledged: true };
+    });
+  }
+
+  async function progressHls(message) {
+    return serialized(async () => {
+      const { operationId, completedSegments, totalSegments, bytesReceived } = message.payload;
+      const record = await getRecord(operationId);
+      if (!isObject(record) || !ASSEMBLY_STATES.has(record.state)) {
+        return { acknowledged: true };
+      }
+      const current = isObject(record.progress) ? record.progress : {};
+      if (
+        Number.isSafeInteger(current.completedSegments)
+        && completedSegments < current.completedSegments
+      ) return { acknowledged: true };
+      if (Number.isSafeInteger(current.bytesReceived) && bytesReceived < current.bytesReceived) {
+        return { acknowledged: true };
+      }
+      const percent = Math.min(100, Math.floor((completedSegments / totalSegments) * 100));
+      await storageSession.set({
+        [operationKey(operationId)]: {
+          ...record,
+          state: 'assembling',
+          progress: { completedSegments, totalSegments, bytesReceived, percent },
+        },
+      });
       return { acknowledged: true };
     });
   }
@@ -623,6 +678,7 @@ export function createBackgroundHandlers({
       }
       if (message.action === ACTIONS.INSPECT_HLS) return inspectHls(message);
       if (message.action === ACTIONS.DOWNLOAD_HLS) return startHls(message);
+      if (message.action === ACTIONS.HLS_PROGRESS) return progressHls(message);
       if (message.action === ACTIONS.HLS_COMPLETED) return completeHls(message);
       if (message.action === ACTIONS.HLS_RELEASED) return releasedHls(message);
       return inspectionCleanup(message);
