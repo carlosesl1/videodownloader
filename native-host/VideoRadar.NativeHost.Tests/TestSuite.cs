@@ -9,6 +9,8 @@ internal static partial class TestSuite
         HostExecutableTest();
         DotnetWrapperForwardsInfoArgumentsTest();
         DotnetWrapperForwardsPublishOutputArgumentsTest();
+        ProtocolTests();
+        YouTubeUrlTests();
     }
 
     private static void HostInfoTest()
