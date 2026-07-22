@@ -25,6 +25,24 @@ const hlsItem = {
   variants: [{ url: 'https://cdn.test/master.m3u8', label: 'Qualidade a verificar' }],
 };
 
+const youtubeSnapshot = {
+  jobId: 'youtube-job-1',
+  videoId: 'jNQXAC9IVRw',
+  title: 'Me at the zoo',
+  url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+  height: 720,
+  format: { height: 720, label: '720p', container: 'mp4', combined: true },
+  stage: 'video',
+  percent: null,
+  downloadedBytes: null,
+  totalBytes: null,
+  speedBytesPerSecond: null,
+  etaSeconds: null,
+  path: null,
+  error: null,
+  updatedAt: 1,
+};
+
 test('moves from idle through scanning to results and empty', () => {
   const scanning = reduceState(initialState, { type: 'SCAN_STARTED' });
   assert.equal(scanning.status, 'scanning');
@@ -186,4 +204,40 @@ test('quality selection updates the visible filename and a denied retry clears p
   const waiting = { ...selected, pendingPermission: { id: directItem.id, selectedIndex: 1, origins: ['https://cdn.test'] } };
   const denied = reduceState(waiting, { type: 'FAILED', id: directItem.id, code: 'PERMISSION_DENIED' });
   assert.equal(denied.pendingPermission, null);
+});
+
+test('stores a YouTube catalog with descending variants and keeps its selected format coherent', () => {
+  const loaded = reduceState(initialState, {
+    type: 'YOUTUBE_FORMATS_LOADED',
+    target: 'youtube.com',
+    item: {
+      id: 'youtube:jNQXAC9IVRw', kind: 'youtube', url: youtubeSnapshot.url, title: youtubeSnapshot.title,
+      filename: 'Me at the zoo-1080p.mp4', selectedIndex: 0, predictedFormat: 'mp4', phase: 'ready',
+      variants: [
+        { height: 1080, label: '1080p', container: 'mp4', combined: false, filename: 'Me at the zoo-1080p.mp4' },
+        { height: 720, label: '720p', container: 'webm', combined: true, filename: 'Me at the zoo-720p.webm' },
+      ],
+    },
+  });
+  assert.equal(loaded.status, 'results');
+  assert.equal(loaded.items[0].variants[0].height, 1080);
+
+  const selected = reduceState(loaded, { type: 'QUALITY_SELECTED', id: loaded.items[0].id, selectedIndex: 1 });
+  assert.equal(selected.items[0].filename, 'Me at the zoo-720p.webm');
+  assert.equal(selected.items[0].predictedFormat, 'webm');
+});
+
+test('restores and updates persisted YouTube jobs without inventing unknown progress', () => {
+  const restored = reduceState(initialState, { type: 'YOUTUBE_JOB_RESTORED', snapshot: youtubeSnapshot });
+  assert.equal(restored.status, 'results');
+  assert.equal(restored.items[0].progress, null);
+  assert.equal(restored.items[0].active, true);
+
+  const completed = reduceState(restored, {
+    type: 'YOUTUBE_JOB_UPDATED',
+    snapshot: { ...youtubeSnapshot, stage: 'complete', percent: 100, path: 'C:/Downloads/zoo.mp4', updatedAt: 2 },
+  });
+  assert.equal(completed.items[0].active, false);
+  assert.equal(completed.items[0].path, 'C:/Downloads/zoo.mp4');
+  assert.equal(completed.items[0].statusLabel, 'Concluído');
 });

@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 
 import {
   buildOriginGrant,
+  bootPopup,
   canonicalMediaUrl,
   findMatchingOperation,
   permissionOriginsFromError,
   unwrapDirectResponse,
   unwrapInspectResponse,
   unwrapQueuedResponse,
+  unwrapYouTubeFormats,
+  unwrapYouTubeJob,
+  youtubeItem,
 } from '../src/popup/main.js';
 
 test('builds exact safe Chrome origin patterns with ports', () => {
@@ -86,4 +90,54 @@ test('matches the newest persisted operation by canonical variant URL', () => {
     { operationId: 'new', url: 'https://cdn.test/720.m3u8?token=x', state: 'assembling', updatedAt: 2 },
   ]);
   assert.equal(found.operationId, 'new');
+});
+
+test('unwraps only a valid pure YouTube catalog and durable job snapshot', () => {
+  const catalog = unwrapYouTubeFormats({ ok: true, value: {
+    videoId: 'jNQXAC9IVRw', title: 'Me at the zoo', durationSeconds: 19,
+    qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+  } });
+  const item = youtubeItem(catalog, 'https://www.youtube.com/watch?v=jNQXAC9IVRw');
+  assert.equal(item.kind, 'youtube');
+  assert.equal(item.filename, 'Me at the zoo-720p.mp4');
+
+  const snapshot = unwrapYouTubeJob({ ok: true, value: {
+    jobId: 'youtube-job-1', videoId: 'jNQXAC9IVRw', title: 'Me at the zoo',
+    url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw', height: 720,
+    format: { height: 720, label: '720p', container: 'mp4', combined: true },
+    stage: 'video', percent: null, downloadedBytes: null, totalBytes: null,
+    speedBytesPerSecond: null, etaSeconds: null, path: null, error: null, updatedAt: 1,
+  } });
+  assert.equal(snapshot.jobId, 'youtube-job-1');
+  assert.throws(() => unwrapYouTubeJob({ ok: true, value: { ...snapshot, url: 'https://evil.test' } }), (error) => error.code === 'INVALID_RESPONSE');
+});
+
+test('boots one YouTube recovery request and one shared storage listener', async () => {
+  class Element {
+    constructor() { this.dataset = {}; this.children = []; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute() {}
+    addEventListener() {}
+  }
+  const root = new Element();
+  const announcer = new Element();
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  const messages = [];
+  const listeners = [];
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        runtime: { sendMessage: async (message) => { messages.push(message); return { ok: true, value: null }; } },
+        storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
+      },
+    });
+    await Promise.resolve();
+    assert.deepEqual(messages, [{ target: 'background', action: 'YOUTUBE_GET_JOB', payload: {} }]);
+    assert.equal(listeners.length, 1);
+  } finally {
+    globalThis.document = previousDocument;
+  }
 });

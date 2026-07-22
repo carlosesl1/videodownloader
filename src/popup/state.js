@@ -1,3 +1,5 @@
+import { normalizeJobView } from '../youtube/job-view.js';
+
 const ERROR_MESSAGES = Object.freeze({
   PERMISSION_DENIED: 'Autorize o acesso ao servidor de mídia para continuar.',
   BACKGROUND_PERMISSION_BUSY: 'A autorização expirou. Autorize o servidor de mídia novamente.',
@@ -11,6 +13,13 @@ const ERROR_MESSAGES = Object.freeze({
   HLS_NETWORK: 'Não foi possível acessar todos os segmentos. Tente novamente.',
   HLS_PERMISSION: 'Este vídeo usa outro servidor de mídia. Autorize-o para continuar.',
   SCAN_FAILED: 'Não foi possível analisar esta aba. Recarregue a página e tente novamente.',
+  NATIVE_DISCONNECTED: 'O auxiliar de download foi desconectado. Reconecte-o e tente novamente.',
+  NATIVE_JOB_MISSING: 'O download não foi encontrado no auxiliar. Tente novamente.',
+  NATIVE_JOB_MISMATCH: 'O download aberto não corresponde a esta solicitação. Tente novamente.',
+  YOUTUBE_BUSY: 'Aguarde o download do YouTube em andamento terminar.',
+  YOUTUBE_METADATA: 'Não foi possível ler as qualidades deste vídeo do YouTube. Tente novamente.',
+  YOUTUBE_DOWNLOAD: 'Não foi possível iniciar o download do YouTube. Tente novamente.',
+  INVALID_URL: 'Esta URL do YouTube não é válida. Abra um vídeo e tente novamente.',
 });
 
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled']);
@@ -83,6 +92,43 @@ function currentBusyId(items) {
   return items.find((item) => item.phase === 'preparing')?.id ?? null;
 }
 
+function youtubeFilename(title, format) {
+  return `${title}-${format.label}.${format.container}`;
+}
+
+function youtubeView(snapshot, existing) {
+  const view = normalizeJobView({
+    jobId: snapshot.jobId,
+    videoId: snapshot.videoId,
+    title: snapshot.title,
+    height: snapshot.height,
+    stage: snapshot.stage,
+    percent: snapshot.percent,
+    path: snapshot.path,
+    errorCode: snapshot.error,
+  });
+  const persistedVariant = {
+    ...snapshot.format,
+    filename: youtubeFilename(snapshot.title, snapshot.format),
+  };
+  const variants = existing?.kind === 'youtube' && existing.variants?.length
+    ? existing.variants.map((variant) => variant.height === snapshot.format.height ? persistedVariant : variant)
+    : [persistedVariant];
+  const selectedIndex = Math.max(0, variants.findIndex((variant) => variant.height === snapshot.format.height));
+  const selected = variants[selectedIndex] ?? persistedVariant;
+  return {
+    id: `youtube:${snapshot.videoId}`,
+    kind: 'youtube', url: snapshot.url, title: snapshot.title, filename: selected.filename,
+    variants, selectedIndex, predictedFormat: selected.container,
+    phase: view.stage, jobId: snapshot.jobId, active: view.active, progress: view.percent,
+    statusLabel: snapshot.stage === 'failed' && snapshot.error ? userMessageForError(snapshot.error) : view.statusLabel,
+    path: view.path, error: snapshot.error, format: { ...snapshot.format },
+    downloadedBytes: snapshot.downloadedBytes, totalBytes: snapshot.totalBytes,
+    speedBytesPerSecond: snapshot.speedBytesPerSecond, etaSeconds: snapshot.etaSeconds,
+    updatedAt: snapshot.updatedAt,
+  };
+}
+
 export function reduceState(state, event) {
   if (event.type === 'SCAN_STARTED') {
     return {
@@ -145,10 +191,14 @@ export function reduceState(state, event) {
   if (event.type === 'QUALITY_SELECTED') {
     return {
       ...state,
-      items: updateItem(state.items, event.id, (item) => ({
-        selectedIndex: event.selectedIndex,
-        filename: item.variants[event.selectedIndex]?.filename ?? item.filename,
-      })),
+      items: updateItem(state.items, event.id, (item) => {
+        const selected = item.variants[event.selectedIndex];
+        return {
+          selectedIndex: event.selectedIndex,
+          filename: selected?.filename ?? item.filename,
+          ...(item.kind === 'youtube' && selected ? { predictedFormat: selected.container } : {}),
+        };
+      }),
     };
   }
 
@@ -207,6 +257,41 @@ export function reduceState(state, event) {
       error: undefined,
     }));
     return { ...state, items, busyId: currentBusyId(items), message: 'Download enviado ao Chrome' };
+  }
+
+  if (event.type === 'YOUTUBE_FORMATS_LOADED') {
+    return {
+      ...state,
+      status: 'results', target: event.target ?? 'youtube.com', items: [event.item], busyId: null,
+      pendingPermission: null, message: '1 vídeo encontrado',
+    };
+  }
+
+  if (event.type === 'YOUTUBE_JOB_RESTORED') {
+    if (!event.snapshot) return state;
+    const item = youtubeView(event.snapshot, state.items.find((entry) => entry.id === `youtube:${event.snapshot.videoId}`));
+    const items = [...state.items.filter((entry) => entry.id !== item.id), item];
+    return {
+      ...state,
+      status: 'results', target: 'youtube.com', items,
+      busyId: item.active ? item.id : currentBusyId(items), message: '1 vídeo encontrado',
+    };
+  }
+
+  if (event.type === 'YOUTUBE_JOB_UPDATED') {
+    if (!event.snapshot) return state;
+    const existing = state.items.find((entry) => entry.kind === 'youtube' && entry.jobId === event.snapshot.jobId)
+      ?? state.items.find((entry) => entry.id === `youtube:${event.snapshot.videoId}`);
+    const item = youtubeView(event.snapshot, existing);
+    const items = existing
+      ? state.items.map((entry) => entry === existing ? item : entry)
+      : [...state.items, item];
+    return {
+      ...state,
+      status: 'results', target: state.target || 'youtube.com', items,
+      busyId: item.active ? item.id : currentBusyId(items),
+      message: state.message || '1 vídeo encontrado',
+    };
   }
 
   if (event.type === 'FAILED') {

@@ -2,6 +2,9 @@ import { scanPage } from '../detection/scan-page.js';
 import { groupDirectVariants, normalizeCandidates } from '../detection/media-candidates.js';
 import { buildDownloadFilename } from '../shared/filename.js';
 import { ACTIONS } from '../shared/messages.js';
+import { YOUTUBE_ACTIONS, assertFormatsResult } from '../youtube/protocol.js';
+import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
+import { assertJobSnapshot } from '../youtube/job-view.js';
 import { initialState, reduceState } from './state.js';
 import { renderPopup } from './render.js';
 
@@ -18,9 +21,20 @@ const OPERATION_STATES = new Set([
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
 const OPERATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ERROR_CODE = /^[A-Z0-9_]{1,64}$/;
+const YOUTUBE_SNAPSHOT_FIELDS = [
+  'jobId', 'videoId', 'title', 'url', 'height', 'format', 'stage', 'percent',
+  'downloadedBytes', 'totalBytes', 'speedBytesPerSecond', 'etaSeconds', 'path', 'error', 'updatedAt',
+];
 
 function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
 }
 
 function httpUrl(value) {
@@ -137,6 +151,81 @@ export function unwrapQueuedResponse(response) {
     && OPERATION_ID.test(value.operationId)
     && value.state === 'assembling'
   ));
+}
+
+function invalidYouTubeResponse() {
+  return Object.assign(new Error('Resposta inválida do processamento.'), { code: 'INVALID_RESPONSE' });
+}
+
+function sanitizeYouTubeJobSnapshot(value) {
+  if (!isObject(value) || !hasOnlyKeys(value, YOUTUBE_SNAPSHOT_FIELDS)) throw invalidYouTubeResponse();
+  const {
+    jobId, videoId, title, url, height, format, stage, percent,
+    downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds,
+    path, error, updatedAt,
+  } = value;
+  let core;
+  try {
+    core = assertJobSnapshot({ jobId, videoId, title, height, stage, percent, path, errorCode: error });
+  } catch {
+    throw invalidYouTubeResponse();
+  }
+  if (!videoId || !title || canonicalYouTubePageUrl(url) !== url || !url.endsWith(`v=${videoId}`)
+    || !(percent === null || (Number.isSafeInteger(percent) && percent >= 0 && percent <= 100))
+    || ![downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds].every((entry) => entry === null || (Number.isSafeInteger(entry) && entry >= 0))
+    || !(error === null || (typeof error === 'string' && ERROR_CODE.test(error)))
+    || !Number.isSafeInteger(updatedAt) || updatedAt < 0
+    || !isObject(format) || !hasOnlyKeys(format, ['height', 'label', 'container', 'combined'])) throw invalidYouTubeResponse();
+  let validatedFormat;
+  try {
+    validatedFormat = assertFormatsResult({
+      type: 'formats', requestId: 'popup', videoId, title, durationSeconds: null, qualities: [format],
+    }).qualities[0];
+  } catch {
+    throw invalidYouTubeResponse();
+  }
+  if (validatedFormat.height !== core.height) throw invalidYouTubeResponse();
+  return {
+    jobId: core.jobId, videoId, title, url, height: core.height,
+    format: { ...validatedFormat }, stage: core.stage, percent,
+    downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds,
+    path: core.path, error, updatedAt,
+  };
+}
+
+export function unwrapYouTubeFormats(response) {
+  const catalog = unwrap(response, (value) => {
+    if (!isObject(value) || !hasOnlyKeys(value, ['videoId', 'title', 'durationSeconds', 'qualities'])
+      || !Array.isArray(value.qualities)
+      || !value.qualities.every((quality) => isObject(quality) && hasOnlyKeys(quality, ['height', 'label', 'container', 'combined']))) return false;
+    try {
+      assertFormatsResult({ type: 'formats', requestId: 'popup', ...value });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const parsed = assertFormatsResult({ type: 'formats', requestId: 'popup', ...catalog });
+  return { ...parsed, qualities: parsed.qualities.map((quality) => ({ ...quality })) };
+}
+
+export function unwrapYouTubeJob(response) {
+  const value = unwrap(response, (candidate) => candidate === null || isObject(candidate));
+  return value === null ? null : sanitizeYouTubeJobSnapshot(value);
+}
+
+export function youtubeItem(formats, url) {
+  const variants = formats.qualities.map((quality) => ({
+    ...quality,
+    filename: `${formats.title}-${quality.label}.${quality.container}`,
+  }));
+  const first = variants[0];
+  return {
+    id: `youtube:${formats.videoId}`,
+    kind: 'youtube', url, title: formats.title, filename: first.filename, variants,
+    selectedIndex: 0, predictedFormat: first.container, phase: 'ready', jobId: null,
+    active: false, progress: null, statusLabel: '', path: null, error: null,
+  };
 }
 
 export function permissionOriginsFromError(error) {
@@ -311,12 +400,37 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
+  async function restoreYouTubeJob() {
+    try {
+      const response = await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: YOUTUBE_ACTIONS.GET_JOB,
+        payload: {},
+      });
+      const snapshot = unwrapYouTubeJob(response);
+      if (snapshot) dispatch({ type: 'YOUTUBE_JOB_RESTORED', snapshot });
+    } catch {
+      // A failed restore must not hide the idle UI or HLS state.
+    }
+  }
+
   async function scan() {
     dispatch({ type: 'SCAN_STARTED' });
     try {
       const tabs = await chromeApi.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
       if (!Number.isInteger(tab?.id)) throw new Error('Aba ativa indisponível');
+      const youtubeUrl = canonicalYouTubePageUrl(tab.url);
+      if (youtubeUrl) {
+        const response = await chromeApi.runtime.sendMessage({
+          target: 'background',
+          action: YOUTUBE_ACTIONS.LIST_FORMATS,
+          payload: { url: youtubeUrl },
+        });
+        const formats = unwrapYouTubeFormats(response);
+        dispatch({ type: 'YOUTUBE_FORMATS_LOADED', item: youtubeItem(formats, youtubeUrl), target: 'youtube.com' });
+        return;
+      }
       const executions = await chromeApi.scripting.executeScript({
         target: { tabId: tab.id },
         func: scanPage,
@@ -396,6 +510,21 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   }
 
   async function download(item, selectedIndex) {
+    if (item.kind === 'youtube') {
+      const variant = item.variants[selectedIndex] ?? item.variants[0];
+      try {
+        const response = await chromeApi.runtime.sendMessage({
+          target: 'background',
+          action: YOUTUBE_ACTIONS.START_DOWNLOAD,
+          payload: { url: item.url, height: variant.height },
+        });
+        const snapshot = unwrapYouTubeJob(response);
+        if (snapshot) dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
+      } catch (error) {
+        dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'YOUTUBE_DOWNLOAD' });
+      }
+      return;
+    }
     if (item.kind === 'hls') {
       await startHls(item, selectedIndex);
       return;
@@ -429,6 +558,20 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
+  async function cancel(item) {
+    if (item?.kind !== 'youtube' || !item.jobId) return;
+    try {
+      const response = await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: YOUTUBE_ACTIONS.CANCEL_DOWNLOAD,
+        payload: { jobId: item.jobId },
+      });
+      unwrap(response, (value) => isObject(value) && value.requested === true);
+    } catch (error) {
+      dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'YOUTUBE_DOWNLOAD' });
+    }
+  }
+
   root.addEventListener('change', (event) => {
     const select = event.target?.closest?.('[data-quality]');
     if (!select) return;
@@ -447,6 +590,12 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       if (item) inspect(item);
       return;
     }
+    const cancelButton = target?.closest?.('[data-cancel]');
+    if (cancelButton) {
+      const item = state.items.find((entry) => entry.id === cancelButton.dataset.cancel);
+      if (item) cancel(item);
+      return;
+    }
     const downloadButton = target?.closest?.('[data-download]');
     if (downloadButton) {
       const item = state.items.find((entry) => entry.id === downloadButton.dataset.download);
@@ -457,14 +606,24 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   });
 
   chromeApi.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'session') return;
-    for (const [key, change] of Object.entries(changes)) {
-      if (!key.startsWith(OPERATION_PREFIX) || !change?.newValue) continue;
-      handleOperationRecord(key.slice(OPERATION_PREFIX.length), change.newValue);
+    if (areaName === 'session') {
+      for (const [key, change] of Object.entries(changes)) {
+        if (!key.startsWith(OPERATION_PREFIX) || !change?.newValue) continue;
+        handleOperationRecord(key.slice(OPERATION_PREFIX.length), change.newValue);
+      }
+      return;
+    }
+    if (areaName !== 'local' || !changes.youtubeJob?.newValue) return;
+    try {
+      const snapshot = sanitizeYouTubeJobSnapshot(changes.youtubeJob.newValue);
+      dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
+    } catch {
+      // Corrupt storage data must not enter popup state.
     }
   });
 
   draw();
+  void restoreYouTubeJob();
 }
 
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') bootPopup();
