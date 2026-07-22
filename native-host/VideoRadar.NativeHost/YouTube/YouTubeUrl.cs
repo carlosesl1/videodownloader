@@ -9,7 +9,8 @@ public static class YouTubeUrl
     public static bool TryCanonicalize(string url, out string canonical)
     {
         canonical = string.Empty;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        if (!HasSafeRawAuthorityAndPath(url)
+            || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
             || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             || !string.IsNullOrEmpty(uri.UserInfo)
             || !uri.IsDefaultPort)
@@ -32,6 +33,57 @@ public static class YouTubeUrl
 
         canonical = $"https://www.youtube.com/watch?v={videoId}";
         return true;
+    }
+
+    private static bool HasSafeRawAuthorityAndPath(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return false;
+
+        var schemeSeparator = url.IndexOf("://", StringComparison.Ordinal);
+        if (schemeSeparator < 0) return false;
+
+        var authorityStart = schemeSeparator + 3;
+        var authorityEnd = FindDelimiter(url, authorityStart, includePathSeparators: true);
+        if (url.AsSpan(authorityStart, authorityEnd - authorityStart).Contains('@')) return false;
+        if (authorityEnd == url.Length || url[authorityEnd] is not ('/' or '\\')) return true;
+
+        var pathEnd = FindDelimiter(url, authorityEnd, includePathSeparators: false);
+        return !HasDotSegment(url.AsSpan(authorityEnd, pathEnd - authorityEnd));
+    }
+
+    private static int FindDelimiter(string value, int start, bool includePathSeparators)
+    {
+        for (var index = start; index < value.Length; index++)
+        {
+            if (value[index] is '?' or '#'
+                || (includePathSeparators && value[index] is '/' or '\\'))
+            {
+                return index;
+            }
+        }
+
+        return value.Length;
+    }
+
+    private static bool HasDotSegment(ReadOnlySpan<char> path)
+    {
+        var segmentStart = 0;
+        for (var index = 0; index <= path.Length; index++)
+        {
+            if (index != path.Length && path[index] is not ('/' or '\\')) continue;
+
+            var segment = path[segmentStart..index];
+            if (segment.SequenceEqual(".".AsSpan())
+                || segment.SequenceEqual("..".AsSpan())
+                || Uri.UnescapeDataString(segment.ToString()) is "." or "..")
+            {
+                return true;
+            }
+
+            segmentStart = index + 1;
+        }
+
+        return false;
     }
 
     private static bool IsWatchHost(string host) =>

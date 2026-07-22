@@ -147,10 +147,17 @@ internal static partial class TestSuite
         foreach (var url in new[]
         {
             "https://user@youtube.com/watch?v=jNQXAC9IVRw",
+            "https://@youtube.com/watch?v=jNQXAC9IVRw",
             "https://youtube.com:444/watch?v=jNQXAC9IVRw",
             "https://youtube.com.evil.test/watch?v=jNQXAC9IVRw",
             "https://notyoutube.com/watch?v=jNQXAC9IVRw",
+            "https://youtube.com/extra/../watch?v=jNQXAC9IVRw",
+            "https://youtube.com/./watch?v=jNQXAC9IVRw",
+            "https://youtube.com/%2e/watch?v=jNQXAC9IVRw",
             "https://youtu.be/jNQXAC9IVRw/extra",
+            "https://youtu.be/extra/../jNQXAC9IVRw",
+            "https://youtu.be/./jNQXAC9IVRw",
+            "https://youtu.be/%2e/jNQXAC9IVRw",
             "https://youtu.be/jNQXAC9IVR",
             "https://youtu.be/jNQXAC9IVR!",
             "https://www.youtube.com/watch?v=jNQXAC9IVR",
@@ -163,6 +170,9 @@ internal static partial class TestSuite
             True(!YouTubeUrl.TryCanonicalize(url, out var canonical), $"Invalid URL accepted: {url}");
             Equal(string.Empty, canonical);
         }
+
+        True(!YouTubeUrl.TryCanonicalize(null!, out var nullCanonical), "Null URL accepted.");
+        Equal(string.Empty, nullCanonical);
     }
 
     private static void Throws<TException>(Action action) where TException : Exception
