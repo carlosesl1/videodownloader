@@ -81,12 +81,12 @@ O pacote de desenvolvimento terá um instalador de usuário único, sem elevaç�
 O instalador:
 
 1. copia componentes com versões fixadas e verifica seus SHA-256;
-2. detecta Google Chrome, Microsoft Edge e Brave instalados e registra o manifesto Native Messaging nos respectivos locais de usuário em `HKCU`, sem administrador;
+2. registra o manifesto Native Messaging nos locais de usuário em `HKCU` para Google Chrome, Microsoft Edge, Brave e Vivaldi, sem administrador;
 3. restringe `allowed_origins` ao ID estável do Vídeo Radar;
 4. executa um `ping` local de diagnóstico;
 5. informa sucesso ou uma falha acionável.
 
-O `manifest.json` da extensão terá uma chave de desenvolvimento estável, para que o ID usado pelo Native Messaging não mude ao recarregar a extensão descompactada nesses navegadores. Outros navegadores Chromium ficam fora da matriz inicial até que seu local de registro seja documentado e testado.
+O `manifest.json` da extensão terá uma chave de desenvolvimento estável, para que o ID usado pelo Native Messaging não mude ao recarregar a extensão descompactada nesses navegadores. Outros navegadores Chromium ficam fora da matriz até que seu local de registro seja documentado e testado.
 
 O pacote descompactado usa uma origem fixa. Uma futura distribuição por lojas deverá gerar o manifesto do host com a lista explícita de IDs de cada canal publicado. Não serão usados curingas em `allowed_origins`.
 
@@ -333,7 +333,7 @@ Não serão adicionados testes de rede instáveis que dependam continuamente do 
 
 O suporte está pronto quando:
 
-1. o instalador registra o host sem administrador em Windows 10/11 x64 para Chrome, Edge e Brave detectados;
+1. o instalador registra o host sem administrador em Windows 10/11 x64 para Chrome, Edge, Brave e Vivaldi;
 2. o popup distingue claramente auxiliar ausente de mídia ausente;
 3. **Buscar vídeos** mostra as alturas disponíveis em um vídeo público compatível;
 4. a qualidade selecionada é respeitada;

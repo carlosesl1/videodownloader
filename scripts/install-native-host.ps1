@@ -364,7 +364,8 @@ try {
   $registryKeys = @(
     'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.videoradar.helper',
     'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.videoradar.helper',
-    'HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.videoradar.helper'
+    'HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.videoradar.helper',
+    'HKCU:\Software\Vivaldi\NativeMessagingHosts\com.videoradar.helper'
   )
   $registrySnapshot = @(Get-RegistrySnapshot -Keys $registryKeys)
   $registryTouched = $true
@@ -373,7 +374,7 @@ try {
     Set-Item -Path $key -Value $manifestPath
   }
 
-  Write-Host 'Vídeo Radar instalado com sucesso para Chrome, Edge e Brave.'
+  Write-Host 'Vídeo Radar instalado com sucesso para Chrome, Edge, Brave e Vivaldi.'
   Write-Host "Manifesto nativo: $manifestPath"
   if ($oldInstallMoved) {
     Write-Host "Cópia anterior preservada em: $installBackup"

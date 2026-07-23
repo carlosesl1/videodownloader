@@ -13,7 +13,7 @@ Use somente para um vídeo público que seja seu ou cujo download tenha sido aut
    ```
 
    O pacote é criado em `dist\video-radar-helper`, ocupa cerca de 480 MB e, na primeira execução, requer rede para obter os artefatos fixados no lock.
-2. Carregue **a pasta raiz, sem compactação**, no navegador: `chrome://extensions`, `edge://extensions` ou `brave://extensions`. Ative o modo de desenvolvedor e clique em **Carregar sem compactação**. Não selecione `dist`.
+2. Carregue **a pasta raiz, sem compactação**, no navegador: `chrome://extensions`, `edge://extensions`, `brave://extensions` ou `vivaldi://extensions`. Ative o modo de desenvolvedor e clique em **Carregar sem compactação**. Não selecione `dist`.
 3. Dentro de `dist\video-radar-helper`, execute `Instalar-Video-Radar.cmd`. Não execute o launcher da raiz: ele não fica ao lado de um `package-manifest.json` válido.
 4. Volte à página de extensões e clique em **Recarregar**. O ID esperado é `cakpfifpfmbdcilimpedanglnopnmckg`.
 
@@ -50,12 +50,13 @@ npm run check:all
 
 ## Desinstalação
 
-Feche Chrome, Edge e Brave. Remova a extensão em cada página de extensões e, no PowerShell, remova somente os registros do usuário atual e a pasta `%LOCALAPPDATA%\VideoRadar`:
+Feche Chrome, Edge, Brave e Vivaldi. Remova a extensão em cada página de extensões e, no PowerShell, remova somente os registros do usuário atual e a pasta `%LOCALAPPDATA%\VideoRadar`:
 
 ```powershell
 Remove-Item -LiteralPath 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.videoradar.helper' -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath 'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.videoradar.helper' -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath 'HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.videoradar.helper' -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKCU:\Software\Vivaldi\NativeMessagingHosts\com.videoradar.helper' -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath "$env:LOCALAPPDATA\VideoRadar" -Recurse -Force -ErrorAction SilentlyContinue
 ```
 

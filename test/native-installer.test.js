@@ -245,9 +245,10 @@ test('instalador valida todo o pacote e o manifest antes de tocar no registro HK
     'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.videoradar.helper',
     'HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.videoradar.helper',
     'HKCU:\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.videoradar.helper',
+    'HKCU:\\Software\\Vivaldi\\NativeMessagingHosts\\com.videoradar.helper',
   ];
   for (const key of registryKeys) assert.ok(script.includes(key), `registro ausente: ${key}`);
-  assert.equal((script.match(/HKCU:\\Software\\/g) ?? []).length, 3);
+  assert.equal((script.match(/HKCU:\\Software\\/g) ?? []).length, 4);
 
   const packageValidation = indexOfOrFail(script, 'Assert-PackagePayload', 'validação do pacote');
   const stagingCopy = indexOfOrFail(script, 'Copy-PackagePayload', 'cópia para staging');

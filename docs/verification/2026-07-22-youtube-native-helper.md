@@ -50,7 +50,7 @@ O popup foi renderizado por controlador de navegador em 380×980. `innerWidth`, 
 
 ## Como completar a validação manual
 
-1. Com uma URL pública própria/autorizada, gere ou obtenha o pacote e carregue a pasta da extensão no Chrome, Edge ou Brave.
+1. Com uma URL pública própria/autorizada, gere ou obtenha o pacote e carregue a pasta da extensão no Chrome, Edge, Brave ou Vivaldi.
 2. Execute `Instalar-Video-Radar.cmd` **de dentro de** `dist\video-radar-helper`; recarregue a extensão.
 3. Primeiro abra o popup sem o auxiliar (ou antes de instalá-lo) e registre o texto do erro; então instale/recarregue e confirme recuperação.
 4. Busque formatos, escolha uma qualidade, inicie o download, feche/reabra o popup, cancele uma segunda tentativa e confira o diretório de destino.
