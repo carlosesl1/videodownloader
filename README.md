@@ -25,7 +25,17 @@ Se você recebeu o pacote distribuído já pronto, execute o launcher **dentro d
 2. Abra o popup, clique em **Buscar vídeos**, escolha a qualidade e clique em **Baixar**.
 3. O progresso permanece disponível ao fechar e reabrir o popup. Use **Cancelar** para interromper um trabalho em andamento.
 
-Os downloads do YouTube feitos pelo auxiliar são gravados em `%USERPROFILE%\Downloads\Video Radar`. Para mídias diretas e HLS, use **Configurar downloads** no rodapé do popup para escolher uma subpasta dentro da pasta Downloads padrão. O salvamento é automático por padrão; também é possível ativar novamente o diálogo **Salvar como**.
+### Destino dos downloads
+
+Abra **Configurar downloads** no popup para escolher uma pasta padrão do Windows.
+Com **Perguntar onde salvar cada download** ativado, o navegador pergunta o destino
+para vídeos diretos/HLS e o Windows pergunta a pasta para YouTube. Desativando a opção,
+todos os formatos usam automaticamente a pasta padrão.
+
+Diretos e HLS automáticos passam temporariamente por
+`Downloads\Video Radar\.staging`. Se a movimentação falhar, o popup mostra o caminho
+preservado para recuperação. O auxiliar nativo é necessário para escolher a pasta,
+baixar YouTube e entregar arquivos automáticos fora da pasta Downloads do navegador.
 
 Para mídias diretas, a extensão reconhece `.mp4`, `.webm` e `.mov`. Para HLS compatível, ela apresenta variantes quando existirem e une os segmentos em `.ts`. Durante a montagem, o popup mostra os bytes já recebidos e uma estimativa do tamanho final marcada com `~`; o valor só é exato quando todos os segmentos terminam. Até oito segmentos são buscados simultaneamente quando o servidor permite.
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { access, readdir, readFile } from 'node:fs/promises';
 import { dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MIN_NATIVE_PROTOCOL_VERSION } from '../src/youtube/protocol.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const fromRoot = (...parts) => resolve(root, ...parts);
@@ -42,6 +43,10 @@ await Promise.all(required.map((file) => access(fromRoot(file))));
 sameSet(manifest.permissions ?? [], [
   'activeTab', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage',
 ], 'manifest permissions');
+assert(manifest.permissions.includes('nativeMessaging'), 'manifest must allow native messaging');
+assert(manifest.permissions.includes('downloads'), 'manifest must allow browser downloads');
+assert(manifest.options_ui?.page === 'options.html', 'manifest must expose options.html');
+assert(MIN_NATIVE_PROTOCOL_VERSION === 2, 'native protocol version must remain 2');
 assert(!manifest.host_permissions?.length, 'host_permissions must remain absent or empty');
 assert(JSON.stringify(manifest.optional_host_permissions) === JSON.stringify(['http://*/*', 'https://*/*']),
   'optional_host_permissions must be the approved HTTP(S) pair');

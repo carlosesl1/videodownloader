@@ -103,7 +103,8 @@ test('helper lock, project, scripts, and README retain the offline installation 
 
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   for (const text of [
-    'Carregar sem compactação', 'YouTube', '%USERPROFILE%\\Downloads\\Video Radar',
+    'Carregar sem compactação', 'YouTube', 'Configurar downloads',
+    'Perguntar onde salvar cada download', 'Downloads\\Video Radar\\.staging',
     'Cancelar', 'Chrome', 'Edge', 'Brave', 'Vivaldi', '%LOCALAPPDATA%\\VideoRadar',
   ]) assert.match(readme, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
