@@ -23,7 +23,7 @@ internal static partial class TestSuite
 
     private static void ProtocolVersionTest()
     {
-        Equal(1, global::VideoRadar.NativeHost.HostInfo.ProtocolVersion);
+        Equal(2, global::VideoRadar.NativeHost.HostInfo.ProtocolVersion);
     }
 
     private static void HostExecutableTest()

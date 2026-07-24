@@ -5,6 +5,7 @@ using VideoRadar.NativeHost.Host;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
+using VideoRadar.NativeHost.Windows;
 using VideoRadar.NativeHost.YouTube;
 
 namespace VideoRadar.NativeHost.Tests;
@@ -19,6 +20,9 @@ internal static partial class TestSuite
         NativeHostServerCancelsAndAwaitsTheJobAtEof().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidPayloadsWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerMapsKnownFailuresWithoutLeakingDetails().GetAwaiter().GetResult();
+        NativeHostServerChoosesAndCancelsDownloadFolder().GetAwaiter().GetResult();
+        NativeHostServerMapsFolderPickerFailuresWithoutStopping().GetAwaiter().GetResult();
+        NativeHostServerRejectsInvalidFallbackFolders();
         UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts().GetAwaiter().GetResult();
         ProgramPingDiagnosticIsPureAndMachineReadable();
     }
@@ -43,7 +47,12 @@ internal static partial class TestSuite
             return new JobResult(jobId, service.Snapshot.Path!);
         };
 
-        var run = new NativeHostServer(new NativeMessageChannel(input, output), service, updater).RunAsync(CancellationToken.None);
+        var run = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            updater,
+            new FakeFolderPicker(),
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
         await output.WaitForTypeAsync("jobCompleted").WaitAsync(TimeSpan.FromSeconds(5));
         input.Complete();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
@@ -52,8 +61,9 @@ internal static partial class TestSuite
         True(messages.All(message => AllowedServerTypes.Contains(message.GetProperty("type").GetString()!)), "Server emitted a type outside the protocol allowlist.");
 
         var ready = Message(messages, "ready", "r-ping");
-        Equal(HostInfo.ProtocolVersion, ready.GetProperty("protocolVersion").GetInt32());
+        Equal(2, ready.GetProperty("protocolVersion").GetInt32());
         Equal(HostInfo.NativeName, ready.GetProperty("nativeName").GetString());
+        Equal(DefaultDownloadFolder, ready.GetProperty("defaultFolder").GetString());
 
         var formats = Message(messages, "formats", "r-formats");
         Equal("jNQXAC9IVRw", formats.GetProperty("videoId").GetString());
@@ -65,6 +75,7 @@ internal static partial class TestSuite
 
         var emptyJob = Message(messages, "ready", "r-empty");
         Equal(JsonValueKind.Null, emptyJob.GetProperty("job").ValueKind);
+        True(!emptyJob.TryGetProperty("defaultFolder", out _), "getJob unexpectedly exposed the fallback folder.");
 
         var started = Message(messages, "jobStarted", "r-start");
         var jobId = started.GetProperty("jobId").GetString()!;
@@ -107,7 +118,12 @@ internal static partial class TestSuite
         dynamicInput.Append(FrameCommands(
             Command("startDownload", "r-first", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}"),
             Command("startDownload", "r-second", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}")));
-        var server = new NativeHostServer(new NativeMessageChannel(dynamicInput, dynamicOutput), service, new FakeUpdatePolicy());
+        var server = new NativeHostServer(
+            new NativeMessageChannel(dynamicInput, dynamicOutput),
+            service,
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder);
         var run = server.RunAsync(CancellationToken.None);
         await dynamicOutput.WaitForTypeAsync("jobStarted").WaitAsync(TimeSpan.FromSeconds(5));
         var started = Message(ReadFrames(dynamicOutput), "jobStarted", "r-first");
@@ -132,7 +148,12 @@ internal static partial class TestSuite
         using var output = new SignallingOutputStream();
         var updater = new BlockingUpdatePolicy();
         var service = new FakeYouTubeService();
-        var server = new NativeHostServer(new NativeMessageChannel(input, output), service, updater);
+        var server = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            updater,
+            new FakeFolderPicker(),
+            DefaultDownloadFolder);
         var run = server.RunAsync(CancellationToken.None);
 
         input.Append(FrameCommands(
@@ -184,7 +205,12 @@ internal static partial class TestSuite
             throw new InvalidOperationException("unreachable");
         };
 
-        await new NativeHostServer(new NativeMessageChannel(input, output), service, new FakeUpdatePolicy())
+        await new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder)
             .RunAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
 
         True(cancellationObserved.Task.IsCompleted, "EOF returned before the active job observed cancellation.");
@@ -207,16 +233,23 @@ internal static partial class TestSuite
             Command("startDownload", "r-url", "{\"url\":\"https://example.test/video\",\"height\":720}"),
             Command("cancelDownload", "r-cancel-type", "{\"jobId\":42}"),
             Command("cancelDownload", "r-cancel-missing", "{\"jobId\":\"not-current\"}"),
+            Command("chooseDownloadFolder", "r-choose-extra", "{\"extra\":true}"),
             Command("ping", "r-ok", "{}")));
         using var output = new MemoryStream();
         var service = new FakeYouTubeService();
         var updater = new FakeUpdatePolicy();
+        var picker = new FakeFolderPicker(SelectedDownloadFolder);
 
-        await new NativeHostServer(new NativeMessageChannel(input, output), service, updater).RunAsync(CancellationToken.None);
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            updater,
+            picker,
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
 
         var messages = ReadFrames(output);
         Equal("INVALID_COMMAND", Message(messages, "jobFailed", "r-command").GetProperty("code").GetString());
-        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-height-type", "r-height-range", "r-cancel-type" })
+        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-height-type", "r-height-range", "r-cancel-type", "r-choose-extra" })
             Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
         Equal("INVALID_URL", Message(messages, "jobFailed", "r-url").GetProperty("code").GetString());
         Equal("JOB_NOT_FOUND", Message(messages, "jobFailed", "r-cancel-missing").GetProperty("code").GetString());
@@ -224,6 +257,7 @@ internal static partial class TestSuite
         Equal(0, service.ListCallCount);
         Equal(0, service.StartCallCount);
         Equal(0, updater.CallCount);
+        Equal(0, picker.CallCount);
     }
 
     private static async Task NativeHostServerMapsKnownFailuresWithoutLeakingDetails()
@@ -238,7 +272,12 @@ internal static partial class TestSuite
         };
         service.StartHandler = (_, _, _, _, _) => throw new InvalidOperationException("secret stack and https://sensitive.example/video");
 
-        var run = new NativeHostServer(new NativeMessageChannel(input, output), service, new FakeUpdatePolicy()).RunAsync(CancellationToken.None);
+        var run = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
         await output.WaitForMessageAsync("jobFailed", "r-download").WaitAsync(TimeSpan.FromSeconds(5));
         input.Complete();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
@@ -253,6 +292,72 @@ internal static partial class TestSuite
         var download = Message(messages, "jobFailed", "r-download");
         Equal("YOUTUBE_DOWNLOAD", download.GetProperty("code").GetString());
         True(download.GetProperty("message").GetString()!.Contains("baixar", StringComparison.OrdinalIgnoreCase), "Download error was not user-facing PT-BR.");
+    }
+
+    private static async Task NativeHostServerChoosesAndCancelsDownloadFolder()
+    {
+        using var input = new MemoryStream(FrameCommands(
+            Command("chooseDownloadFolder", "r-folder-selected", "{}"),
+            Command("chooseDownloadFolder", "r-folder-cancelled", "{}")));
+        using var output = new MemoryStream();
+        var picker = new FakeFolderPicker(SelectedDownloadFolder, null);
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            picker,
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+
+        var messages = ReadFrames(output);
+        var selected = Message(messages, "folderSelected", "r-folder-selected");
+        Equal(SelectedDownloadFolder, selected.GetProperty("path").GetString());
+        _ = Message(messages, "folderSelectionCancelled", "r-folder-cancelled");
+        Equal(2, picker.CallCount);
+    }
+
+    private static async Task NativeHostServerMapsFolderPickerFailuresWithoutStopping()
+    {
+        using var input = new MemoryStream(FrameCommands(
+            Command("chooseDownloadFolder", "r-picker-error", "{}"),
+            Command("ping", "r-after-picker-error", "{}")));
+        using var output = new MemoryStream();
+        var picker = new FakeFolderPicker
+        {
+            Error = new InvalidOperationException("secret picker diagnostic C:\\Sensitive")
+        };
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            picker,
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+
+        var raw = Encoding.UTF8.GetString(output.ToArray());
+        True(!raw.Contains("secret", StringComparison.OrdinalIgnoreCase), "A folder picker diagnostic leaked to Native Messaging stdout.");
+        True(!raw.Contains("Sensitive", StringComparison.OrdinalIgnoreCase), "A folder picker path leaked to Native Messaging stdout.");
+        var messages = ReadFrames(output);
+        var failure = Message(messages, "jobFailed", "r-picker-error");
+        Equal("HOST_ERROR", failure.GetProperty("code").GetString());
+        Equal("chooseDownloadFolder", failure.GetProperty("details").GetProperty("operation").GetString());
+        _ = Message(messages, "ready", "r-after-picker-error");
+        Equal(1, picker.CallCount);
+    }
+
+    private static void NativeHostServerRejectsInvalidFallbackFolders()
+    {
+        using var input = new MemoryStream();
+        using var output = new MemoryStream();
+        var channel = new NativeMessageChannel(input, output);
+        var service = new FakeYouTubeService();
+        var updater = new FakeUpdatePolicy();
+        var picker = new FakeFolderPicker();
+
+        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, null!));
+        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, "relative"));
+        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, @"C:\Downloads\..\Video Radar"));
+        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, DefaultDownloadFolder + "\\"));
     }
 
     private static async Task UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts()
@@ -337,8 +442,11 @@ internal static partial class TestSuite
         }
     }
 
+    private const string DefaultDownloadFolder = @"C:\Downloads\Video Radar";
+    private const string SelectedDownloadFolder = @"C:\Media\Video Radar";
+
     private static readonly HashSet<string> AllowedServerTypes =
-        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed"];
+        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled"];
 
     private static string Command(string type, string requestId, string payload) =>
         $"{{\"type\":{JsonSerializer.Serialize(type)},\"requestId\":{JsonSerializer.Serialize(requestId)},\"payload\":{payload}}}";
@@ -387,6 +495,21 @@ internal static partial class TestSuite
             CallCount++;
             if (Error is not null) throw Error;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeFolderPicker(params string?[] results) : IFolderPicker
+    {
+        public Queue<string?> Results { get; } = new(results);
+        public int CallCount { get; private set; }
+        public Exception? Error { get; init; }
+
+        public Task<string?> PickAsync(CancellationToken cancellationToken)
+        {
+            CallCount++;
+            if (Error is not null) throw Error;
+            if (Results.Count == 0) throw new InvalidOperationException("No folder picker result was configured.");
+            return Task.FromResult(Results.Dequeue());
         }
     }
 

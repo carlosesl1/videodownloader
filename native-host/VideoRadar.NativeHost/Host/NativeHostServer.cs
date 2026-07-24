@@ -1,6 +1,7 @@
 using System.Text.Json;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
+using VideoRadar.NativeHost.Windows;
 using VideoRadar.NativeHost.YouTube;
 
 namespace VideoRadar.NativeHost.Host;
@@ -13,9 +14,14 @@ public interface INativeHostServer
 public sealed class NativeHostServer(
     NativeMessageChannel channel,
     IYouTubeService youtubeService,
-    IUpdatePolicy updatePolicy) : INativeHostServer
+    IUpdatePolicy updatePolicy,
+    IFolderPicker folderPicker,
+    string fallbackDownloadFolder) : INativeHostServer
 {
     private const string UnknownRequestId = "unknown";
+    private readonly IFolderPicker folderPicker = folderPicker ?? throw new ArgumentNullException(nameof(folderPicker));
+    private readonly string fallbackDownloadFolder =
+        RequireCanonicalAbsolutePath(fallbackDownloadFolder, nameof(fallbackDownloadFolder));
     private readonly object stateLock = new();
     private ActiveDownload? activeDownload;
     private JobSnapshot? lastSnapshot;
@@ -90,6 +96,7 @@ public sealed class NativeHostServer(
         "startDownload" => HandleStartDownloadAsync(command, cancellationToken),
         "getJob" => HandleGetJobAsync(command, cancellationToken),
         "cancelDownload" => HandleCancelDownloadAsync(command, cancellationToken),
+        "chooseDownloadFolder" => HandleChooseDownloadFolderAsync(command, cancellationToken),
         _ => throw new CommandFailureException("INVALID_COMMAND", "Comando inválido.")
     };
 
@@ -101,7 +108,31 @@ public sealed class NativeHostServer(
             type = "ready",
             requestId = command.RequestId,
             protocolVersion = HostInfo.ProtocolVersion,
-            nativeName = HostInfo.NativeName
+            nativeName = HostInfo.NativeName,
+            defaultFolder = fallbackDownloadFolder
+        }, cancellationToken);
+    }
+
+    private async Task HandleChooseDownloadFolderAsync(HostCommand command, CancellationToken cancellationToken)
+    {
+        RequireExactProperties(command.Payload);
+        var path = await folderPicker.PickAsync(cancellationToken);
+        if (path is null)
+        {
+            await channel.WriteAsync(new
+            {
+                type = "folderSelectionCancelled",
+                requestId = command.RequestId
+            }, cancellationToken);
+            return;
+        }
+
+        var canonicalPath = RequireCanonicalAbsolutePath(path, nameof(path));
+        await channel.WriteAsync(new
+        {
+            type = "folderSelected",
+            requestId = command.RequestId,
+            path = canonicalPath
         }, cancellationToken);
     }
 
@@ -505,6 +536,26 @@ public sealed class NativeHostServer(
             throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
         }
         return value.GetString()!;
+    }
+
+    private static string RequireCanonicalAbsolutePath(string path, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+
+        string canonicalPath;
+        try
+        {
+            canonicalPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName, exception);
+        }
+
+        if (!string.Equals(path, canonicalPath, StringComparison.Ordinal))
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        return canonicalPath;
     }
 
     private static string TryReadRequestId(JsonElement root)

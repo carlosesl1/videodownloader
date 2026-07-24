@@ -4,6 +4,7 @@ using VideoRadar.NativeHost.Host;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
+using VideoRadar.NativeHost.Windows;
 using VideoRadar.NativeHost.YouTube;
 
 namespace VideoRadar.NativeHost;
@@ -39,7 +40,15 @@ public static class Program
             var downloadPaths = new DownloadPaths();
             var youtubeService = new YouTubeService(toolsDirectory, processRunner, downloadPaths);
             var updatePolicy = new UpdatePolicy(toolsDirectory, processRunner);
-            INativeHostServer server = new NativeHostServer(channel, youtubeService, updatePolicy);
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The folder picker requires Windows.");
+            var folderPicker = new WindowsFolderPicker();
+            INativeHostServer server = new NativeHostServer(
+                channel,
+                youtubeService,
+                updatePolicy,
+                folderPicker,
+                downloadPaths.Home);
             await server.RunAsync(CancellationToken.None);
             return 0;
         }

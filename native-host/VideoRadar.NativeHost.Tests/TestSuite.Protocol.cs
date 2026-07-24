@@ -85,7 +85,16 @@ internal static partial class TestSuite
 
     private static void HostCommandAcceptsAllowedTypesAndClonesPayload()
     {
-        foreach (var type in new[] { "ping", "listFormats", "startDownload", "cancelDownload", "getJob" })
+        foreach (var type in new[]
+        {
+            "ping",
+            "listFormats",
+            "startDownload",
+            "cancelDownload",
+            "getJob",
+            "chooseDownloadFolder",
+            "moveDownloadedFile"
+        })
         {
             using var document = JsonDocument.Parse($"{{\"type\":\"{type}\",\"requestId\":\"request-1\",\"payload\":{{\"value\":1}}}}");
             var command = HostCommand.Parse(document.RootElement);
