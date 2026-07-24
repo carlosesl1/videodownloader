@@ -133,7 +133,9 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     && hlsBusy
     && item.phase !== 'preparing';
   const activeYoutube = item.kind === 'youtube' && item.active;
-  if (activeYoutube) {
+  if (item.action === 'open-download-settings') {
+    row.append(button('Configurar downloads', 'button button--download', 'settings'));
+  } else if (activeYoutube) {
     const hasJobId = typeof item.jobId === 'string' && item.jobId.trim().length > 0;
     const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.id : '');
     cancel.disabled = !hasJobId;
@@ -174,7 +176,8 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     row.append(status);
   }
 
-  const path = typeof item.path === 'string' ? item.path.trim() : '';
+  const visiblePath = item.finalPath ?? item.stagingPath ?? item.path;
+  const path = typeof visiblePath === 'string' ? visiblePath.trim() : '';
   if (path) {
     const pathNode = node('p', 'media-row__path', path);
     pathNode.title = path;

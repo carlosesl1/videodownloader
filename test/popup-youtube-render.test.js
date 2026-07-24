@@ -212,6 +212,27 @@ test('renders YouTube completion path and terminal states without cancel or prog
   }
 });
 
+test('renders a preserved relocation failure with a row-level settings action', () => {
+  const root = renderItem({
+    id: 'download:9',
+    kind: 'hls',
+    filename: 'aula.ts',
+    format: 'ts',
+    inspected: true,
+    variants: [{ label: 'Qualidade escolhida' }],
+    selectedIndex: 0,
+    phase: 'error',
+    statusLabel: 'Não foi possível mover. Arquivo preservado em C:\\Downloads\\Video Radar\\aula.ts',
+    stagingPath: 'C:\\Downloads\\Video Radar\\aula.ts',
+    action: 'open-download-settings',
+  });
+
+  assert.equal(root.querySelectorAll('[data-settings]').length, 2);
+  assert.equal(root.querySelectorAll('[data-settings]')[0].textContent, 'Configurar downloads');
+  assert.equal(one(root, '.media-row__path').textContent, 'C:\\Downloads\\Video Radar\\aula.ts');
+  assert.equal(root.querySelectorAll('[data-download]').length, 0);
+});
+
 test('keeps HLS preparation determinate and direct downloads unchanged', () => {
   const hls = renderItem({
     id: 'hls-1', kind: 'hls', filename: 'master.ts', format: 'ts', inspected: true,

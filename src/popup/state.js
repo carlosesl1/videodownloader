@@ -20,9 +20,20 @@ const ERROR_MESSAGES = Object.freeze({
   YOUTUBE_METADATA: 'Não foi possível ler as qualidades deste vídeo do YouTube. Tente novamente.',
   YOUTUBE_DOWNLOAD: 'Não foi possível iniciar o download do YouTube. Tente novamente.',
   INVALID_URL: 'Esta URL do YouTube não é válida. Abra um vídeo e tente novamente.',
+  DESTINATION_INVALID: 'A pasta de downloads não é válida. Configure outra pasta.',
+  DESTINATION_NOT_CONFIGURED: 'Escolha uma pasta para salvar os downloads.',
+  DESTINATION_MOVE_FAILED: 'Não foi possível mover o arquivo para a pasta escolhida.',
+  HELPER_UNAVAILABLE: 'O auxiliar de downloads não está disponível. Verifique a instalação.',
 });
 
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled']);
+const DESTINATION_ERRORS = new Set([
+  'DESTINATION_INVALID',
+  'DESTINATION_NOT_CONFIGURED',
+  'DESTINATION_MOVE_FAILED',
+  'HELPER_UNAVAILABLE',
+  'NATIVE_DISCONNECTED',
+]);
 
 export const initialState = Object.freeze({
   status: 'idle',
@@ -139,6 +150,53 @@ function restoredHlsItem(record) {
     format: 'ts',
     operationId: record.operationId,
     ...operationView(record),
+  };
+}
+
+function relocationView(record) {
+  if (record.status === 'downloading') {
+    return { phase: 'sent', statusLabel: 'Baixando…' };
+  }
+  if (record.status === 'moving') {
+    return { phase: 'preparing', statusLabel: 'Movendo para a pasta escolhida…' };
+  }
+  if (record.status === 'complete') {
+    return {
+      phase: 'complete',
+      finalPath: record.finalPath,
+      statusLabel: `Salvo em ${record.finalPath}`,
+    };
+  }
+  if (record.status === 'moveFailed') {
+    return {
+      phase: 'error',
+      stagingPath: record.stagingPath,
+      statusLabel: `Não foi possível mover. Arquivo preservado em ${record.stagingPath}`,
+      error: { code: record.errorCode ?? 'DESTINATION_MOVE_FAILED' },
+      action: 'open-download-settings',
+    };
+  }
+  return {};
+}
+
+function restoredRelocationItem(record) {
+  return {
+    id: `download:${record.downloadId}`,
+    kind: record.mediaKind,
+    url: record.mediaUrl,
+    filename: record.displayName,
+    variants: [{
+      url: record.mediaUrl,
+      label: 'Qualidade escolhida',
+      filename: record.displayName,
+    }],
+    inspected: true,
+    selectedIndex: 0,
+    allowedOrigins: [],
+    format: record.mediaKind === 'hls' ? 'ts' : 'vídeo',
+    operationId: record.operationId,
+    downloadId: record.downloadId,
+    ...relocationView(record),
   };
 }
 
@@ -325,11 +383,44 @@ export function reduceState(state, event) {
   if (event.type === 'DIRECT_SENT') {
     const items = updateItem(state.items, event.id, () => ({
       selectedIndex: event.selectedIndex,
+      downloadId: event.downloadId,
       phase: 'sent',
       statusLabel: 'Download enviado ao Chrome',
       error: undefined,
     }));
     return { ...state, items, busyId: currentBusyId(items), message: 'Download enviado ao Chrome' };
+  }
+
+  if (event.type === 'DOWNLOAD_RELOCATION_UPDATED') {
+    const record = event.record;
+    const existing = state.items.find((item) => (
+      item.downloadId === record.downloadId
+      || item.operationId === record.operationId
+    ));
+    const updated = existing
+      ? {
+          ...existing,
+          operationId: record.operationId,
+          downloadId: record.downloadId,
+          ...relocationView(record),
+        }
+      : restoredRelocationItem(record);
+    const items = [
+      ...state.items.filter((item) => (
+        item !== existing
+        && item.downloadId !== record.downloadId
+        && item.operationId !== record.operationId
+      )),
+      updated,
+    ];
+    return {
+      ...state,
+      status: 'results',
+      target: state.target || 'downloads',
+      items,
+      busyId: currentBusyId(items),
+      message: `${items.length} ${items.length === 1 ? 'vídeo encontrado' : 'vídeos encontrados'}`,
+    };
   }
 
   if (event.type === 'YOUTUBE_FORMATS_LOADED') {
@@ -367,6 +458,21 @@ export function reduceState(state, event) {
     };
   }
 
+  if (event.type === 'YOUTUBE_START_CANCELLED') {
+    const items = updateItem(state.items, event.id, () => ({
+      phase: 'ready',
+      active: false,
+      statusLabel: '',
+      error: null,
+    }));
+    return {
+      ...state,
+      items,
+      busyId: currentBusyId(items),
+      message: 'Download cancelado',
+    };
+  }
+
   if (event.type === 'FAILED') {
     const errorMessage = userMessageForError(event.code);
     if (event.id) {
@@ -374,6 +480,7 @@ export function reduceState(state, event) {
         phase: 'error',
         statusLabel: errorMessage,
         error: { code: event.code, details: event.details ?? {} },
+        ...(DESTINATION_ERRORS.has(event.code) ? { action: 'open-download-settings' } : {}),
       }));
       return {
         ...state,

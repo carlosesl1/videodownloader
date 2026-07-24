@@ -318,3 +318,73 @@ test('restores and updates persisted YouTube jobs without inventing unknown prog
   assert.equal(completed.items[0].path, 'C:/Downloads/zoo.mp4');
   assert.equal(completed.items[0].statusLabel, 'Concluído');
 });
+
+test('reconciles a completed relocation with its existing download card without duplication', () => {
+  const started = reduceState(
+    { ...initialState, status: 'results', items: [directItem] },
+    { type: 'DIRECT_SENT', id: directItem.id, selectedIndex: 0, downloadId: 42 },
+  );
+  const complete = reduceState(started, {
+    type: 'DOWNLOAD_RELOCATION_UPDATED',
+    record: {
+      downloadId: 42,
+      operationId: 'direct-42',
+      mediaKind: 'direct',
+      mediaUrl: directItem.url,
+      displayName: directItem.filename,
+      status: 'complete',
+      stagingPath: 'C:\\Temp\\aula.mp4',
+      finalPath: 'D:\\Vídeos\\aula.mp4',
+      errorCode: null,
+      updatedAt: 2,
+    },
+  });
+
+  assert.equal(complete.items.length, 1);
+  assert.equal(complete.items[0].phase, 'complete');
+  assert.equal(complete.items[0].finalPath, 'D:\\Vídeos\\aula.mp4');
+  assert.equal(complete.items[0].statusLabel, 'Salvo em D:\\Vídeos\\aula.mp4');
+});
+
+test('restores a failed relocation with its preserved path and settings action', () => {
+  const state = reduceState(initialState, {
+    type: 'DOWNLOAD_RELOCATION_UPDATED',
+    record: {
+      downloadId: 9,
+      operationId: 'hls-9',
+      mediaKind: 'hls',
+      mediaUrl: 'https://cdn.test/master.m3u8',
+      displayName: 'aula.ts',
+      status: 'moveFailed',
+      stagingPath: 'C:\\Downloads\\Video Radar\\aula.ts',
+      finalPath: null,
+      errorCode: 'DESTINATION_MOVE_FAILED',
+      updatedAt: 3,
+    },
+  });
+
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].phase, 'error');
+  assert.equal(state.items[0].stagingPath, 'C:\\Downloads\\Video Radar\\aula.ts');
+  assert.equal(state.items[0].action, 'open-download-settings');
+  assert.match(state.items[0].statusLabel, /Arquivo preservado/);
+});
+
+test('a cancelled YouTube folder prompt returns the ready card without an error', () => {
+  const item = {
+    id: 'youtube:jNQXAC9IVRw',
+    kind: 'youtube',
+    phase: 'preparing',
+    active: false,
+    statusLabel: 'Preparando…',
+  };
+  const state = reduceState(
+    { ...initialState, status: 'results', items: [item], busyId: item.id },
+    { type: 'YOUTUBE_START_CANCELLED', id: item.id },
+  );
+
+  assert.equal(state.items[0].phase, 'ready');
+  assert.equal(state.items[0].statusLabel, '');
+  assert.equal(state.busyId, null);
+  assert.equal(state.message, 'Download cancelado');
+});

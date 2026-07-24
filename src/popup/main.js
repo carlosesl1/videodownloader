@@ -2,6 +2,10 @@ import { scanPage } from '../detection/scan-page.js';
 import { groupDirectVariants, normalizeCandidates } from '../detection/media-candidates.js';
 import { buildDownloadFilename } from '../shared/filename.js';
 import { ACTIONS } from '../shared/messages.js';
+import {
+  DELIVERY_RESULT_PREFIX,
+  RELOCATION_PREFIX,
+} from '../background/download-relocation.js';
 import { YOUTUBE_ACTIONS, assertFormatsResult } from '../youtube/protocol.js';
 import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
 import { assertJobSnapshot } from '../youtube/job-view.js';
@@ -21,6 +25,8 @@ const OPERATION_STATES = new Set([
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
 const OPERATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ERROR_CODE = /^[A-Z0-9_]{1,64}$/;
+const RELOCATION_STATUSES = new Set(['downloading', 'moving', 'complete', 'moveFailed']);
+const RELOCATION_MEDIA_KINDS = new Set(['direct', 'hls']);
 const YOUTUBE_SNAPSHOT_FIELDS = [
   'jobId', 'videoId', 'title', 'url', 'height', 'format', 'stage', 'percent',
   'downloadedBytes', 'totalBytes', 'speedBytesPerSecond', 'etaSeconds', 'path', 'error', 'updatedAt',
@@ -35,6 +41,45 @@ function isObject(value) {
 function hasOnlyKeys(value, expected) {
   const keys = Object.keys(value);
   return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function sanitizeRelocationRecord(value) {
+  if (!isObject(value)
+    || !Number.isSafeInteger(value.downloadId)
+    || value.downloadId < 0
+    || typeof value.operationId !== 'string'
+    || !OPERATION_ID.test(value.operationId)
+    || !RELOCATION_MEDIA_KINDS.has(value.mediaKind)
+    || typeof value.displayName !== 'string'
+    || !value.displayName.trim()
+    || value.displayName.length > 255
+    || !RELOCATION_STATUSES.has(value.status)
+    || !Number.isSafeInteger(value.updatedAt)
+    || value.updatedAt < 0) {
+    throw new Error('Registro de entrega inválido.');
+  }
+  httpUrl(value.mediaUrl);
+  for (const field of ['stagingPath', 'finalPath']) {
+    if (value[field] !== null && (typeof value[field] !== 'string' || value[field].length > 32767)) {
+      throw new Error('Registro de entrega inválido.');
+    }
+  }
+  if (value.status === 'complete' && !value.finalPath?.trim()) {
+    throw new Error('Registro de entrega inválido.');
+  }
+  if (value.status === 'moveFailed' && !value.stagingPath?.trim()) {
+    throw new Error('Registro de entrega inválido.');
+  }
+  return value;
+}
+
+function isYouTubeStartCancelled(response) {
+  return isObject(response)
+    && response.ok === true
+    && isObject(response.value)
+    && hasOnlyKeys(response.value, ['cancelled', 'code'])
+    && response.value.cancelled === true
+    && response.value.code === 'DOWNLOAD_CANCELLED';
 }
 
 function httpUrl(value) {
@@ -435,6 +480,23 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
+  async function restoreRelocations() {
+    let stored;
+    try {
+      stored = await chromeApi.storage?.local?.get?.(null);
+    } catch {
+      return;
+    }
+    for (const [key, value] of Object.entries(stored ?? {})) {
+      if (!key.startsWith(RELOCATION_PREFIX) && !key.startsWith(DELIVERY_RESULT_PREFIX)) continue;
+      try {
+        dispatch({ type: 'DOWNLOAD_RELOCATION_UPDATED', record: sanitizeRelocationRecord(value) });
+      } catch {
+        // Corrupt storage data must not enter popup state.
+      }
+    }
+  }
+
   async function scan() {
     dispatch({ type: 'SCAN_STARTED' });
     try {
@@ -539,6 +601,10 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
           action: YOUTUBE_ACTIONS.START_DOWNLOAD,
           payload: { url: item.url, height: variant.height },
         });
+        if (isYouTubeStartCancelled(response)) {
+          dispatch({ type: 'YOUTUBE_START_CANCELLED', id: item.id });
+          return;
+        }
         const snapshot = unwrapYouTubeJob(response);
         if (snapshot) dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
       } catch (error) {
@@ -558,8 +624,8 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
         action: ACTIONS.DOWNLOAD_DIRECT,
         payload: { url: variant.url, filename: variant.filename ?? item.filename },
       });
-      unwrapDirectResponse(response);
-      dispatch({ type: 'DIRECT_SENT', id: item.id, selectedIndex });
+      const { downloadId } = unwrapDirectResponse(response);
+      dispatch({ type: 'DIRECT_SENT', id: item.id, selectedIndex, downloadId });
     } catch (error) {
       dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'UNKNOWN', details: error?.details });
     }
@@ -638,17 +704,32 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       }
       return;
     }
-    if (areaName !== 'local' || !changes.youtubeJob?.newValue) return;
-    try {
-      const snapshot = sanitizeYouTubeJobSnapshot(changes.youtubeJob.newValue);
-      dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
-    } catch {
-      // Corrupt storage data must not enter popup state.
+    if (areaName !== 'local') return;
+    if (changes.youtubeJob?.newValue) {
+      try {
+        const snapshot = sanitizeYouTubeJobSnapshot(changes.youtubeJob.newValue);
+        dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
+      } catch {
+        // Corrupt storage data must not enter popup state.
+      }
+    }
+    for (const [key, change] of Object.entries(changes)) {
+      if ((!key.startsWith(RELOCATION_PREFIX) && !key.startsWith(DELIVERY_RESULT_PREFIX))
+        || !change?.newValue) continue;
+      try {
+        dispatch({
+          type: 'DOWNLOAD_RELOCATION_UPDATED',
+          record: sanitizeRelocationRecord(change.newValue),
+        });
+      } catch {
+        // Corrupt storage data must not enter popup state.
+      }
     }
   });
 
   draw();
   void restoreHlsOperations();
+  void restoreRelocations();
   void restoreYouTubeJob();
 }
 

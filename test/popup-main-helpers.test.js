@@ -203,6 +203,67 @@ test('reopening the popup restores an active HLS operation from session storage'
   }
 });
 
+test('reopening the popup restores a completed relocated download from local storage', async () => {
+  class Element {
+    constructor() {
+      this.dataset = {};
+      this.children = [];
+      this.textContent = '';
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute() {}
+    addEventListener() {}
+  }
+  const find = (element, predicate) => {
+    if (predicate(element)) return element;
+    for (const child of element.children) {
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+    return null;
+  };
+  const root = new Element();
+  const announcer = new Element();
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        runtime: { sendMessage: async () => ({ ok: true, value: null }) },
+        storage: {
+          local: {
+            get: async () => ({
+              'downloadDeliveryResult:42': {
+                downloadId: 42,
+                operationId: 'direct-42',
+                destinationFolder: 'D:\\Vídeos',
+                mediaKind: 'direct',
+                mediaUrl: 'https://cdn.test/aula.mp4',
+                displayName: 'aula.mp4',
+                status: 'complete',
+                stagingPath: 'C:\\Temp\\aula.mp4',
+                finalPath: 'D:\\Vídeos\\aula.mp4',
+                errorCode: null,
+                updatedAt: 2,
+              },
+            }),
+          },
+          onChanged: { addListener() {} },
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const restored = find(root, (element) => element.dataset.itemId === 'download:42');
+    assert.ok(restored, 'completed relocated download was not restored');
+    assert.ok(find(restored, (element) => element.textContent.includes('D:\\Vídeos\\aula.mp4')));
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test('clicking the rendered cancel control sends the active YouTube job id', async () => {
   class InteractiveElement {
     constructor(tagName = 'div') {
