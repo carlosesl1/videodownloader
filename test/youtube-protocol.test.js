@@ -99,6 +99,11 @@ test('valida os formatos reais de eventos do host e normaliza download', () => {
 
 test('valida seleção, cancelamento e movimentação de destino', () => {
   assert.deepEqual(assertHostEvent({
+    type: 'folderSelected', requestId: 'root', path: 'C:\\',
+  }), {
+    type: 'folderSelected', requestId: 'root', path: 'C:\\',
+  });
+  assert.deepEqual(assertHostEvent({
     type: 'folderSelected', requestId: 'r1', path: 'C:\\Users\\Carlos\\Downloads',
   }), {
     type: 'folderSelected', requestId: 'r1', path: 'C:\\Users\\Carlos\\Downloads',
@@ -142,6 +147,7 @@ test('rejeita prefixos de dispositivo Windows em todos os caminhos do protocolo'
     '\\\\.\\C:\\temp',
     '\\\\?\\UNC\\server\\share\\temp',
     '\\\\.\\Volume{1234}\\temp',
+    '\\\\??\\C:\\temp',
   ]) {
     for (const event of [
       { type: 'folderSelected', requestId: 'r1', path },
@@ -151,6 +157,18 @@ test('rejeita prefixos de dispositivo Windows em todos os caminhos do protocolo'
         nativeName: 'host', defaultFolder: path,
       },
     ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/, `${event.type}: ${path}`);
+  }
+});
+
+test('rejeita caminhos Windows não canônicos ou com segmentos inválidos', () => {
+  for (const path of [
+    'C:\\foo:bar',
+    'C:\\CON',
+    'C:\\foo\\\\bar',
+  ]) {
+    assert.throws(() => assertHostEvent({
+      type: 'folderSelected', requestId: 'r1', path,
+    }), /Mensagem inválida/, path);
   }
 });
 

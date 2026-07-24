@@ -79,8 +79,16 @@ test('correlaciona seleção e cancelamento de pasta', async () => {
 test('correlaciona movimentação e ignora resposta de tipo errado', async () => {
   const port = fakePort(); const events = [];
   const client = createNativePortClient({ connectNative: () => port, onEvent: (event) => events.push(event) });
-  const moved = client.request(HOST_COMMANDS.MOVE_DOWNLOADED_FILE, { downloadId: 7 });
+  const payload = {
+    downloadId: 7,
+    sourcePath: 'C:\\Downloads\\Video Radar\\.staging\\op_1\\clip.mp4',
+    destinationFolder: 'D:\\Videos',
+  };
+  const moved = client.request(HOST_COMMANDS.MOVE_DOWNLOADED_FILE, payload);
   const requestId = port.messages[0].requestId;
+  assert.deepEqual(port.messages[0], {
+    type: 'moveDownloadedFile', requestId, payload,
+  });
   let resolved = false;
   moved.then(() => { resolved = true; });
 

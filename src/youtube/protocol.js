@@ -1,4 +1,5 @@
 import { assertJobSnapshot } from './job-view.js';
+import { normalizeWindowsFolder } from '../shared/download-preferences.js';
 
 export const NATIVE_HOST = 'com.videoradar.helper';
 export const MIN_NATIVE_PROTOCOL_VERSION = 2;
@@ -80,24 +81,15 @@ function exactEvent(event, keys) {
   return Object.fromEntries(keys.map((key) => [key, event[key]]));
 }
 
-export function assertWindowsAbsolutePath(value) {
-  if (!text(value, 1024) || value.includes('/') || /^\\\\[?.]\\/.test(value)) invalid();
-  let segments;
-  if (/^[A-Za-z]:\\/.test(value)) {
-    segments = value.slice(3).split('\\');
-  } else if (value.startsWith('\\\\')) {
-    segments = value.slice(2).split('\\');
-    if (
-      segments.length < 2
-      || segments[0].length === 0
-      || segments[1].length === 0
-      || segments[0] === '?'
-      || segments[1] === '?'
-    ) invalid();
-  } else {
+function assertWindowsAbsolutePath(value) {
+  if (!text(value, 1024)) invalid();
+  let normalized;
+  try {
+    normalized = normalizeWindowsFolder(value);
+  } catch {
     invalid();
   }
-  if (segments.some((segment) => segment === '.' || segment === '..')) invalid();
+  if (normalized !== value) invalid();
   return value;
 }
 
