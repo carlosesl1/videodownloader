@@ -76,6 +76,33 @@ test('correlaciona seleção e cancelamento de pasta', async () => {
   });
 });
 
+test('seletor de pasta permanece pendente sem timeout artificial', async () => {
+  const port = fakePort(); const timers = clock();
+  const client = createNativePortClient({
+    connectNative: () => port,
+    setTimeoutFn: timers.set,
+    clearTimeoutFn: timers.clear,
+    onEvent() {},
+  });
+  const selected = client.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER);
+  const requestId = port.messages[0].requestId;
+  let outcome = 'pending';
+  selected.then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+
+  timers.fire();
+  await Promise.resolve();
+  assert.equal(outcome, 'pending');
+
+  port.emit({
+    type: 'folderSelected', requestId,
+    path: 'C:\\Users\\Carlos\\Downloads',
+  });
+  assert.deepEqual(await selected, {
+    type: 'folderSelected', requestId,
+    path: 'C:\\Users\\Carlos\\Downloads',
+  });
+});
+
 test('correlaciona movimentação e ignora resposta de tipo errado', async () => {
   const port = fakePort(); const events = [];
   const client = createNativePortClient({ connectNative: () => port, onEvent: (event) => events.push(event) });
@@ -111,7 +138,7 @@ test('timeout não tenta novamente e disconnect rejeita pendências e publica ev
   const port = fakePort(); const timers = clock(); const events = []; const client = createNativePortClient({ connectNative: () => port, setTimeoutFn: timers.set, clearTimeoutFn: timers.clear, onEvent: (event) => events.push(event) });
   const timed = client.request(HOST_COMMANDS.LIST_FORMATS, { url: 'https://youtu.be/jNQXAC9IVRw' });
   timers.fire(); await assert.rejects(timed, /tempo/); assert.equal(port.messages.length, 1);
-  const pending = client.request(HOST_COMMANDS.GET_JOB); port.disconnect();
+  const pending = client.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER); port.disconnect();
   await assert.rejects(pending, /conexão/i); assert.deepEqual(events, [{ type: 'nativeDisconnected' }]); assert.equal(client.connected, false);
   port.disconnect(); assert.equal(events.length, 1);
 });

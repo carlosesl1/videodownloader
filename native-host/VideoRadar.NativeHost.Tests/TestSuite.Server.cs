@@ -21,7 +21,9 @@ internal static partial class TestSuite
         NativeHostServerRejectsInvalidPayloadsWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerMapsKnownFailuresWithoutLeakingDetails().GetAwaiter().GetResult();
         NativeHostServerChoosesAndCancelsDownloadFolder().GetAwaiter().GetResult();
+        NativeHostServerPropagatesCancellationFromFolderPicker().GetAwaiter().GetResult();
         NativeHostServerMapsFolderPickerFailuresWithoutStopping().GetAwaiter().GetResult();
+        NativeHostServerRejectsInvalidPickedFoldersWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidFallbackFolders();
         UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts().GetAwaiter().GetResult();
         ProgramPingDiagnosticIsPureAndMachineReadable();
@@ -345,6 +347,69 @@ internal static partial class TestSuite
         Equal(1, picker.CallCount);
     }
 
+    private static async Task NativeHostServerPropagatesCancellationFromFolderPicker()
+    {
+        using var input = new ControlledInputStream(FrameCommands(
+            Command("chooseDownloadFolder", "r-picker-cancelled", "{}")));
+        using var output = new MemoryStream();
+        using var cancellation = new CancellationTokenSource();
+        var picker = new BlockingFolderPicker();
+        var run = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            picker,
+            DefaultDownloadFolder).RunAsync(cancellation.Token);
+
+        await picker.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        try
+        {
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            throw new InvalidOperationException("Folder picker cancellation did not stop the server.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected: dispatch preserves cancellation from the server token.
+        }
+
+        True(picker.Cancelled.Task.IsCompleted, "The folder picker did not observe cancellation.");
+        Equal(0L, output.Length);
+    }
+
+    private static async Task NativeHostServerRejectsInvalidPickedFoldersWithoutStopping()
+    {
+        var invalidFolders = InvalidDownloadFolders().Where(folder => folder is not null).ToArray();
+        var commands = invalidFolders
+            .Select((_, index) => Command("chooseDownloadFolder", $"r-invalid-folder-{index}", "{}"))
+            .Append(Command("ping", "r-after-invalid-folders", "{}"))
+            .ToArray();
+        using var input = new MemoryStream(FrameCommands(commands));
+        using var output = new MemoryStream();
+        var picker = new FakeFolderPicker(invalidFolders.Cast<string?>().ToArray());
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            picker,
+            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+
+        var messages = ReadFrames(output);
+        for (var index = 0; index < invalidFolders.Length; index++)
+        {
+            var requestId = $"r-invalid-folder-{index}";
+            var failure = messages.SingleOrDefault(message =>
+                message.GetProperty("type").GetString() == "jobFailed"
+                && message.GetProperty("requestId").GetString() == requestId);
+            True(failure.ValueKind == JsonValueKind.Object, $"Invalid picked folder was accepted: {invalidFolders[index]}");
+            Equal("HOST_ERROR", failure.GetProperty("code").GetString());
+            Equal("chooseDownloadFolder", failure.GetProperty("details").GetProperty("operation").GetString());
+        }
+        _ = Message(messages, "ready", "r-after-invalid-folders");
+        Equal(invalidFolders.Length, picker.CallCount);
+    }
+
     private static void NativeHostServerRejectsInvalidFallbackFolders()
     {
         using var input = new MemoryStream();
@@ -354,11 +419,34 @@ internal static partial class TestSuite
         var updater = new FakeUpdatePolicy();
         var picker = new FakeFolderPicker();
 
-        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, null!));
-        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, "relative"));
-        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, @"C:\Downloads\..\Video Radar"));
-        Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, DefaultDownloadFolder + "\\"));
+        foreach (var invalidFolder in InvalidDownloadFolders())
+            Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, invalidFolder));
+
+        _ = new NativeHostServer(channel, service, updater, picker, @"C:\");
+        _ = new NativeHostServer(channel, service, updater, picker, @"\\server\share\Videos");
     }
+
+    private static string[] InvalidDownloadFolders() =>
+    [
+        null!,
+        string.Empty,
+        "relative",
+        @"C:/Downloads",
+        @"\\?\C:\Downloads",
+        @"\\.\C:\Downloads",
+        @"\\??\C:\Downloads",
+        @"\\server",
+        @"C:\CON",
+        @"C:\CON.txt",
+        @"C:\Videos:Archive",
+        @"C:\Videos*",
+        @"C:\Videos\\Archive",
+        @"C:\Videos\..\Archive",
+        @"C:\Videos\Archive.",
+        @"C:\Videos\Archive ",
+        DefaultDownloadFolder + "\\",
+        @"C:\" + new string('a', 1022)
+    ];
 
     private static async Task UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts()
     {
@@ -510,6 +598,27 @@ internal static partial class TestSuite
             if (Error is not null) throw Error;
             if (Results.Count == 0) throw new InvalidOperationException("No folder picker result was configured.");
             return Task.FromResult(Results.Dequeue());
+        }
+    }
+
+    private sealed class BlockingFolderPicker : IFolderPicker
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<string?> PickAsync(CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new InvalidOperationException("Folder picker unexpectedly completed.");
+            }
+            catch (OperationCanceledException)
+            {
+                Cancelled.TrySetResult();
+                throw;
+            }
         }
     }
 

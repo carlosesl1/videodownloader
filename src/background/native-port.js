@@ -40,7 +40,7 @@ export function createNativePortClient({
     const current = pending.get(requestId);
     if (!current) return false;
     pending.delete(requestId);
-    clearTimeoutFn(current.timer);
+    if (current.timer !== null && current.timer !== undefined) clearTimeoutFn(current.timer);
     callback(value);
     return true;
   }
@@ -52,7 +52,7 @@ export function createNativePortClient({
     disconnectedPort.onDisconnect?.removeListener?.(handleDisconnect);
     for (const [requestId, current] of pending) {
       pending.delete(requestId);
-      clearTimeoutFn(current.timer);
+      if (current.timer !== null && current.timer !== undefined) clearTimeoutFn(current.timer);
       current.reject(new Error(DISCONNECTED));
     }
     onEvent({ type: 'nativeDisconnected' });
@@ -92,7 +92,7 @@ export function createNativePortClient({
       try { connected.postMessage(command); return Promise.resolve({ requested: true, requestId }); } catch (error) { return Promise.reject(error); }
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeoutFn(() => {
+      const timer = type === HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER ? null : setTimeoutFn(() => {
         const current = pending.get(requestId);
         if (!current) return;
         pending.delete(requestId);

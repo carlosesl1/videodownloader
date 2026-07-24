@@ -19,6 +19,8 @@ public sealed class NativeHostServer(
     string fallbackDownloadFolder) : INativeHostServer
 {
     private const string UnknownRequestId = "unknown";
+    private const string InvalidFolderCharacters = "<>:\"/\\|?*";
+    private static readonly HashSet<string> ReservedFolderSegments = CreateReservedFolderSegments();
     private readonly IFolderPicker folderPicker = folderPicker ?? throw new ArgumentNullException(nameof(folderPicker));
     private readonly string fallbackDownloadFolder =
         RequireCanonicalAbsolutePath(fallbackDownloadFolder, nameof(fallbackDownloadFolder));
@@ -540,7 +542,36 @@ public sealed class NativeHostServer(
 
     private static string RequireCanonicalAbsolutePath(string path, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        if (path is null
+            || path.Length is 0 or > 1024
+            || path.Contains('/')
+            || path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\.\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\??\", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+
+        string[] segments;
+        if (path.Length >= 3
+            && char.IsAsciiLetter(path[0])
+            && path[1] == ':'
+            && path[2] == '\\')
+        {
+            segments = path.Length == 3 ? [] : path[3..].Split('\\', StringSplitOptions.None);
+        }
+        else if (path.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            segments = path[2..].Split('\\', StringSplitOptions.None);
+            if (segments.Length < 2)
+                throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+        else
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+
+        if (segments.Any(IsInvalidFolderSegment))
             throw new ArgumentException("Path must be absolute and canonical.", parameterName);
 
         string canonicalPath;
@@ -556,6 +587,33 @@ public sealed class NativeHostServer(
         if (!string.Equals(path, canonicalPath, StringComparison.Ordinal))
             throw new ArgumentException("Path must be absolute and canonical.", parameterName);
         return canonicalPath;
+    }
+
+    private static bool IsInvalidFolderSegment(string segment)
+    {
+        if (segment.Length == 0
+            || segment is "." or ".."
+            || segment.EndsWith(' ')
+            || segment.EndsWith('.')
+            || segment.Any(character => char.IsControl(character) || InvalidFolderCharacters.Contains(character)))
+        {
+            return true;
+        }
+
+        var extension = segment.IndexOf('.');
+        var name = extension < 0 ? segment : segment[..extension];
+        return ReservedFolderSegments.Contains(name);
+    }
+
+    private static HashSet<string> CreateReservedFolderSegments()
+    {
+        var names = new HashSet<string>(["CON", "PRN", "AUX", "NUL"], StringComparer.OrdinalIgnoreCase);
+        for (var index = 1; index <= 9; index++)
+        {
+            names.Add($"COM{index}");
+            names.Add($"LPT{index}");
+        }
+        return names;
     }
 
     private static string TryReadRequestId(JsonElement root)

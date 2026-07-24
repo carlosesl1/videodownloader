@@ -18,53 +18,73 @@ public sealed class WindowsFolderPicker : IFolderPicker
     {
         var completion = new TaskCompletionSource<string?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationState = new DialogCancellationState();
+        var cancellationRegistration = cancellationToken.Register(
+            static state => ((DialogCancellationState)state!).Cancel(),
+            cancellationState);
         if (cancellationToken.IsCancellationRequested)
         {
+            cancellationRegistration.Dispose();
             completion.TrySetCanceled(cancellationToken);
             return completion.Task;
         }
 
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                completion.TrySetResult(ShowDialog());
-            }
-            catch (Exception exception)
-            {
-                completion.TrySetException(exception);
-            }
-        })
-        {
-            IsBackground = true,
-            Name = "Video Radar folder picker"
-        };
-
         try
         {
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    completion.TrySetResult(ShowDialog(
+                        cancellationToken,
+                        cancellationState,
+                        cancellationRegistration));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    completion.TrySetCanceled(cancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "Video Radar folder picker"
+            };
             thread.SetApartmentState(ApartmentState.STA);
             thread.Start();
         }
         catch (Exception exception)
         {
-            completion.TrySetException(exception);
+            cancellationRegistration.Dispose();
+            if (cancellationToken.IsCancellationRequested)
+                completion.TrySetCanceled(cancellationToken);
+            else
+                completion.TrySetException(exception);
         }
 
         return completion.Task;
     }
 
-    private static string? ShowDialog()
+    private static string? ShowDialog(
+        CancellationToken cancellationToken,
+        DialogCancellationState cancellationState,
+        CancellationTokenRegistration cancellationRegistration)
     {
         object? dialogObject = null;
+        IFileOpenDialog? dialog = null;
         IShellItem? shellItem = null;
         var pathPointer = IntPtr.Zero;
+        var cancellationRegistered = true;
         try
         {
             var dialogType = Type.GetTypeFromCLSID(FileOpenDialogClsid, throwOnError: true)
                 ?? throw new InvalidOperationException("FileOpenDialog is unavailable.");
             dialogObject = Activator.CreateInstance(dialogType)
                 ?? throw new InvalidOperationException("FileOpenDialog could not be created.");
-            var dialog = (IFileOpenDialog)dialogObject;
+            dialog = (IFileOpenDialog)dialogObject;
 
             Marshal.ThrowExceptionForHR(dialog.SetOptions(
                 FosPickFolders
@@ -73,7 +93,24 @@ public sealed class WindowsFolderPicker : IFolderPicker
                 | FosDontAddToRecent));
             Marshal.ThrowExceptionForHR(dialog.SetTitle("Escolha a pasta dos downloads"));
 
-            var showResult = dialog.Show(IntPtr.Zero);
+            if (!cancellationState.TrySetActive(dialog, cancellationToken))
+                throw new OperationCanceledException(cancellationToken);
+
+            int showResult;
+            try
+            {
+                showResult = dialog.Show(IntPtr.Zero);
+            }
+            finally
+            {
+                StopCancellation(
+                    cancellationState,
+                    dialog,
+                    cancellationRegistration,
+                    ref cancellationRegistered);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             if (showResult == ErrorCancelled) return null;
             Marshal.ThrowExceptionForHR(showResult);
 
@@ -85,16 +122,90 @@ public sealed class WindowsFolderPicker : IFolderPicker
         }
         finally
         {
-            if (pathPointer != IntPtr.Zero) Marshal.FreeCoTaskMem(pathPointer);
-            FinalRelease(shellItem);
-            FinalRelease(dialogObject);
+            try
+            {
+                StopCancellation(
+                    cancellationState,
+                    dialog,
+                    cancellationRegistration,
+                    ref cancellationRegistered);
+            }
+            finally
+            {
+                if (pathPointer != IntPtr.Zero) Marshal.FreeCoTaskMem(pathPointer);
+                FinalRelease(shellItem);
+                FinalRelease(dialogObject);
+            }
         }
+    }
+
+    private static void StopCancellation(
+        DialogCancellationState cancellationState,
+        IFileOpenDialog? dialog,
+        CancellationTokenRegistration cancellationRegistration,
+        ref bool cancellationRegistered)
+    {
+        if (!cancellationRegistered) return;
+        cancellationState.ClearActive(dialog);
+        cancellationRegistered = false;
+        cancellationRegistration.Dispose();
     }
 
     private static void FinalRelease(object? value)
     {
         if (value is not null && Marshal.IsComObject(value))
             Marshal.FinalReleaseComObject(value);
+    }
+
+    private sealed class DialogCancellationState
+    {
+        private readonly object sync = new();
+        private IFileOpenDialog? activeDialog;
+        private bool cancellationRequested;
+
+        public bool TrySetActive(IFileOpenDialog dialog, CancellationToken cancellationToken)
+        {
+            lock (sync)
+            {
+                if (cancellationRequested || cancellationToken.IsCancellationRequested)
+                {
+                    cancellationRequested = true;
+                    return false;
+                }
+
+                activeDialog = dialog;
+                return true;
+            }
+        }
+
+        public void ClearActive(IFileOpenDialog? dialog)
+        {
+            if (dialog is null) return;
+            lock (sync)
+            {
+                if (ReferenceEquals(activeDialog, dialog)) activeDialog = null;
+            }
+        }
+
+        public void Cancel()
+        {
+            IFileOpenDialog? dialog;
+            lock (sync)
+            {
+                cancellationRequested = true;
+                dialog = activeDialog;
+            }
+
+            if (dialog is null) return;
+            try
+            {
+                _ = dialog.Close(ErrorCancelled);
+            }
+            catch
+            {
+                // Cancellation is best effort; Show still observes the cancelled token on return.
+            }
+        }
     }
 
     [ComImport]
