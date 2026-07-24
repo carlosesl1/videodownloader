@@ -11,29 +11,30 @@ public sealed partial class YouTubeService : IYouTubeService
     private const string InvalidOutputError = "The downloaded file was not reported safely.";
     private readonly string tools;
     private readonly IProcessRunner processRunner;
-    private readonly Lazy<IDownloadPaths> downloadPaths;
+    private readonly IDownloadPathsFactory downloadPathsFactory;
     private readonly object stateLock = new();
     private ActiveJob? activeJob;
     private JobSnapshot? snapshot;
 
     public YouTubeService(string tools, IProcessRunner processRunner)
-        : this(tools, processRunner, new Lazy<IDownloadPaths>(() => new DownloadPaths(), LazyThreadSafetyMode.ExecutionAndPublication))
+        : this(tools, processRunner, CreateDefaultFactory())
     {
     }
 
     public YouTubeService(string tools, IProcessRunner processRunner, IDownloadPaths downloadPaths)
-        : this(tools, processRunner, new Lazy<IDownloadPaths>(() => downloadPaths, LazyThreadSafetyMode.ExecutionAndPublication))
+        : this(tools, processRunner, new DownloadPathsFactory(downloadPaths.Home, downloadPaths.TempRoot))
     {
         ArgumentNullException.ThrowIfNull(downloadPaths);
     }
 
-    private YouTubeService(string tools, IProcessRunner processRunner, Lazy<IDownloadPaths> downloadPaths)
+    public YouTubeService(string tools, IProcessRunner processRunner, IDownloadPathsFactory downloadPathsFactory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tools);
         ArgumentNullException.ThrowIfNull(processRunner);
+        ArgumentNullException.ThrowIfNull(downloadPathsFactory);
         this.tools = tools;
         this.processRunner = processRunner;
-        this.downloadPaths = downloadPaths;
+        this.downloadPathsFactory = downloadPathsFactory;
     }
 
     public async Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
@@ -55,6 +56,7 @@ public sealed partial class YouTubeService : IYouTubeService
         string jobId,
         string url,
         int height,
+        string? destinationFolder,
         Func<JobProgress, Task> onProgress,
         CancellationToken cancellationToken)
     {
@@ -80,6 +82,7 @@ public sealed partial class YouTubeService : IYouTubeService
         }
 
         string? reservedStem = null;
+        IDownloadPaths? paths = null;
         var tempCreated = false;
         try
         {
@@ -91,7 +94,7 @@ public sealed partial class YouTubeService : IYouTubeService
             }
 
             SetMetadata(job, catalog);
-            var paths = downloadPaths.Value;
+            paths = downloadPathsFactory.Create(destinationFolder);
             reservedStem = paths.ReserveStem(catalog.Title, catalog.VideoId);
             var temp = paths.CreateJobTemp(jobId);
             tempCreated = true;
@@ -132,7 +135,6 @@ public sealed partial class YouTubeService : IYouTubeService
         }
         finally
         {
-            var paths = downloadPaths.IsValueCreated ? downloadPaths.Value : null;
             if (paths is not null && tempCreated) TryCleanup(() => paths.DeleteJobTemp(jobId));
             if (paths is not null && reservedStem is not null) TryCleanup(() => paths.ReleaseStem(reservedStem));
             lock (stateLock)
@@ -143,6 +145,14 @@ public sealed partial class YouTubeService : IYouTubeService
             linkedCancellation.Dispose();
         }
     }
+
+    public Task<JobResult> StartDownloadAsync(
+        string jobId,
+        string url,
+        int height,
+        Func<JobProgress, Task> onProgress,
+        CancellationToken cancellationToken) =>
+        StartDownloadAsync(jobId, url, height, null, onProgress, cancellationToken);
 
     public Task CancelAsync(string jobId)
     {
@@ -287,6 +297,12 @@ public sealed partial class YouTubeService : IYouTubeService
 
     [GeneratedRegex("^[A-Za-z0-9_-]{1,128}$", RegexOptions.CultureInvariant)]
     private static partial Regex SafeJobId();
+
+    private static IDownloadPathsFactory CreateDefaultFactory()
+    {
+        var paths = new DownloadPaths();
+        return new DownloadPathsFactory(paths.Home, paths.TempRoot);
+    }
 
     private sealed class ActiveJob(string jobId, int height, CancellationTokenSource cancellation)
     {

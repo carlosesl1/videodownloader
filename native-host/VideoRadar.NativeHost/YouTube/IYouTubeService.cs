@@ -7,7 +7,13 @@ public sealed record JobResult(string JobId, string Path);
 public interface IYouTubeService
 {
     Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken);
-    Task<JobResult> StartDownloadAsync(string jobId, string url, int height, Func<JobProgress, Task> onProgress, CancellationToken cancellationToken);
+    Task<JobResult> StartDownloadAsync(
+        string jobId,
+        string url,
+        int height,
+        string? destinationFolder,
+        Func<JobProgress, Task> onProgress,
+        CancellationToken cancellationToken);
     Task CancelAsync(string jobId);
     JobSnapshot? GetJob();
 }

@@ -20,6 +20,7 @@ internal static partial class TestSuite
         DownloadFileMoverCopiesAcrossVolumesBeforeDeletingSource();
         DownloadFileMoverPreservesSourceWhenCopyFails();
         DownloadFileMoverKeepsDeliveredFileWhenSourceCleanupFails();
+        YouTubeServiceUsesPerJobDestination();
         ProgressParserNormalizesKnownMessages();
         ProgressParserRejectsMalformedMessages();
         YouTubeServiceDownloadsWithHostOwnedPathsAndProgress();
@@ -369,6 +370,39 @@ internal static partial class TestSuite
 
         File.Delete(expectedFinalPath);
         Equal(expectedStem, paths.ReserveStem("Me at the zoo", "jNQXAC9IVRw"));
+    }
+
+    private static void YouTubeServiceUsesPerJobDestination()
+    {
+        using var scope = new DownloadTestScope();
+        var destination = Path.Combine(scope.Root, "chosen");
+        var fallback = Path.Combine(scope.Root, "fallback");
+        var tempRoot = Path.Combine(scope.Root, "temp-per-job");
+        var expectedPath = Path.Combine(destination, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                Directory.CreateDirectory(destination);
+                File.WriteAllText(expectedPath, "video");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty);
+            });
+        var factory = new DownloadPathsFactory(fallback, tempRoot);
+        var service = new YouTubeService("tools", runner, factory);
+
+        var result = service.StartDownloadAsync(
+            "job-per-destination",
+            "https://youtu.be/jNQXAC9IVRw",
+            720,
+            destination,
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(Path.GetFullPath(expectedPath), result.Path);
+        Equal(Path.GetFullPath(destination), runner.Calls[1].Arguments[13]);
+        True(!File.Exists(Path.Combine(fallback, Path.GetFileName(expectedPath))),
+            "YouTube wrote the per-job download to the fallback folder.");
     }
 
     private static void YouTubeServiceRejectsInvalidFinalPathsAndSafeFailures()

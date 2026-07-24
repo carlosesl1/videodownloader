@@ -37,12 +37,12 @@ internal static partial class TestSuite
             Command("ping", "r-ping", "{}"),
             Command("listFormats", "r-formats", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}"),
             Command("getJob", "r-empty", "{}"),
-            Command("startDownload", "r-start", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080}"),
+            Command("startDownload", "r-start", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":\"C:\\\\Media\\\\Video Radar\"}"),
             Command("getJob", "r-active", "{}")));
         using var output = new SignallingOutputStream();
         var updater = new FakeUpdatePolicy { Error = new InvalidOperationException("network diagnostics") };
         var service = new FakeYouTubeService();
-        service.StartHandler = async (jobId, _, height, onProgress, _) =>
+        service.StartHandler = async (jobId, _, height, _, onProgress, _) =>
         {
             service.Snapshot = new JobSnapshot(jobId, "jNQXAC9IVRw", "Me at the zoo", height, "video", 10, null, null);
             await onProgress(new JobProgress("video", 10, 100, 1_000, 50, 18));
@@ -105,12 +105,13 @@ internal static partial class TestSuite
         Equal(jobId, completed.GetProperty("jobId").GetString());
         Equal(@"C:\Downloads\Video Radar\video.mp4", completed.GetProperty("path").GetString());
         Equal(1, service.StartCallCount);
+        Equal(SelectedDownloadFolder, service.DestinationFolders.Single());
     }
 
     private static async Task NativeHostServerRejectsBusyAndCancelsTheCurrentJob()
     {
         var service = new FakeYouTubeService();
-        service.StartHandler = async (jobId, _, height, _, cancellationToken) =>
+        service.StartHandler = async (jobId, _, height, _, _, cancellationToken) =>
         {
             service.Snapshot = new JobSnapshot(jobId, "jNQXAC9IVRw", "Active", height, "video", 1, null, null);
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -121,8 +122,8 @@ internal static partial class TestSuite
         using var dynamicInput = new AppendableInputStream();
         using var dynamicOutput = new SignallingOutputStream();
         dynamicInput.Append(FrameCommands(
-            Command("startDownload", "r-first", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}"),
-            Command("startDownload", "r-second", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}")));
+            Command("startDownload", "r-first", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-second", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
         var server = new NativeHostServer(
             new NativeMessageChannel(dynamicInput, dynamicOutput),
             service,
@@ -146,6 +147,7 @@ internal static partial class TestSuite
         Equal(jobId, cancelled.GetProperty("jobId").GetString());
         Equal(1, service.StartCallCount);
         Equal(1, service.CancelCallCount);
+        Equal<string?>(null, service.DestinationFolders.Single());
     }
 
     private static async Task NativeHostServerEmitsPersistentJobBeforeBlockedUpdateAndCancelsIt()
@@ -164,7 +166,7 @@ internal static partial class TestSuite
         var run = server.RunAsync(CancellationToken.None);
 
         input.Append(FrameCommands(
-            Command("startDownload", "r-blocked", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720}")));
+            Command("startDownload", "r-blocked", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
         await output.WaitForMessageAsync("jobStarted", "r-blocked").WaitAsync(TimeSpan.FromSeconds(5));
         var started = Message(ReadFrames(output), "jobStarted", "r-blocked");
         var jobId = started.GetProperty("jobId").GetString()!;
@@ -192,11 +194,11 @@ internal static partial class TestSuite
     private static async Task NativeHostServerCancelsAndAwaitsTheJobAtEof()
     {
         using var input = new MemoryStream(FrameCommands(
-            Command("startDownload", "r-eof", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":360}")));
+            Command("startDownload", "r-eof", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":360,\"destinationFolder\":null}")));
         using var output = new SignallingOutputStream();
         var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var service = new FakeYouTubeService();
-        service.StartHandler = async (jobId, _, height, _, cancellationToken) =>
+        service.StartHandler = async (jobId, _, height, _, _, cancellationToken) =>
         {
             service.Snapshot = new JobSnapshot(jobId, "jNQXAC9IVRw", "EOF", height, "video", null, null, null);
             try
@@ -236,9 +238,10 @@ internal static partial class TestSuite
             Command("listFormats", "r-list-missing", "{}"),
             Command("listFormats", "r-list-type", "{\"url\":42}"),
             Command("listFormats", "r-list-extra", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"extra\":true}"),
-            Command("startDownload", "r-height-type", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720.5}"),
-            Command("startDownload", "r-height-range", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":143}"),
-            Command("startDownload", "r-url", "{\"url\":\"https://example.test/video\",\"height\":720}"),
+            Command("startDownload", "r-height-type", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720.5,\"destinationFolder\":null}"),
+            Command("startDownload", "r-height-range", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":143,\"destinationFolder\":null}"),
+            Command("startDownload", "r-url", "{\"url\":\"https://example.test/video\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-destination", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":\"relative\"}"),
             Command("cancelDownload", "r-cancel-type", "{\"jobId\":42}"),
             Command("cancelDownload", "r-cancel-missing", "{\"jobId\":\"not-current\"}"),
             Command("chooseDownloadFolder", "r-choose-extra", "{\"extra\":true}"),
@@ -258,7 +261,7 @@ internal static partial class TestSuite
 
         var messages = ReadFrames(output);
         Equal("INVALID_COMMAND", Message(messages, "jobFailed", "r-command").GetProperty("code").GetString());
-        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-height-type", "r-height-range", "r-cancel-type", "r-choose-extra" })
+        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-height-type", "r-height-range", "r-destination", "r-cancel-type", "r-choose-extra" })
             Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
         Equal("INVALID_URL", Message(messages, "jobFailed", "r-url").GetProperty("code").GetString());
         Equal("JOB_NOT_FOUND", Message(messages, "jobFailed", "r-cancel-missing").GetProperty("code").GetString());
@@ -273,13 +276,13 @@ internal static partial class TestSuite
     {
         using var input = new ControlledInputStream(FrameCommands(
             Command("listFormats", "r-metadata", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}"),
-            Command("startDownload", "r-download", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080}")));
+            Command("startDownload", "r-download", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":null}")));
         using var output = new SignallingOutputStream();
         var service = new FakeYouTubeService
         {
             ListError = new InvalidOperationException("secret stderr https://sensitive.example/video")
         };
-        service.StartHandler = (_, _, _, _, _) => throw new InvalidOperationException("secret stack and https://sensitive.example/video");
+        service.StartHandler = (_, _, _, _, _, _) => throw new InvalidOperationException("secret stack and https://sensitive.example/video");
 
         var run = new NativeHostServer(
             new NativeMessageChannel(input, output),
@@ -762,7 +765,8 @@ internal static partial class TestSuite
         public int CancelCallCount { get; private set; }
         public Exception? ListError { get; init; }
         public JobSnapshot? Snapshot { get; set; }
-        public Func<string, string, int, Func<JobProgress, Task>, CancellationToken, Task<JobResult>>? StartHandler { get; set; }
+        public List<string?> DestinationFolders { get; } = [];
+        public Func<string, string, int, string?, Func<JobProgress, Task>, CancellationToken, Task<JobResult>>? StartHandler { get; set; }
 
         public Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
         {
@@ -775,10 +779,17 @@ internal static partial class TestSuite
                 [new QualityOption(1080, "1080p", "MP4", false), new QualityOption(720, "720p", "MP4", false)]));
         }
 
-        public Task<JobResult> StartDownloadAsync(string jobId, string url, int height, Func<JobProgress, Task> onProgress, CancellationToken cancellationToken)
+        public Task<JobResult> StartDownloadAsync(
+            string jobId,
+            string url,
+            int height,
+            string? destinationFolder,
+            Func<JobProgress, Task> onProgress,
+            CancellationToken cancellationToken)
         {
             StartCallCount++;
-            return StartHandler?.Invoke(jobId, url, height, onProgress, cancellationToken)
+            DestinationFolders.Add(destinationFolder);
+            return StartHandler?.Invoke(jobId, url, height, destinationFolder, onProgress, cancellationToken)
                 ?? Task.FromResult(new JobResult(jobId, @"C:\Downloads\Video Radar\video.mp4"));
         }
 

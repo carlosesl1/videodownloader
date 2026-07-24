@@ -230,7 +230,7 @@ public sealed class NativeHostServer(
 
     private async Task HandleStartDownloadAsync(HostCommand command, CancellationToken cancellationToken)
     {
-        RequireExactProperties(command.Payload, "url", "height");
+        RequireExactProperties(command.Payload, "url", "height", "destinationFolder");
         var url = RequiredString(command.Payload, "url");
         if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
             throw new CommandFailureException("INVALID_URL", "URL do YouTube inválida.");
@@ -241,6 +241,33 @@ public sealed class NativeHostServer(
         {
             throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
         }
+        if (!command.Payload.TryGetProperty("destinationFolder", out var destinationValue))
+            throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
+
+        string? destinationFolder;
+        if (destinationValue.ValueKind == JsonValueKind.Null)
+        {
+            destinationFolder = null;
+        }
+        else if (destinationValue.ValueKind == JsonValueKind.String)
+        {
+            try
+            {
+                destinationFolder = DownloadPaths.NormalizeDestination(
+                    RequiredString(command.Payload, "destinationFolder"),
+                    "destinationFolder");
+            }
+            catch (ArgumentException)
+            {
+                throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
+            }
+        }
+        else
+        {
+            throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
+        }
+
+        var payload = new StartDownloadPayload(canonicalUrl, height, destinationFolder);
 
         lock (stateLock)
         {
@@ -250,8 +277,14 @@ public sealed class NativeHostServer(
 
         var jobId = Guid.NewGuid().ToString("D");
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var initialSnapshot = new JobSnapshot(jobId, string.Empty, string.Empty, height, "preparing", null, null, null);
-        var job = new ActiveDownload(jobId, command.RequestId, height, cancellation, initialSnapshot);
+        var initialSnapshot = new JobSnapshot(jobId, string.Empty, string.Empty, payload.Height, "preparing", null, null, null);
+        var job = new ActiveDownload(
+            jobId,
+            command.RequestId,
+            payload.Height,
+            payload.DestinationFolder,
+            cancellation,
+            initialSnapshot);
         lock (stateLock)
         {
             if (activeDownload is not null)
@@ -286,7 +319,7 @@ public sealed class NativeHostServer(
         }
 
         job.Task = Task.Run(
-            () => ExecuteDownloadAsync(job, canonicalUrl),
+            () => ExecuteDownloadAsync(job, payload.Url),
             CancellationToken.None);
     }
 
@@ -334,6 +367,7 @@ public sealed class NativeHostServer(
                 job.JobId,
                 url,
                 job.Height,
+                job.DestinationFolder,
                 progress => EmitProgressAsync(job, progress),
                 job.Cancellation.Token);
             var completed = BestSnapshot(job) with
@@ -624,12 +658,14 @@ public sealed class NativeHostServer(
         string jobId,
         string requestId,
         int height,
+        string? destinationFolder,
         CancellationTokenSource cancellation,
         JobSnapshot snapshot)
     {
         public string JobId { get; } = jobId;
         public string RequestId { get; } = requestId;
         public int Height { get; } = height;
+        public string? DestinationFolder { get; } = destinationFolder;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public JobSnapshot Snapshot { get; set; } = snapshot;
         public SemaphoreSlim EventWrites { get; } = new(1, 1);
@@ -648,4 +684,9 @@ public sealed class NativeHostServer(
         long DownloadId,
         string SourcePath,
         string DestinationFolder);
+
+    private sealed record StartDownloadPayload(
+        string Url,
+        int Height,
+        string? DestinationFolder);
 }

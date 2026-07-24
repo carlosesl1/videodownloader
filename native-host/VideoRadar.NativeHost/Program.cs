@@ -40,7 +40,8 @@ public static class Program
             var channel = new NativeMessageChannel(Console.OpenStandardInput(), Console.OpenStandardOutput());
             var processRunner = new ProcessRunner();
             var downloadPaths = new DownloadPaths();
-            var youtubeService = new YouTubeService(toolsDirectory, processRunner, downloadPaths);
+            var downloadPathsFactory = new DownloadPathsFactory(downloadPaths.Home, downloadPaths.TempRoot);
+            var youtubeService = new YouTubeService(toolsDirectory, processRunner, downloadPathsFactory);
             var updatePolicy = new UpdatePolicy(toolsDirectory, processRunner);
             var fileMover = new DownloadFileMover();
             if (!OperatingSystem.IsWindows())
