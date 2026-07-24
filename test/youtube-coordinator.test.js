@@ -86,8 +86,17 @@ function persistedJob(overrides = {}) {
   };
 }
 
-function createEnv({ initial, request, localOptions } = {}) {
-  const storageLocal = memoryLocal(initial, localOptions);
+function createEnv({
+  initial,
+  request,
+  localOptions,
+  preferences = {
+    schemaVersion: 2,
+    askEveryTime: false,
+    defaultFolder: String.raw`C:\Downloads\Video Radar`,
+  },
+} = {}) {
+  const storageLocal = memoryLocal({ downloadPreferences: preferences, ...initial }, localOptions);
   const requests = [];
   const notificationCalls = [];
   let tick = 1_000;
@@ -140,7 +149,11 @@ test('lista formatos sem persistir e reutiliza o catálogo em memória ao inicia
   assert.equal(env.requests.filter(({ type }) => type === HOST_COMMANDS.LIST_FORMATS).length, 1);
   assert.deepEqual(env.requests.at(-1), {
     type: HOST_COMMANDS.START_DOWNLOAD,
-    payload: { url: CANONICAL_URL, height: 720 },
+    payload: {
+      url: CANONICAL_URL,
+      height: 720,
+      destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    },
   });
   assert.deepEqual(snapshot, persistedJob({ updatedAt: 1_000 }));
   assert.deepEqual(env.storageLocal.values.youtubeJob, snapshot);
@@ -177,10 +190,96 @@ test('valida payload/altura, busca catálogo ausente e só resolve start após p
   assert.equal(settled, false);
   assert.deepEqual(env.requests.slice(-2), [
     { type: HOST_COMMANDS.LIST_FORMATS, payload: { url: CANONICAL_URL } },
-    { type: HOST_COMMANDS.START_DOWNLOAD, payload: { url: CANONICAL_URL, height: 720 } },
+    {
+      type: HOST_COMMANDS.START_DOWNLOAD,
+      payload: {
+        url: CANONICAL_URL,
+        height: 720,
+        destinationFolder: String.raw`C:\Downloads\Video Radar`,
+      },
+    },
   ]);
   releaseWrite();
   assert.deepEqual(await pending, env.storageLocal.values.youtubeJob);
+});
+
+test('youtube pergunta a pasta antes de iniciar', async () => {
+  const env = createEnv({
+    preferences: { schemaVersion: 2, askEveryTime: true, defaultFolder: null },
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER) {
+        return { type: 'folderSelected', requestId: 'folder-1', path: String.raw`D:\Aulas` };
+      }
+      if (type === HOST_COMMANDS.START_DOWNLOAD) return startedEvent();
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  await start(env);
+
+  assert.deepEqual(
+    env.requests.filter(({ type }) => (
+      type === HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER
+      || type === HOST_COMMANDS.START_DOWNLOAD
+    )),
+    [
+      { type: HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER, payload: {} },
+      {
+        type: HOST_COMMANDS.START_DOWNLOAD,
+        payload: {
+          url: CANONICAL_URL,
+          height: 720,
+          destinationFolder: String.raw`D:\Aulas`,
+        },
+      },
+    ],
+  );
+});
+
+test('youtube automático usa a pasta padrão', async () => {
+  const env = createEnv({
+    preferences: {
+      schemaVersion: 2,
+      askEveryTime: false,
+      defaultFolder: String.raw`E:\Vídeos`,
+    },
+  });
+
+  await start(env);
+
+  assert.equal(
+    env.requests.find(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD)
+      .payload.destinationFolder,
+    String.raw`E:\Vídeos`,
+  );
+  assert.equal(
+    env.requests.some(({ type }) => type === HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER),
+    false,
+  );
+});
+
+test('cancelar seletor não inicia youtube', async () => {
+  const env = createEnv({
+    preferences: { schemaVersion: 2, askEveryTime: true, defaultFolder: null },
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER) {
+        return { type: 'folderSelectionCancelled', requestId: 'folder-1' };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  assert.deepEqual(await start(env), {
+    cancelled: true,
+    code: 'DOWNLOAD_CANCELLED',
+  });
+  assert.equal(
+    env.requests.some(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD),
+    false,
+  );
+  assert.equal(env.storageLocal.calls.set.length, 0);
 });
 
 test('serializa eventos e mantém estágio/progresso monotônicos', async () => {

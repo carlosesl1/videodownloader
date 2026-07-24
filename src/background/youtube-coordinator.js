@@ -1,9 +1,11 @@
 import {
   HOST_COMMANDS,
+  HOST_EVENTS,
   YOUTUBE_ACTIONS,
   assertFormatsResult,
   assertHostEvent,
 } from '../youtube/protocol.js';
+import { readDownloadPreferences } from '../shared/download-preferences.js';
 import { assertJobSnapshot } from '../youtube/job-view.js';
 import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
 
@@ -138,6 +140,22 @@ function isJobEvent(event) {
   return event.type === 'jobStarted' || event.type === 'jobProgress'
     || event.type === 'jobCompleted' || event.type === 'jobCancelled'
     || event.type === 'jobFailed';
+}
+
+async function resolveYouTubeDestination(nativeClient, storageLocal) {
+  const preferences = await readDownloadPreferences(storageLocal);
+  if (!preferences.askEveryTime) {
+    return { cancelled: false, destinationFolder: preferences.defaultFolder };
+  }
+
+  const event = assertHostEvent(
+    await nativeClient.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER, {}),
+  );
+  if (event.type === HOST_EVENTS.FOLDER_SELECTION_CANCELLED) {
+    return { cancelled: true, destinationFolder: null };
+  }
+  if (event.type !== HOST_EVENTS.FOLDER_SELECTED) invalid();
+  return { cancelled: false, destinationFolder: event.path };
 }
 
 export function createYouTubeCoordinator({ nativeClient, storageLocal, notifications, now }) {
@@ -292,6 +310,10 @@ export function createYouTubeCoordinator({ nativeClient, storageLocal, notificat
     const catalog = await catalogForStart(url);
     const format = catalog.qualities.find((quality) => quality.height === height);
     if (!format) invalid('Qualidade inválida');
+    const destination = await resolveYouTubeDestination(nativeClient, storageLocal);
+    if (destination.cancelled) {
+      return { cancelled: true, code: 'DOWNLOAD_CANCELLED' };
+    }
     const context = { url, height, catalog, format, events: [] };
 
     await serializedState(() => {
@@ -303,7 +325,11 @@ export function createYouTubeCoordinator({ nativeClient, storageLocal, notificat
 
     let event;
     try {
-      event = assertHostEvent(await nativeClient.request(HOST_COMMANDS.START_DOWNLOAD, { url, height }));
+      event = assertHostEvent(await nativeClient.request(HOST_COMMANDS.START_DOWNLOAD, {
+        url,
+        height,
+        destinationFolder: destination.destinationFolder,
+      }));
       if (event.type !== 'jobStarted') invalid();
     } catch (error) {
       await serializedState(() => {
