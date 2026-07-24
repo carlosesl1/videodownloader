@@ -104,7 +104,8 @@ export async function readDownloadPreferences(storageLocal) {
 }
 
 export function browserDownloadTarget(filename, preferences, operationId) {
-  if (preferences?.askEveryTime !== false) {
+  const normalized = normalizeDownloadPreferences(preferences);
+  if (normalized.askEveryTime) {
     return { filename, saveAs: true, staging: false };
   }
   if (typeof operationId !== 'string' || !VALID_OPERATION_ID.test(operationId)) {

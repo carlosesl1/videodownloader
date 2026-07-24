@@ -89,6 +89,11 @@ test('rejects relative, traversal, incomplete UNC, and oversized folders safely'
     String.raw`C:Vídeos`,
     String.raw`C:\Vídeos\..\Privado`,
     String.raw`C:\.\Vídeos`,
+    String.raw`C:\CON`,
+    String.raw`C:\Vídeos\inválido*`,
+    String.raw`C:\Vídeos\final.`,
+    String.raw`C:\Vídeos\final `,
+    String.raw`C:\Vídeos\\Cursos`,
     String.raw`\\servidor`,
     `C:\\${'a'.repeat(1022)}`,
   ];
@@ -143,13 +148,25 @@ test('builds browser targets for prompted and automatic staging downloads', () =
       staging: true,
     },
   );
+  assert.deepEqual(
+    browserDownloadTarget(
+      'aula.mp4',
+      {
+        schemaVersion: 2,
+        askEveryTime: false,
+        defaultFolder: 'Vídeos',
+      },
+      'op_2026-07-24',
+    ),
+    { filename: 'aula.mp4', saveAs: true, staging: false },
+  );
   assert.throws(
     () => browserDownloadTarget(
       'aula.mp4',
       { schemaVersion: 2, askEveryTime: false },
       '../escape',
     ),
-    /opera(?:ç|Ã§)[aã]o|identificador/i,
+    /identificador/i,
   );
 });
 
