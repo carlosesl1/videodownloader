@@ -1,8 +1,15 @@
-import { HOST_COMMANDS, NATIVE_HOST, assertHostEvent, hostCommand } from '../youtube/protocol.js';
+import { HOST_COMMANDS, HOST_EVENTS, NATIVE_HOST, assertHostEvent, hostCommand } from '../youtube/protocol.js';
 
 const RESPONSE_TYPES = Object.freeze({
-  [HOST_COMMANDS.PING]: 'ready', [HOST_COMMANDS.LIST_FORMATS]: 'formats',
-  [HOST_COMMANDS.START_DOWNLOAD]: 'jobStarted', [HOST_COMMANDS.GET_JOB]: 'ready',
+  [HOST_COMMANDS.PING]: new Set([HOST_EVENTS.READY]),
+  [HOST_COMMANDS.LIST_FORMATS]: new Set([HOST_EVENTS.FORMATS]),
+  [HOST_COMMANDS.START_DOWNLOAD]: new Set([HOST_EVENTS.JOB_STARTED]),
+  [HOST_COMMANDS.GET_JOB]: new Set([HOST_EVENTS.READY]),
+  [HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER]: new Set([
+    HOST_EVENTS.FOLDER_SELECTED,
+    HOST_EVENTS.FOLDER_SELECTION_CANCELLED,
+  ]),
+  [HOST_COMMANDS.MOVE_DOWNLOADED_FILE]: new Set([HOST_EVENTS.FILE_MOVED]),
 });
 const TIMEOUT_MS = 15_000;
 const DISCONNECTED = 'A conexão com o host nativo foi encerrada.';
@@ -54,7 +61,7 @@ export function createNativePortClient({
     let event;
     try { event = assertHostEvent(raw); } catch { onEvent({ type: 'nativeProtocolError' }); return; }
     const current = pending.get(event.requestId);
-    if (current && event.type === 'jobFailed') {
+    if (current && event.type === HOST_EVENTS.JOB_FAILED) {
       settle(event.requestId, current.reject, new Error(event.message));
       return;
     }
@@ -93,7 +100,7 @@ export function createNativePortClient({
       }, TIMEOUT_MS);
       pending.set(requestId, {
         expected(event) {
-          if (event.type !== RESPONSE_TYPES[type]) return false;
+          if (!RESPONSE_TYPES[type]?.has(event.type)) return false;
           if (type === HOST_COMMANDS.PING) return Object.hasOwn(event, 'protocolVersion');
           if (type === HOST_COMMANDS.GET_JOB) return Object.hasOwn(event, 'job');
           return true;

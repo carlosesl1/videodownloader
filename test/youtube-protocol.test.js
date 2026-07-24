@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   HOST_COMMANDS,
+  HOST_EVENTS,
+  MIN_NATIVE_PROTOCOL_VERSION,
   assertFormatsResult,
   assertHostEvent,
   hostCommand,
@@ -49,6 +51,16 @@ test('hostCommand aceita só comando, request ID e payload objeto seguros', () =
   assert.throws(() => hostCommand(HOST_COMMANDS.PING, 'r1', []), /Mensagem inválida/);
 });
 
+test('expõe os comandos e eventos nomeados do protocolo nativo v2', () => {
+  assert.equal(MIN_NATIVE_PROTOCOL_VERSION, 2);
+  assert.equal(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER, 'chooseDownloadFolder');
+  assert.equal(HOST_COMMANDS.MOVE_DOWNLOADED_FILE, 'moveDownloadedFile');
+  assert.equal(HOST_EVENTS.FOLDER_SELECTED, 'folderSelected');
+  assert.equal(HOST_EVENTS.FOLDER_SELECTION_CANCELLED, 'folderSelectionCancelled');
+  assert.equal(HOST_EVENTS.FILE_MOVED, 'fileMoved');
+  assert.equal(Object.isFrozen(HOST_EVENTS), true);
+});
+
 test('valida os formatos reais de eventos do host e normaliza download', () => {
   const progressEvent = {
     type: 'jobProgress', requestId: 'r1', jobId: 'j1', stage: 'video', percent: 50,
@@ -58,8 +70,12 @@ test('valida os formatos reais de eventos do host e normaliza download', () => {
   assert.deepEqual(assertHostEvent({ ...progressEvent, stage: 'download' }), {
     ...progressEvent, stage: 'video',
   });
-  assert.deepEqual(assertHostEvent({ type: 'ready', requestId: 'r1', protocolVersion: '1', nativeName: 'host' }), {
-    type: 'ready', requestId: 'r1', protocolVersion: '1', nativeName: 'host',
+  assert.deepEqual(assertHostEvent({
+    type: 'ready', requestId: 'r1', protocolVersion: 2, nativeName: 'host',
+    defaultFolder: 'C:\\Users\\Carlos\\Downloads',
+  }), {
+    type: 'ready', requestId: 'r1', protocolVersion: 2, nativeName: 'host',
+    defaultFolder: 'C:\\Users\\Carlos\\Downloads',
   });
   assert.deepEqual(assertHostEvent({ type: 'ready', requestId: 'r1', job: null }), {
     type: 'ready', requestId: 'r1', job: null,
@@ -79,6 +95,61 @@ test('valida os formatos reais de eventos do host e normaliza download', () => {
   assert.deepEqual(assertHostEvent({ type: 'jobFailed', requestId: 'r1', code: 'YOUTUBE_METADATA', message: 'Falha segura', details: { operation: 'listFormats' } }), {
     type: 'jobFailed', requestId: 'r1', code: 'YOUTUBE_METADATA', message: 'Falha segura', details: { operation: 'listFormats' },
   });
+});
+
+test('valida seleção, cancelamento e movimentação de destino', () => {
+  assert.deepEqual(assertHostEvent({
+    type: 'folderSelected', requestId: 'r1', path: 'C:\\Users\\Carlos\\Downloads',
+  }), {
+    type: 'folderSelected', requestId: 'r1', path: 'C:\\Users\\Carlos\\Downloads',
+  });
+  assert.deepEqual(assertHostEvent({
+    type: 'folderSelected', requestId: 'r2', path: '\\\\server\\share\\videos',
+  }), {
+    type: 'folderSelected', requestId: 'r2', path: '\\\\server\\share\\videos',
+  });
+  assert.deepEqual(assertHostEvent({
+    type: 'folderSelectionCancelled', requestId: 'r3',
+  }), {
+    type: 'folderSelectionCancelled', requestId: 'r3',
+  });
+  assert.deepEqual(assertHostEvent({
+    type: 'fileMoved', requestId: 'r4', downloadId: 0,
+    finalPath: 'D:\\Videos\\clip.mp4',
+  }), {
+    type: 'fileMoved', requestId: 'r4', downloadId: 0,
+    finalPath: 'D:\\Videos\\clip.mp4',
+  });
+});
+
+test('rejeita caminhos relativos, segmentos ambíguos e chaves extras nos novos eventos', () => {
+  for (const event of [
+    { type: 'folderSelected', requestId: 'r1', path: 'Downloads\\video' },
+    { type: 'folderSelected', requestId: 'r1', path: 'C:\\Downloads\\..\\Windows' },
+    { type: 'folderSelected', requestId: 'r1', path: 'C:/Downloads' },
+    { type: 'folderSelected', requestId: 'r1', path: 'C:\\Downloads', extra: true },
+    { type: 'folderSelectionCancelled', requestId: 'r1', extra: true },
+    { type: 'fileMoved', requestId: 'r1', downloadId: -1, finalPath: 'C:\\Downloads\\a.mp4' },
+    { type: 'fileMoved', requestId: 'r1', downloadId: Number.MAX_SAFE_INTEGER + 1, finalPath: 'C:\\Downloads\\a.mp4' },
+    { type: 'fileMoved', requestId: 'r1', downloadId: 1, finalPath: 'a.mp4' },
+    { type: 'fileMoved', requestId: 'r1', downloadId: 1, finalPath: 'C:\\Downloads\\a.mp4', extra: true },
+  ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
+});
+
+test('ready do ping exige protocolo compatível, caminho absoluto e formato exato', () => {
+  const ready = {
+    type: 'ready', requestId: 'r1', protocolVersion: 2, nativeName: 'host',
+    defaultFolder: 'C:\\Users\\Carlos\\Downloads',
+  };
+  assert.deepEqual(assertHostEvent(ready), ready);
+  for (const event of [
+    { ...ready, protocolVersion: 1 },
+    { ...ready, protocolVersion: 1000 },
+    { ...ready, protocolVersion: '2' },
+    { ...ready, defaultFolder: 'Downloads' },
+    { ...ready, extra: true },
+    { type: 'ready', requestId: 'r1', protocolVersion: 2, nativeName: 'host' },
+  ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
 });
 
 test('rejeita limites e valores inseguros vindos do host', () => {

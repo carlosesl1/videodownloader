@@ -27,7 +27,10 @@ test('conecta uma vez, correlaciona respostas e encaminha eventos posteriores', 
   const first = client.request(HOST_COMMANDS.PING); const second = client.request(HOST_COMMANDS.GET_JOB);
   assert.deepEqual(connections, [NATIVE_HOST]); assert.equal(port.messages.length, 2); assert.notEqual(port.messages[0].requestId, port.messages[1].requestId);
   port.emit({ type: 'ready', requestId: port.messages[1].requestId, job: null });
-  port.emit({ type: 'ready', requestId: port.messages[0].requestId, protocolVersion: '1', nativeName: 'host' });
+  port.emit({
+    type: 'ready', requestId: port.messages[0].requestId, protocolVersion: 2,
+    nativeName: 'host', defaultFolder: 'C:\\Users\\Carlos\\Downloads',
+  });
   assert.equal((await first).type, 'ready'); assert.equal((await second).job, null);
   port.emit({ type: 'jobProgress', requestId: 'old', jobId: 'j1', stage: 'video', percent: 50 });
   assert.deepEqual(events.at(-1), { type: 'jobProgress', requestId: 'old', jobId: 'j1', stage: 'video', percent: 50 });
@@ -50,6 +53,50 @@ test('start resolve em jobStarted e cancel confirma localmente sem aguardar ack'
   port.emit({ type: 'jobStarted', requestId: startCommand.requestId, jobId: 'j1', job: { jobId: 'j1', videoId: '', title: '', height: 720, stage: 'preparing', percent: null, path: null, errorCode: null } });
   assert.equal((await start).jobId, 'j1');
   assert.deepEqual(await client.request(HOST_COMMANDS.CANCEL_DOWNLOAD, { jobId: 'j1' }), { requested: true, requestId: port.messages[1].requestId });
+});
+
+test('correlaciona seleção e cancelamento de pasta', async () => {
+  const port = fakePort(); const client = createNativePortClient({ connectNative: () => port, onEvent() {} });
+  const selected = client.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER);
+  port.emit({
+    type: 'folderSelected', requestId: port.messages[0].requestId,
+    path: 'C:\\Users\\Carlos\\Downloads',
+  });
+  assert.deepEqual(await selected, {
+    type: 'folderSelected', requestId: port.messages[0].requestId,
+    path: 'C:\\Users\\Carlos\\Downloads',
+  });
+
+  const cancelled = client.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER);
+  port.emit({
+    type: 'folderSelectionCancelled', requestId: port.messages[1].requestId,
+  });
+  assert.deepEqual(await cancelled, {
+    type: 'folderSelectionCancelled', requestId: port.messages[1].requestId,
+  });
+});
+
+test('correlaciona movimentação e ignora resposta de tipo errado', async () => {
+  const port = fakePort(); const events = [];
+  const client = createNativePortClient({ connectNative: () => port, onEvent: (event) => events.push(event) });
+  const moved = client.request(HOST_COMMANDS.MOVE_DOWNLOADED_FILE, { downloadId: 7 });
+  const requestId = port.messages[0].requestId;
+  let resolved = false;
+  moved.then(() => { resolved = true; });
+
+  port.emit({ type: 'folderSelectionCancelled', requestId });
+  await Promise.resolve();
+  assert.equal(resolved, false);
+  assert.deepEqual(events, [{ type: 'folderSelectionCancelled', requestId }]);
+
+  port.emit({
+    type: 'fileMoved', requestId, downloadId: 7,
+    finalPath: 'D:\\Videos\\clip.mp4',
+  });
+  assert.deepEqual(await moved, {
+    type: 'fileMoved', requestId, downloadId: 7,
+    finalPath: 'D:\\Videos\\clip.mp4',
+  });
 });
 
 test('timeout não tenta novamente e disconnect rejeita pendências e publica evento interno uma vez', async () => {
