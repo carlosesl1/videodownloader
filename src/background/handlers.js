@@ -1,5 +1,9 @@
 import { ACTIONS, assertBackgroundMessage } from '../shared/messages.js';
-import { downloadTarget, readDownloadPreferences } from '../shared/download-preferences.js';
+import {
+  browserDownloadTarget,
+  readDownloadPreferences,
+} from '../shared/download-preferences.js';
+import { HOST_COMMANDS } from '../youtube/protocol.js';
 
 const OPERATION_PREFIX = 'hlsOperation:';
 const DEDUPE_PREFIX = 'hlsDedupe:';
@@ -178,6 +182,8 @@ export function createBackgroundHandlers({
   storageLocal = globalThis.chrome?.storage?.local,
   permissions = globalThis.chrome?.permissions,
   sendOffscreen = (message) => globalThis.chrome.runtime.sendMessage(message),
+  nativeClient,
+  relocation,
   createOperationId = defaultOperationId,
   createInspectionId = defaultOperationId,
   scheduleRetry = (callback) => setTimeout(() => Promise.resolve(callback()).catch(() => {}), 1_000),
@@ -197,6 +203,51 @@ export function createBackgroundHandlers({
       await observed;
       if (queue === observed) return;
     }
+  }
+
+  async function resolveDownloadTarget(filename, operationId) {
+    const preferences = await readDownloadPreferences(storageLocal);
+    const target = browserDownloadTarget(filename, preferences, operationId);
+    if (!target.staging) {
+      return { target, destinationFolder: null };
+    }
+    if (typeof nativeClient?.request !== 'function'
+      || typeof relocation?.track !== 'function'
+      || typeof relocation?.deliver !== 'function') {
+      throw new BackgroundError(
+        'DESTINATION_HELPER_UNAVAILABLE',
+        'O auxiliar nativo é necessário para usar a pasta automática.',
+      );
+    }
+    const ready = await nativeClient.request(HOST_COMMANDS.PING, {});
+    const destinationFolder = preferences.defaultFolder ?? ready?.defaultFolder ?? null;
+    if (!destinationFolder) {
+      throw new BackgroundError(
+        'DESTINATION_NOT_CONFIGURED',
+        'Escolha uma pasta padrão para continuar.',
+      );
+    }
+    return { target, destinationFolder };
+  }
+
+  async function trackRelocation({
+    downloadId,
+    operationId,
+    destinationFolder,
+    mediaKind,
+    mediaUrl,
+    displayName,
+  }) {
+    if (!destinationFolder) return;
+    await relocation.track({
+      downloadId,
+      operationId,
+      destinationFolder,
+      mediaKind,
+      mediaUrl,
+      displayName,
+    });
+    await relocation.deliver(downloadId);
   }
 
   async function getRecord(operationId) {
@@ -485,18 +536,32 @@ export function createBackgroundHandlers({
   }
 
   async function handoffAssembled(record) {
+    const { target, destinationFolder } = await resolveDownloadTarget(
+      record.filename,
+      record.operationId,
+    );
     let existing = await findDownload(record.blobUrl, record.downloadId);
     if (!existing && record.downloadId === undefined) existing = await findDownload(record.blobUrl);
     if (existing) {
       await persistDownloadMapping(record, existing);
+      if (target.staging) {
+        await trackRelocation({
+          downloadId: existing.id,
+          operationId: record.operationId,
+          destinationFolder,
+          mediaKind: 'hls',
+          mediaUrl: record.url,
+          displayName: record.filename,
+        });
+      }
       return;
     }
     if (Number.isInteger(record.downloadId)) return;
 
-    const preferences = await readDownloadPreferences(storageLocal);
     const downloadId = await downloads.download({
       url: record.blobUrl,
-      ...downloadTarget(record.filename, preferences),
+      filename: target.filename,
+      saveAs: target.saveAs,
     });
     if (!Number.isInteger(downloadId)) throw new BackgroundError(
       'BACKGROUND_DOWNLOAD',
@@ -507,6 +572,16 @@ export function createBackgroundHandlers({
       url: record.blobUrl,
       state: 'in_progress',
     });
+    if (target.staging) {
+      await trackRelocation({
+        downloadId,
+        operationId: record.operationId,
+        destinationFolder,
+        mediaKind: 'hls',
+        mediaUrl: record.url,
+        displayName: record.filename,
+      });
+    }
   }
 
   async function completeHls(message) {
@@ -685,11 +760,26 @@ export function createBackgroundHandlers({
     async handle(raw) {
       const message = assertBackgroundMessage(raw);
       if (message.action === ACTIONS.DOWNLOAD_DIRECT) {
-        const preferences = await readDownloadPreferences(storageLocal);
+        const operationId = createOperationId();
+        const { target, destinationFolder } = await resolveDownloadTarget(
+          message.payload.filename,
+          operationId,
+        );
         const downloadId = await downloads.download({
           url: message.payload.url,
-          ...downloadTarget(message.payload.filename, preferences),
+          filename: target.filename,
+          saveAs: target.saveAs,
         });
+        if (target.staging) {
+          await trackRelocation({
+            downloadId,
+            operationId,
+            destinationFolder,
+            mediaKind: 'direct',
+            mediaUrl: message.payload.url,
+            displayName: message.payload.filename,
+          });
+        }
         return { downloadId };
       }
       if (message.action === ACTIONS.INSPECT_HLS) return inspectHls(message);

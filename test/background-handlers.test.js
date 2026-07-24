@@ -130,6 +130,8 @@ function defaultDependencies(overrides = {}) {
   const downloadsStarted = [];
   const downloadItems = [];
   const downloadSearches = [];
+  const nativeRequests = [];
+  const relocationCalls = { track: [], deliver: [] };
   return {
     session,
     local,
@@ -138,6 +140,8 @@ function defaultDependencies(overrides = {}) {
     downloadsStarted,
     downloadItems,
     downloadSearches,
+    nativeRequests,
+    relocationCalls,
     dependencies: {
       storageSession: session,
       storageLocal: local,
@@ -165,6 +169,22 @@ function defaultDependencies(overrides = {}) {
           return [];
         },
       },
+      nativeClient: {
+        async request(type, payload) {
+          nativeRequests.push({ type, payload: structuredClone(payload) });
+          return {
+            type: 'ready',
+            requestId: 'ping-1',
+            protocolVersion: 2,
+            nativeName: 'com.videoradar.helper',
+            defaultFolder: String.raw`C:\Downloads\Video Radar`,
+          };
+        },
+      },
+      relocation: {
+        async track(record) { relocationCalls.track.push(structuredClone(record)); },
+        async deliver(downloadId) { relocationCalls.deliver.push(downloadId); },
+      },
       sendOffscreen: async (message) => {
         sent.push(message);
         return { ok: true, value: message.action === ACTIONS.START_HLS
@@ -182,11 +202,11 @@ test('direct downloads keep the exact Chrome call contract', async () => {
 
   assert.deepEqual(await handlers.handle(directMessage()), { downloadId: 41 });
   assert.deepEqual(env.downloadsStarted, [{
-    url: 'https://cdn.test/aula.mp4', filename: 'Video Radar/aula.mp4', saveAs: false,
+    url: 'https://cdn.test/aula.mp4', filename: 'aula.mp4', saveAs: true,
   }]);
 });
 
-test('download preferences persist a relative subfolder and can restore Save As prompts', async () => {
+test('download preferences use automatic staging or restore Save As prompts', async () => {
   const automatic = defaultDependencies({
     storageLocal: memorySession({
       downloadPreferences: { subfolder: 'Cursos/IA', automatic: true },
@@ -195,9 +215,19 @@ test('download preferences persist a relative subfolder and can restore Save As 
   await createBackgroundHandlers(automatic.dependencies).handle(directMessage());
   assert.deepEqual(automatic.downloadsStarted[0], {
     url: 'https://cdn.test/aula.mp4',
-    filename: 'Cursos/IA/aula.mp4',
+    filename: 'Video Radar/.staging/operation-1/aula.mp4',
     saveAs: false,
   });
+  assert.equal(automatic.nativeRequests.length, 1);
+  assert.deepEqual(automatic.relocationCalls.track, [{
+    downloadId: 41,
+    operationId: 'operation-1',
+    destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    mediaKind: 'direct',
+    mediaUrl: 'https://cdn.test/aula.mp4',
+    displayName: 'aula.mp4',
+  }]);
+  assert.deepEqual(automatic.relocationCalls.deliver, [41]);
 
   const prompted = defaultDependencies({
     storageLocal: memorySession({
@@ -267,8 +297,8 @@ test('a recreated coordinator reuses an assembling operation and handles complet
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.equal(env.downloadsStarted.length, 1);
-  assert.equal(env.downloadsStarted[0].filename, 'Video Radar/aula.ts');
-  assert.equal(env.downloadsStarted[0].saveAs, false);
+  assert.equal(env.downloadsStarted[0].filename, 'aula.ts');
+  assert.equal(env.downloadsStarted[0].saveAs, true);
 });
 
 test('progress updates persist monotonically and a different HLS start waits', async () => {
@@ -660,7 +690,7 @@ test('Chrome 116 getContexts skips an existing document and coalesces concurrent
       async search() { return []; },
       async download() { return 1; },
     },
-    storage: { session: memorySession() },
+    storage: { session: memorySession(), local: memorySession() },
     permissions: { async contains() { return true; }, async remove() { return true; } },
     offscreen: {
       async createDocument(options) {
