@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
   browserDownloadTarget,
   DEFAULT_DOWNLOAD_PREFERENCES,
-  downloadTarget,
   DOWNLOAD_PREFERENCES_KEY,
   DOWNLOAD_PREFERENCES_SCHEMA,
   normalizeDownloadPreferences,
@@ -167,17 +166,6 @@ test('builds browser targets for prompted and automatic staging downloads', () =
       '../escape',
     ),
     /identificador/i,
-  );
-});
-
-test('keeps the legacy downloadTarget wrapper contract for direct callers', () => {
-  assert.deepEqual(
-    downloadTarget('aula.mp4', { automatic: true, subfolder: 'Cursos/IA' }),
-    { filename: 'Cursos/IA/aula.mp4', saveAs: false },
-  );
-  assert.deepEqual(
-    downloadTarget('aula.mp4', { automatic: false, subfolder: '' }),
-    { filename: 'aula.mp4', saveAs: true },
   );
 });
 

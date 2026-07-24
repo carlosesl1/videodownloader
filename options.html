@@ -11,52 +11,36 @@
       <header class="settings-header">
         <span class="eyebrow">VÍDEO RADAR / PREFERÊNCIAS</span>
         <h1>Destino dos downloads</h1>
-        <p>Defina onde os vídeos diretos e HLS serão organizados.</p>
+        <p>Use a mesma pasta para vídeos diretos, HLS e YouTube.</p>
       </header>
 
-      <form id="download-preferences" class="settings-form">
-        <section class="settings-section" aria-labelledby="folder-title">
+      <section class="settings-card" aria-labelledby="destination-title">
+        <div class="section-heading">
+          <span class="section-index">01</span>
           <div>
-            <span class="section-index">01</span>
-            <h2 id="folder-title">Subpasta em Downloads</h2>
+            <p class="eyebrow">DESTINO DOS DOWNLOADS</p>
+            <h2 id="destination-title">Onde salvar os vídeos</h2>
           </div>
-          <p class="section-copy">
-            Por segurança, o navegador permite salvar automaticamente apenas dentro da pasta Downloads padrão.
-          </p>
-          <label class="folder-field" for="subfolder">
-            <span class="folder-field__prefix">Downloads /</span>
-            <input
-              id="subfolder"
-              name="subfolder"
-              type="text"
-              maxlength="180"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Video Radar"
-            />
-          </label>
-          <p id="path-preview" class="path-preview"></p>
-        </section>
-
-        <section class="settings-section" aria-labelledby="behavior-title">
-          <div>
-            <span class="section-index">02</span>
-            <h2 id="behavior-title">Comportamento</h2>
-          </div>
-          <label class="automatic-choice">
-            <input id="automatic" name="automatic" type="checkbox" />
-            <span>
-              <strong>Salvar automaticamente nessa pasta</strong>
-              <small>Desative para abrir “Salvar como” a cada download.</small>
-            </span>
-          </label>
-        </section>
-
-        <div class="form-actions">
-          <button type="submit">Salvar configuração</button>
-          <p id="save-status" class="save-status" role="status" aria-live="polite"></p>
         </div>
-      </form>
+
+        <div class="folder-row">
+          <div class="folder-summary">
+            <span class="field-label">Pasta padrão</span>
+            <output id="default-folder">Carregando…</output>
+          </div>
+          <button id="choose-folder" type="button">Alterar pasta padrão…</button>
+        </div>
+
+        <label class="switch-row">
+          <input id="ask-every-time" type="checkbox" />
+          <span>
+            <strong>Perguntar onde salvar cada download</strong>
+            <small>O navegador ou o Windows solicitará o destino antes de começar.</small>
+          </span>
+        </label>
+
+        <p id="save-status" class="save-status" role="status" aria-live="polite"></p>
+      </section>
     </main>
     <script type="module" src="src/options/main.js"></script>
   </body>

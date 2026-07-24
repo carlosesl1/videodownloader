@@ -1,64 +1,130 @@
 import {
-  DEFAULT_DOWNLOAD_PREFERENCES,
   DOWNLOAD_PREFERENCES_KEY,
-  normalizeDownloadPreferences,
+  readDownloadPreferences,
   validateDownloadPreferences,
 } from '../shared/download-preferences.js';
+import { createNativePortClient } from '../background/native-port.js';
+import { HOST_COMMANDS, HOST_EVENTS } from '../youtube/protocol.js';
+
+const HELPER_ERROR = 'Auxiliar indisponível. Reinstale o Video Radar Helper.';
+
+export function createOptionsController({ view, storageLocal, nativeClient }) {
+  if (typeof view?.render !== 'function'
+    || typeof view?.status !== 'function'
+    || typeof storageLocal?.get !== 'function'
+    || typeof storageLocal?.set !== 'function'
+    || typeof nativeClient?.request !== 'function') {
+    throw new TypeError('Dependências inválidas das configurações.');
+  }
+
+  let fallbackFolder = null;
+  let helperAvailable = true;
+
+  async function renderPreferences(preferences) {
+    view.render({
+      ...preferences,
+      effectiveFolder: preferences.defaultFolder ?? fallbackFolder,
+      helperAvailable,
+    });
+  }
+
+  async function load() {
+    const preferences = await readDownloadPreferences(storageLocal);
+    try {
+      const ready = await nativeClient.request(HOST_COMMANDS.PING, {});
+      fallbackFolder = ready.defaultFolder;
+      helperAvailable = true;
+    } catch {
+      fallbackFolder = null;
+      helperAvailable = false;
+      view.status(HELPER_ERROR, true);
+    }
+    await renderPreferences(preferences);
+  }
+
+  async function persist(patch) {
+    const current = await readDownloadPreferences(storageLocal);
+    const next = validateDownloadPreferences({ ...current, ...patch });
+    await storageLocal.set({ [DOWNLOAD_PREFERENCES_KEY]: next });
+    await renderPreferences(next);
+    view.status('Configuração salva.');
+    return next;
+  }
+
+  async function setAskEveryTime(value) {
+    return persist({ askEveryTime: value === true });
+  }
+
+  async function chooseFolder() {
+    const result = await nativeClient.request(
+      HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER,
+      {},
+    );
+    if (result.type === HOST_EVENTS.FOLDER_SELECTION_CANCELLED) {
+      view.status('Seleção cancelada.');
+      return null;
+    }
+    if (result.type !== HOST_EVENTS.FOLDER_SELECTED) {
+      throw new Error('Resposta inválida do seletor de pasta.');
+    }
+    helperAvailable = true;
+    return persist({ defaultFolder: result.path });
+  }
+
+  return Object.freeze({ load, setAskEveryTime, chooseFolder });
+}
+
+function createDomView({ folder, askEveryTime, status }) {
+  return {
+    render(value) {
+      folder.textContent = value.effectiveFolder ?? 'Auxiliar indisponível';
+      askEveryTime.checked = value.askEveryTime;
+      folder.dataset.unavailable = value.helperAvailable ? 'false' : 'true';
+    },
+    status(message, error = false) {
+      status.textContent = message;
+      if (error) status.dataset.error = 'true';
+      else delete status.dataset.error;
+    },
+  };
+}
 
 export function bootOptions({
   chromeApi = globalThis.chrome,
   documentApi = globalThis.document,
 } = {}) {
-  const form = documentApi.querySelector('#download-preferences');
-  const subfolder = documentApi.querySelector('#subfolder');
-  const automatic = documentApi.querySelector('#automatic');
-  const preview = documentApi.querySelector('#path-preview');
-  const status = documentApi.querySelector('#save-status');
-  if (!form || !subfolder || !automatic || !preview || !status || !chromeApi?.storage?.local) return;
+  const folder = documentApi?.querySelector('#default-folder');
+  const chooseFolder = documentApi?.querySelector('#choose-folder');
+  const askEveryTime = documentApi?.querySelector('#ask-every-time');
+  const status = documentApi?.querySelector('#save-status');
+  if (!folder || !chooseFolder || !askEveryTime || !status
+    || !chromeApi?.storage?.local || !chromeApi?.runtime?.connectNative) return;
 
-  function updatePreview() {
-    const folder = subfolder.value.trim().replaceAll('\\', '/');
-    preview.textContent = folder
-      ? `Destino: Downloads / ${folder}`
-      : 'Destino: pasta Downloads padrão';
-  }
-
-  async function load() {
-    let preferences = DEFAULT_DOWNLOAD_PREFERENCES;
-    try {
-      const stored = await chromeApi.storage.local.get(DOWNLOAD_PREFERENCES_KEY);
-      preferences = normalizeDownloadPreferences(stored?.[DOWNLOAD_PREFERENCES_KEY]);
-    } catch {
-      // Defaults keep the page usable if local storage is temporarily unavailable.
-    }
-    subfolder.value = preferences.subfolder;
-    automatic.checked = preferences.automatic;
-    updatePreview();
-  }
-
-  subfolder.addEventListener('input', updatePreview);
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    status.textContent = '';
-    delete status.dataset.error;
-    try {
-      const preferences = validateDownloadPreferences({
-        subfolder: subfolder.value,
-        automatic: automatic.checked,
-      });
-      await chromeApi.storage.local.set({ [DOWNLOAD_PREFERENCES_KEY]: preferences });
-      subfolder.value = preferences.subfolder;
-      updatePreview();
-      status.textContent = 'Configuração salva.';
-    } catch (error) {
-      status.dataset.error = 'true';
-      status.textContent = error instanceof Error
-        ? error.message
-        : 'Não foi possível salvar a configuração.';
-    }
+  const nativeClient = createNativePortClient({
+    connectNative: (name) => chromeApi.runtime.connectNative(name),
+    onEvent() {},
+  });
+  const view = createDomView({ folder, askEveryTime, status });
+  const controller = createOptionsController({
+    view,
+    storageLocal: chromeApi.storage.local,
+    nativeClient,
   });
 
-  void load();
+  askEveryTime.addEventListener('change', () => {
+    void controller.setAskEveryTime(askEveryTime.checked).catch(() => {
+      view.status('Não foi possível salvar a configuração.', true);
+    });
+  });
+  chooseFolder.addEventListener('click', () => {
+    chooseFolder.disabled = true;
+    void controller.chooseFolder()
+      .catch(() => view.status(HELPER_ERROR, true))
+      .finally(() => { chooseFolder.disabled = false; });
+  });
+
+  void controller.load();
+  return controller;
 }
 
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') bootOptions();
