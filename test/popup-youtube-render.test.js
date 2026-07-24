@@ -220,6 +220,16 @@ test('keeps HLS preparation determinate and direct downloads unchanged', () => {
   assert.equal(one(hls, 'progress').value, 0);
   assert.equal(one(hls, '.media-row__status').textContent, 'Preparando a playlist…');
 
+  const hlsProgress = renderItem({
+    id: 'hls-2', kind: 'hls', filename: 'master.ts', format: 'ts', inspected: true,
+    variants: [{ label: '720p' }], selectedIndex: 0, phase: 'preparing', progress: 40,
+    statusLabel: 'Baixando segmentos… 40% · 12/30 · 4 KB de ~10 KB',
+  });
+  assert.equal(
+    one(hlsProgress, 'progress').getAttribute('aria-valuetext'),
+    'Baixando segmentos… 40% · 12/30 · 4 KB de ~10 KB',
+  );
+
   const direct = renderItem({
     id: 'direct-1', kind: 'direct', filename: 'clip.mp4', format: 'mp4', inspected: true,
     variants: [{ label: 'Original' }], selectedIndex: 0, phase: 'ready', statusLabel: '',

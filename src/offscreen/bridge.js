@@ -34,7 +34,12 @@ export function createOffscreenBridge({
     let completion;
     let blobUrl;
     let lastProgressPercent = -1;
-    const onProgress = ({ completedSegments, totalSegments, bytesReceived }) => {
+    const onProgress = ({
+      completedSegments,
+      totalSegments,
+      bytesReceived,
+      estimatedTotalBytes,
+    }) => {
       const percent = Math.floor((completedSegments / totalSegments) * 100);
       if (percent <= lastProgressPercent) return;
       lastProgressPercent = percent;
@@ -42,7 +47,13 @@ export function createOffscreenBridge({
         Promise.resolve(sendProgress({
           target: 'background',
           action: ACTIONS.HLS_PROGRESS,
-          payload: { operationId, completedSegments, totalSegments, bytesReceived },
+          payload: {
+            operationId,
+            completedSegments,
+            totalSegments,
+            bytesReceived,
+            estimatedTotalBytes,
+          },
         })).catch(() => {});
       } catch {
         // O progresso é informativo; a conclusão durável continua sendo obrigatória.

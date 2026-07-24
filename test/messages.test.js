@@ -183,6 +183,7 @@ test('accepts bounded HLS progress messages and rejects invalid counters', () =>
       completedSegments: 12,
       totalSegments: 30,
       bytesReceived: 4096,
+      estimatedTotalBytes: 10_240,
     },
   };
 
@@ -191,6 +192,8 @@ test('accepts bounded HLS progress messages and rejects invalid counters', () =>
     { ...progress.payload, completedSegments: 31 },
     { ...progress.payload, totalSegments: 0 },
     { ...progress.payload, bytesReceived: -1 },
+    { ...progress.payload, estimatedTotalBytes: -1 },
+    { ...progress.payload, estimatedTotalBytes: 1.5 },
     { ...progress.payload, percent: 40 },
   ]) {
     assert.throws(() => assertBackgroundMessage({ ...progress, payload }), /Mensagem inv.lida/);

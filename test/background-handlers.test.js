@@ -54,11 +54,19 @@ function completion(operationId, blobUrl = `blob:extension.test/${operationId}`)
   };
 }
 
-function progressMessage(operationId, completedSegments, totalSegments, bytesReceived) {
+function progressMessage(
+  operationId,
+  completedSegments,
+  totalSegments,
+  bytesReceived,
+  estimatedTotalBytes,
+) {
   return {
     target: 'background',
     action: ACTIONS.HLS_PROGRESS,
-    payload: { operationId, completedSegments, totalSegments, bytesReceived },
+    payload: {
+      operationId, completedSegments, totalSegments, bytesReceived, estimatedTotalBytes,
+    },
   };
 }
 
@@ -239,16 +247,19 @@ test('progress updates persist monotonically and a different HLS start waits', a
   const handlers = createBackgroundHandlers(env.dependencies);
   const started = await handlers.handle(downloadMessage());
 
-  assert.deepEqual(await handlers.handle(progressMessage(started.operationId, 12, 30, 4096)), {
+  assert.deepEqual(await handlers.handle(progressMessage(
+    started.operationId, 12, 30, 4096, 10_240,
+  )), {
     acknowledged: true,
   });
   assert.deepEqual(env.session.values[`hlsOperation:${started.operationId}`].progress, {
     completedSegments: 12,
     totalSegments: 30,
     bytesReceived: 4096,
+    estimatedTotalBytes: 10_240,
     percent: 40,
   });
-  await handlers.handle(progressMessage(started.operationId, 10, 30, 2048));
+  await handlers.handle(progressMessage(started.operationId, 10, 30, 2048, 6_144));
   assert.equal(env.session.values[`hlsOperation:${started.operationId}`].progress.percent, 40);
 
   await assert.rejects(

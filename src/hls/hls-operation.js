@@ -1,9 +1,9 @@
 import { HlsError, parseHlsPlaylist } from './parse-playlist.js';
 
 const DEFAULT_MAX_BYTES = 1024 ** 3;
-const DEFAULT_CONCURRENCY = 4;
+const DEFAULT_CONCURRENCY = 8;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-const MAX_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 8;
 
 function invalid(message, details = {}) {
   return new HlsError('HLS_INVALID', message, details);
@@ -260,12 +260,23 @@ export async function assembleHls(url, {
     let nextIndex = 0;
     let total = 0;
     let completedSegments = 0;
+    let completedBytes = 0;
     const notifyProgress = () => {
+      const estimatedTotalBytes = completedSegments > 0
+        ? Math.max(
+          total,
+          Math.min(
+            Number.MAX_SAFE_INTEGER,
+            Math.ceil((completedBytes / completedSegments) * playlist.segments.length),
+          ),
+        )
+        : null;
       try {
         onProgress?.({
           completedSegments,
           totalSegments: playlist.segments.length,
           bytesReceived: total,
+          estimatedTotalBytes,
         });
       } catch {
         // A falha da interface não deve interromper a montagem do vídeo.
@@ -360,8 +371,10 @@ export async function assembleHls(url, {
             requestTimeoutMs,
           );
           assertRunning(segment.url);
-          parts[index] = await readSegment(response, segment.url);
+          const chunks = await readSegment(response, segment.url);
+          parts[index] = chunks;
           assertRunning(segment.url);
+          completedBytes += chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
           completedSegments += 1;
           notifyProgress();
         } catch (error) {

@@ -37,6 +37,35 @@ export function userMessageForError(code) {
   return ERROR_MESSAGES[code] ?? 'Não foi possível concluir a operação. Tente novamente.';
 }
 
+function formatByteSize(bytes) {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const fractionDigits = unitIndex === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  const rounded = Number(value.toFixed(fractionDigits));
+  return `${String(rounded).replace('.', ',')} ${units[unitIndex]}`;
+}
+
+function hlsSizeLabel(progress, completedSegments, totalSegments) {
+  const bytesReceived = progress?.bytesReceived;
+  if (!Number.isSafeInteger(bytesReceived) || bytesReceived <= 0) return '';
+  const receivedLabel = formatByteSize(bytesReceived);
+  const estimated = progress?.estimatedTotalBytes;
+  if (
+    completedSegments === totalSegments
+    && totalSegments > 0
+  ) return receivedLabel;
+  if (!Number.isSafeInteger(estimated) || estimated < bytesReceived) {
+    return `${receivedLabel} baixados`;
+  }
+  return `${receivedLabel} de ~${formatByteSize(estimated)}`;
+}
+
 function updateItem(items, id, update) {
   return items.map((item) => item.id === id ? { ...item, ...update(item) } : item);
 }
@@ -59,14 +88,16 @@ function operationView(record) {
     const totalSegments = Number.isSafeInteger(record.progress?.totalSegments)
       ? record.progress.totalSegments
       : 0;
+    const segmentLabel = totalSegments > 0
+      ? `Baixando segmentos… ${progress}% · ${completedSegments}/${totalSegments}`
+      : 'Preparando a playlist…';
+    const sizeLabel = hlsSizeLabel(record.progress, completedSegments, totalSegments);
     return {
       phase: 'preparing',
       progress,
       completedSegments,
       totalSegments,
-      statusLabel: totalSegments > 0
-        ? `Baixando segmentos… ${progress}% · ${completedSegments}/${totalSegments}`
-        : 'Preparando a playlist…',
+      statusLabel: sizeLabel ? `${segmentLabel} · ${sizeLabel}` : segmentLabel,
     };
   }
   if (record?.state === 'downloading') {

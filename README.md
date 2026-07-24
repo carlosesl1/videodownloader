@@ -25,7 +25,7 @@ Se você recebeu o pacote distribuído já pronto, execute o launcher **dentro d
 2. Abra o popup, clique em **Buscar vídeos**, escolha a qualidade e clique em **Baixar**.
 3. O progresso permanece disponível ao fechar e reabrir o popup. Use **Cancelar** para interromper um trabalho em andamento.
 
-Os arquivos são gravados em `%USERPROFILE%\Downloads\Video Radar`. Para mídias diretas, a extensão também reconhece `.mp4`, `.webm` e `.mov`. Para HLS compatível, ela apresenta variantes quando existirem e une os segmentos em `.ts`.
+Os arquivos são gravados em `%USERPROFILE%\Downloads\Video Radar`. Para mídias diretas, a extensão também reconhece `.mp4`, `.webm` e `.mov`. Para HLS compatível, ela apresenta variantes quando existirem e une os segmentos em `.ts`. Durante a montagem, o popup mostra os bytes já recebidos e uma estimativa do tamanho final marcada com `~`; o valor só é exato quando todos os segmentos terminam. Até oito segmentos são buscados simultaneamente quando o servidor permite.
 
 Se o popup informar que o auxiliar está ausente ou com erro, confirme a etapa 3 e recarregue a extensão. Não há monitoramento contínuo: a busca só ocorre depois de **Buscar vídeos**.
 

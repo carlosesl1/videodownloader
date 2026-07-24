@@ -156,9 +156,9 @@ test('assembleHls reports monotonic segment and byte progress', async () => {
 
   assert.equal(result.size, 7);
   assert.deepEqual(progress, [
-    { completedSegments: 0, totalSegments: 2, bytesReceived: 0 },
-    { completedSegments: 1, totalSegments: 2, bytesReceived: 3 },
-    { completedSegments: 2, totalSegments: 2, bytesReceived: 7 },
+    { completedSegments: 0, totalSegments: 2, bytesReceived: 0, estimatedTotalBytes: null },
+    { completedSegments: 1, totalSegments: 2, bytesReceived: 3, estimatedTotalBytes: 6 },
+    { completedSegments: 2, totalSegments: 2, bytesReceived: 7, estimatedTotalBytes: 7 },
   ]);
 });
 
@@ -432,9 +432,37 @@ test('assembleHls honors its concurrency limit', async () => {
   assert.equal(result.size, 5);
 });
 
+test('assembleHls downloads up to eight segments concurrently by default', async () => {
+  let active = 0;
+  let peak = 0;
+  const waiters = [];
+  const segmentNames = Array.from({ length: 9 }, (_, index) => `${index + 1}.ts`);
+  const operation = assembleHls('https://cdn.test/media.m3u8', {
+    allowedOrigins: ['https://cdn.test'],
+    fetchImpl: async (url) => {
+      if (url.endsWith('.m3u8')) return response(mediaPlaylist(...segmentNames));
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => waiters.push(resolve));
+      active -= 1;
+      return response('X');
+    },
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  const activeAfterStart = active;
+  while (waiters.length > 0 || active > 0) {
+    waiters.splice(0).forEach((resolve) => resolve());
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await operation;
+  assert.equal(activeAfterStart, 8);
+  assert.equal(peak, 8);
+});
+
 test('assembleHls rejects invalid concurrency and maxBytes values', async () => {
   const neverFetch = async () => { throw new Error('fetch should not run'); };
-  for (const concurrency of [0, -1, 1.5, 5, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const concurrency of [0, -1, 1.5, 9, Number.MAX_SAFE_INTEGER + 1]) {
     await assert.rejects(
       assembleHls('https://cdn.test/media.m3u8', { concurrency, fetchImpl: neverFetch }),
       assertHlsError('HLS_INVALID'),

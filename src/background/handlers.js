@@ -370,6 +370,7 @@ export function createBackgroundHandlers({
           completedSegments: 0,
           totalSegments: 0,
           bytesReceived: 0,
+          estimatedTotalBytes: null,
           percent: 0,
         },
       };
@@ -539,6 +540,7 @@ export function createBackgroundHandlers({
             completedSegments: record.progress?.totalSegments ?? 0,
             totalSegments: record.progress?.totalSegments ?? 0,
             bytesReceived: size,
+            estimatedTotalBytes: size,
             percent: 100,
           },
         };
@@ -552,7 +554,13 @@ export function createBackgroundHandlers({
 
   async function progressHls(message) {
     return serialized(async () => {
-      const { operationId, completedSegments, totalSegments, bytesReceived } = message.payload;
+      const {
+        operationId,
+        completedSegments,
+        totalSegments,
+        bytesReceived,
+        estimatedTotalBytes,
+      } = message.payload;
       const record = await getRecord(operationId);
       if (!isObject(record) || !ASSEMBLY_STATES.has(record.state)) {
         return { acknowledged: true };
@@ -570,7 +578,13 @@ export function createBackgroundHandlers({
         [operationKey(operationId)]: {
           ...record,
           state: 'assembling',
-          progress: { completedSegments, totalSegments, bytesReceived, percent },
+          progress: {
+            completedSegments,
+            totalSegments,
+            bytesReceived,
+            estimatedTotalBytes,
+            percent,
+          },
         },
       });
       return { acknowledged: true };

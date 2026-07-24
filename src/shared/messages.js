@@ -48,11 +48,19 @@ function assertHlsProgress(payload) {
     || payload.completedSegments > payload.totalSegments
     || !Number.isSafeInteger(payload.bytesReceived)
     || payload.bytesReceived < 0
+    || !(
+      payload.estimatedTotalBytes === null
+      || (
+        Number.isSafeInteger(payload.estimatedTotalBytes)
+        && payload.estimatedTotalBytes >= payload.bytesReceived
+      )
+    )
     || !hasOnlyKeys(payload, [
       'operationId',
       'completedSegments',
       'totalSegments',
       'bytesReceived',
+      'estimatedTotalBytes',
     ])
   ) throw new Error('Mensagem inválida');
 }

@@ -102,9 +102,15 @@ test('offscreen forwards throttled integer HLS progress to the background', asyn
   const completed = deferred();
   const bridge = createOffscreenBridge({
     assemble: async (_url, { onProgress }) => {
-      onProgress({ completedSegments: 0, totalSegments: 200, bytesReceived: 0 });
-      onProgress({ completedSegments: 1, totalSegments: 200, bytesReceived: 10 });
-      onProgress({ completedSegments: 2, totalSegments: 200, bytesReceived: 20 });
+      onProgress({
+        completedSegments: 0, totalSegments: 200, bytesReceived: 0, estimatedTotalBytes: null,
+      });
+      onProgress({
+        completedSegments: 1, totalSegments: 200, bytesReceived: 10, estimatedTotalBytes: 2_000,
+      });
+      onProgress({
+        completedSegments: 2, totalSegments: 200, bytesReceived: 20, estimatedTotalBytes: 2_000,
+      });
       return { blob: new Blob(['X']), size: 1 };
     },
     createObjectURL: () => 'blob:extension.test/progress',
@@ -119,8 +125,14 @@ test('offscreen forwards throttled integer HLS progress to the background', asyn
   await completed.promise;
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(progressMessages.map(({ payload }) => payload), [
-    { operationId: 'operation-1', completedSegments: 0, totalSegments: 200, bytesReceived: 0 },
-    { operationId: 'operation-1', completedSegments: 2, totalSegments: 200, bytesReceived: 20 },
+    {
+      operationId: 'operation-1', completedSegments: 0, totalSegments: 200,
+      bytesReceived: 0, estimatedTotalBytes: null,
+    },
+    {
+      operationId: 'operation-1', completedSegments: 2, totalSegments: 200,
+      bytesReceived: 20, estimatedTotalBytes: 2_000,
+    },
   ]);
 });
 

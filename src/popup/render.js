@@ -157,7 +157,9 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     const stageLabel = item.statusLabel || 'Em andamento…';
     progress.setAttribute(
       'aria-valuetext',
-      activeYoutube && Number.isFinite(item.progress) ? `${stageLabel} ${item.progress}%` : activeYoutube ? stageLabel : `${progress.value}%`,
+      activeYoutube && Number.isFinite(item.progress)
+        ? `${stageLabel} ${item.progress}%`
+        : stageLabel,
     );
     row.append(progress);
   }

@@ -118,14 +118,22 @@ test('moves an asynchronous HLS operation from queued to downloading and complet
     operationId: 'op-42',
     record: {
       state: 'assembling',
-      progress: { completedSegments: 12, totalSegments: 30, bytesReceived: 4096, percent: 40 },
+      progress: {
+        completedSegments: 12,
+        totalSegments: 30,
+        bytesReceived: 4096,
+        estimatedTotalBytes: 10_240,
+        percent: 40,
+      },
     },
   });
   assert.equal(progressing.items[0].progress, 40);
   assert.equal(progressing.items[0].completedSegments, 12);
   assert.equal(progressing.items[0].totalSegments, 30);
-  assert.match(progressing.items[0].statusLabel, /40%/);
-  assert.match(progressing.items[0].statusLabel, /12\/30/);
+  assert.equal(
+    progressing.items[0].statusLabel,
+    'Baixando segmentos… 40% · 12/30 · 4 KB de ~10 KB',
+  );
 
   const downloading = reduceState(progressing, {
     type: 'HLS_OPERATION_UPDATED',
