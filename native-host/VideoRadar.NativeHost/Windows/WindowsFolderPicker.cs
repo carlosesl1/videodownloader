@@ -13,6 +13,12 @@ public sealed class WindowsFolderPicker : IFolderPicker
     private const uint FosDontAddToRecent = 0x02000000;
     private const uint SigdnFileSystemPath = 0x80058000;
     private const int ErrorCancelled = unchecked((int)0x800704C7);
+    private readonly IntPtr parentWindow;
+
+    public WindowsFolderPicker(IntPtr parentWindow)
+    {
+        this.parentWindow = parentWindow;
+    }
 
     public Task<string?> PickAsync(CancellationToken cancellationToken)
     {
@@ -36,6 +42,7 @@ public sealed class WindowsFolderPicker : IFolderPicker
                 try
                 {
                     completion.TrySetResult(ShowDialog(
+                        parentWindow,
                         cancellationToken,
                         cancellationState,
                         cancellationRegistration));
@@ -69,6 +76,7 @@ public sealed class WindowsFolderPicker : IFolderPicker
     }
 
     private static string? ShowDialog(
+        IntPtr parentWindow,
         CancellationToken cancellationToken,
         DialogCancellationState cancellationState,
         CancellationTokenRegistration cancellationRegistration)
@@ -99,7 +107,7 @@ public sealed class WindowsFolderPicker : IFolderPicker
             int showResult;
             try
             {
-                showResult = dialog.Show(IntPtr.Zero);
+                showResult = dialog.Show(parentWindow);
             }
             finally
             {

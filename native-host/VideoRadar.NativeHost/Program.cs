@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using VideoRadar.NativeHost.Files;
 using VideoRadar.NativeHost.Host;
@@ -27,9 +28,10 @@ public static class Program
             return diagnostic.Ok ? 0 : 1;
         }
 
-        if (args.Length != 0)
+        if (!TryParseNativeInvocation(args, out var parentWindow))
         {
-            Console.Error.WriteLine("Uso: video-radar-host.exe [--ping]");
+            Console.Error.WriteLine(
+                "Uso: video-radar-host.exe --ping | <origem autorizada> [--parent-window=<decimal>]");
             return 2;
         }
 
@@ -42,7 +44,7 @@ public static class Program
             var updatePolicy = new UpdatePolicy(toolsDirectory, processRunner);
             if (!OperatingSystem.IsWindows())
                 throw new PlatformNotSupportedException("The folder picker requires Windows.");
-            var folderPicker = new WindowsFolderPicker();
+            var folderPicker = new WindowsFolderPicker(parentWindow);
             INativeHostServer server = new NativeHostServer(
                 channel,
                 youtubeService,
@@ -56,6 +58,46 @@ public static class Program
         {
             Console.Error.WriteLine($"Falha fatal do host nativo ({exception.GetType().Name}).");
             return 1;
+        }
+    }
+
+    public static bool TryParseNativeInvocation(
+        IReadOnlyList<string> args,
+        out IntPtr parentWindow)
+    {
+        parentWindow = IntPtr.Zero;
+        if (args is null || args.Count is < 1 or > 2) return false;
+        if (!string.Equals(args[0], HostInfo.AllowedOrigin, StringComparison.Ordinal)) return false;
+        if (args.Count == 1) return true;
+
+        const string parentWindowPrefix = "--parent-window=";
+        var parentWindowArgument = args[1];
+        if (parentWindowArgument is null
+            || !parentWindowArgument.StartsWith(parentWindowPrefix, StringComparison.Ordinal))
+            return false;
+
+        var parentWindowText = parentWindowArgument.AsSpan(parentWindowPrefix.Length);
+        if (parentWindowText.IsEmpty) return false;
+        foreach (var character in parentWindowText)
+        {
+            if (character is < '0' or > '9') return false;
+        }
+
+        if (!long.TryParse(
+                parentWindowText,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var parentWindowValue))
+            return false;
+
+        try
+        {
+            parentWindow = new IntPtr(parentWindowValue);
+            return true;
+        }
+        catch (OverflowException)
+        {
+            return false;
         }
     }
 

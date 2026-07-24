@@ -6,7 +6,9 @@ internal static partial class TestSuite
     {
         HostInfoTest();
         ProtocolVersionTest();
+        NativeInvocationParserTest();
         HostExecutableTest();
+        HostExecutableRejectsInvalidNativeInvocationTest();
         DotnetWrapperForwardsInfoArgumentsTest();
         DotnetWrapperForwardsPublishOutputArgumentsTest();
         ProtocolTests();
@@ -19,6 +21,9 @@ internal static partial class TestSuite
     private static void HostInfoTest()
     {
         Equal("com.videoradar.helper", global::VideoRadar.NativeHost.HostInfo.NativeName);
+        Equal(
+            "chrome-extension://cakpfifpfmbdcilimpedanglnopnmckg/",
+            global::VideoRadar.NativeHost.HostInfo.AllowedOrigin);
     }
 
     private static void ProtocolVersionTest()
@@ -26,16 +31,105 @@ internal static partial class TestSuite
         Equal(2, global::VideoRadar.NativeHost.HostInfo.ProtocolVersion);
     }
 
+    private static void NativeInvocationParserTest()
+    {
+        var allowedOrigin = global::VideoRadar.NativeHost.HostInfo.AllowedOrigin;
+
+        True(
+            global::VideoRadar.NativeHost.Program.TryParseNativeInvocation(
+                [allowedOrigin],
+                out var originOnlyParent),
+            "The allowed origin-only invocation was rejected.");
+        Equal(IntPtr.Zero, originOnlyParent);
+
+        True(
+            global::VideoRadar.NativeHost.Program.TryParseNativeInvocation(
+                [allowedOrigin, "--parent-window=123"],
+                out var explicitParent),
+            "A valid decimal parent window was rejected.");
+        Equal(new IntPtr(123), explicitParent);
+
+        True(
+            global::VideoRadar.NativeHost.Program.TryParseNativeInvocation(
+                [allowedOrigin, $"--parent-window={long.MaxValue}"],
+                out var maximumParent),
+            "The maximum signed 64-bit parent window was rejected.");
+        Equal(new IntPtr(long.MaxValue), maximumParent);
+
+        string[][] rejectedInvocations =
+        [
+            [],
+            ["--ping"],
+            ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"],
+            [allowedOrigin, ""],
+            [allowedOrigin, "--parent-window="],
+            [allowedOrigin, "--parent-window=-1"],
+            [allowedOrigin, "--parent-window=+1"],
+            [allowedOrigin, "--parent-window= 1"],
+            [allowedOrigin, "--parent-window=1.0"],
+            [allowedOrigin, "--parent=1"],
+            [allowedOrigin, "--parent-window=9223372036854775808"],
+            [allowedOrigin, "--parent-window=0", "extra"]
+        ];
+
+        foreach (var invocation in rejectedInvocations)
+        {
+            True(
+                !global::VideoRadar.NativeHost.Program.TryParseNativeInvocation(
+                    invocation,
+                    out _),
+                $"Invalid native invocation was accepted: {string.Join(" ", invocation)}");
+        }
+    }
+
     private static void HostExecutableTest()
     {
         var executable = Path.Combine(AppContext.BaseDirectory, "video-radar-host.exe");
         True(File.Exists(executable), $"Host executable not found: {executable}");
 
-        var result = RunProcess(executable, []);
+        var result = RunProcess(
+            executable,
+            [global::VideoRadar.NativeHost.HostInfo.AllowedOrigin, "--parent-window=0"]);
 
-        True(result.ExitCode == 0, $"Host browser mode failed.{Environment.NewLine}{result.StandardError}");
+        True(result.ExitCode == 0, $"Chrome native mode failed.{Environment.NewLine}{result.StandardError}");
         Equal(string.Empty, result.StandardOutput);
         Equal(string.Empty, result.StandardError);
+
+        result = RunProcess(
+            executable,
+            [global::VideoRadar.NativeHost.HostInfo.AllowedOrigin]);
+
+        True(result.ExitCode == 0, $"Origin-only native mode failed.{Environment.NewLine}{result.StandardError}");
+        Equal(string.Empty, result.StandardOutput);
+        Equal(string.Empty, result.StandardError);
+    }
+
+    private static void HostExecutableRejectsInvalidNativeInvocationTest()
+    {
+        var executable = Path.Combine(AppContext.BaseDirectory, "video-radar-host.exe");
+        const string wrongOrigin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/";
+
+        string[][] rejectedInvocations =
+        [
+            [],
+            [wrongOrigin],
+            [global::VideoRadar.NativeHost.HostInfo.AllowedOrigin, "--parent-window=-1"],
+            ["--ping", "extra"]
+        ];
+
+        foreach (var invocation in rejectedInvocations)
+        {
+            var result = RunProcess(executable, invocation);
+
+            Equal(2, result.ExitCode);
+            Equal(string.Empty, result.StandardOutput);
+            True(
+                result.StandardError.Contains("Uso:", StringComparison.Ordinal),
+                "Rejected native invocation did not print a safe usage message.");
+            True(
+                !result.StandardError.Contains(wrongOrigin, StringComparison.Ordinal),
+                "Rejected native invocation leaked the supplied origin.");
+        }
     }
 
     private static void DotnetWrapperForwardsInfoArgumentsTest()
