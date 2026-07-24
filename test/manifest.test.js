@@ -11,6 +11,7 @@ test('manifest declares the Video Radar MV3 extension contract', async () => {
   assert.equal(manifest.action.default_popup, 'popup.html');
   assert.equal(manifest.background.service_worker, 'src/background/main.js');
   assert.equal(manifest.background.type, 'module');
+  assert.deepEqual(manifest.options_ui, { page: 'options.html', open_in_tab: true });
   assert.ok(!('host_permissions' in manifest) || manifest.host_permissions.length === 0);
   assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(

@@ -140,6 +140,7 @@ test.afterEach(() => { globalThis.document = originalDocument; });
 test('renders ready YouTube variants with selected output format and download action', () => {
   const root = renderItem(youtubeItem());
 
+  assert.equal(one(root, '[data-settings]').textContent, 'Configurar downloads');
   assert.equal(one(root, '.media-row__metadata').textContent, 'YOUTUBE  /  SAÍDA .MP4');
   const select = one(root, 'select');
   assert.equal(select.children.length, 2);

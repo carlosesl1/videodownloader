@@ -1,4 +1,5 @@
 import { ACTIONS, assertBackgroundMessage } from '../shared/messages.js';
+import { downloadTarget, readDownloadPreferences } from '../shared/download-preferences.js';
 
 const OPERATION_PREFIX = 'hlsOperation:';
 const DEDUPE_PREFIX = 'hlsDedupe:';
@@ -174,6 +175,7 @@ function validateInspection(value) {
 export function createBackgroundHandlers({
   downloads = globalThis.chrome?.downloads,
   storageSession = globalThis.chrome?.storage?.session,
+  storageLocal = globalThis.chrome?.storage?.local,
   permissions = globalThis.chrome?.permissions,
   sendOffscreen = (message) => globalThis.chrome.runtime.sendMessage(message),
   createOperationId = defaultOperationId,
@@ -491,10 +493,10 @@ export function createBackgroundHandlers({
     }
     if (Number.isInteger(record.downloadId)) return;
 
+    const preferences = await readDownloadPreferences(storageLocal);
     const downloadId = await downloads.download({
       url: record.blobUrl,
-      filename: record.filename,
-      saveAs: true,
+      ...downloadTarget(record.filename, preferences),
     });
     if (!Number.isInteger(downloadId)) throw new BackgroundError(
       'BACKGROUND_DOWNLOAD',
@@ -683,10 +685,10 @@ export function createBackgroundHandlers({
     async handle(raw) {
       const message = assertBackgroundMessage(raw);
       if (message.action === ACTIONS.DOWNLOAD_DIRECT) {
+        const preferences = await readDownloadPreferences(storageLocal);
         const downloadId = await downloads.download({
           url: message.payload.url,
-          filename: message.payload.filename,
-          saveAs: true,
+          ...downloadTarget(message.payload.filename, preferences),
         });
         return { downloadId };
       }

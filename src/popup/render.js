@@ -221,7 +221,11 @@ export function renderPopup(root, state) {
   else if (state.status === 'results') appendResults(surface, state);
   else appendNoResults(surface, state);
 
-  const privacy = node('p', 'privacy-note', 'Sem monitoramento contínuo · acesso somente quando necessário');
-  surface.append(privacy);
+  const footer = node('footer', 'popup-footer');
+  footer.append(
+    button('Configurar downloads', 'button button--settings', 'settings'),
+    node('p', 'privacy-note', 'Sem monitoramento contínuo · acesso somente quando necessário'),
+  );
+  surface.append(footer);
   root.append(surface);
 }

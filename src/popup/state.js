@@ -271,7 +271,10 @@ export function reduceState(state, event) {
   }
 
   if (event.type === 'HLS_OPERATION_RECONCILED') {
-    const items = updateItem(state.items, event.id, () => ({
+    const deduplicated = state.items.filter((item) => (
+      item.id === event.id || item.operationId !== event.record.operationId
+    ));
+    const items = updateItem(deduplicated, event.id, () => ({
       operationId: event.record.operationId,
       selectedIndex: event.selectedIndex,
       ...operationView(event.record),

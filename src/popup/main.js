@@ -601,6 +601,10 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
 
   root.addEventListener('click', (event) => {
     const target = event.target;
+    if (target?.closest?.('[data-settings]')) {
+      void chromeApi.runtime.openOptionsPage();
+      return;
+    }
     if (target?.closest?.('[data-scan]')) {
       scan();
       return;

@@ -217,6 +217,45 @@ test('restores a persisted HLS operation without requiring a new page scan', () 
   );
 });
 
+test('reconciliation replaces the temporary restored HLS card instead of duplicating it', () => {
+  const scanned = reduceState(initialState, {
+    type: 'SCAN_SUCCEEDED',
+    target: 'escola.test',
+    items: [
+      { ...hlsItem, id: 'hls-scanned', inspected: true },
+      { ...hlsItem, id: 'hls-other', filename: 'master_1.ts' },
+    ],
+  });
+  const raced = reduceState(scanned, {
+    type: 'HLS_OPERATION_RESTORED',
+    record: {
+      operationId: 'op-race',
+      url: 'https://cdn.test/master.m3u8',
+      filename: 'master.ts',
+      state: 'assembling',
+      progress: { percent: 5, completedSegments: 5, totalSegments: 100 },
+    },
+  });
+  assert.equal(raced.items.length, 3);
+
+  const reconciled = reduceState(raced, {
+    type: 'HLS_OPERATION_RECONCILED',
+    id: 'hls-scanned',
+    selectedIndex: 0,
+    record: {
+      operationId: 'op-race',
+      url: 'https://cdn.test/master.m3u8',
+      filename: 'master.ts',
+      state: 'assembling',
+      progress: { percent: 5, completedSegments: 5, totalSegments: 100 },
+    },
+  });
+
+  assert.equal(reconciled.items.length, 2);
+  assert.equal(reconciled.items.filter((item) => item.operationId === 'op-race').length, 1);
+  assert.equal(reconciled.items.find((item) => item.operationId === 'op-race').id, 'hls-scanned');
+});
+
 test('direct download confirmation is stored on only the selected item', () => {
   const base = { ...initialState, status: 'results', items: [directItem, hlsItem] };
   const sent = reduceState(base, { type: 'DIRECT_SENT', id: directItem.id, selectedIndex: 0 });

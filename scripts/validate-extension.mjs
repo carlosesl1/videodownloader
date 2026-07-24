@@ -28,8 +28,9 @@ function assert(condition, message) {
 }
 
 const required = [
-  'manifest.json', 'popup.html', 'offscreen.html', 'styles/popup.css', 'assets/icon-128.png',
-  'src/popup/main.js', 'src/offscreen/main.js', 'src/background/main.js',
+  'manifest.json', 'popup.html', 'options.html', 'offscreen.html',
+  'styles/popup.css', 'styles/options.css', 'assets/icon-128.png',
+  'src/popup/main.js', 'src/options/main.js', 'src/offscreen/main.js', 'src/background/main.js',
   'README.md', 'Instalar-Video-Radar.cmd',
   'scripts/dotnet.ps1', 'scripts/fetch-native-tools.ps1', 'scripts/install-native-host.ps1',
   'scripts/package-native-helper.ps1', 'scripts/generate-extension-key.mjs',
@@ -68,7 +69,7 @@ try {
   if (error?.code !== 'ENOENT') throw error;
 }
 
-const htmlFiles = ['popup.html', 'offscreen.html'];
+const htmlFiles = ['popup.html', 'options.html', 'offscreen.html'];
 const remoteScript = /<script\b[^>]*\bsrc\s*=\s*["']https?:\/\//i;
 for (const html of htmlFiles) {
   const source = await readFile(fromRoot(html), 'utf8');

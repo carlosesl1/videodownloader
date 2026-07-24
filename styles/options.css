@@ -1,0 +1,251 @@
+:root {
+  color-scheme: light;
+  --navy: #101d30;
+  --blue: #2f67e8;
+  --blue-dark: #2453bd;
+  --green: #6fe2ae;
+  --surface: #f4f7fb;
+  --paper: #ffffff;
+  --text: #17253a;
+  --muted: #637289;
+  --line: #d9e1ec;
+  --danger: #a63d45;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 280px;
+  min-height: 100vh;
+  margin: 0;
+  color: var(--text);
+  background:
+    linear-gradient(90deg, rgba(47, 103, 232, 0.05) 1px, transparent 1px) 0 0 / 48px 48px,
+    var(--surface);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid rgba(47, 103, 232, 0.3);
+  outline-offset: 3px;
+}
+
+.settings-shell {
+  width: min(720px, calc(100% - 32px));
+  margin: 48px auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  box-shadow: 0 22px 60px rgba(16, 29, 48, 0.12);
+}
+
+.settings-header {
+  padding: 34px 38px 30px;
+  color: #fff;
+  background: var(--navy);
+  border-bottom: 3px solid var(--green);
+}
+
+.eyebrow,
+.section-index {
+  color: #92a7c3;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  margin-top: 7px;
+  font-size: clamp(26px, 5vw, 38px);
+  letter-spacing: -0.035em;
+}
+
+.settings-header p {
+  margin-top: 8px;
+  color: #b8c6d8;
+  line-height: 1.5;
+}
+
+.settings-form {
+  padding: 8px 38px 34px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 14px;
+  padding: 28px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-section > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.section-index {
+  color: var(--blue);
+}
+
+h2 {
+  font-size: 18px;
+  letter-spacing: -0.015em;
+}
+
+.section-copy,
+.path-preview,
+.automatic-choice small,
+.save-status {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.folder-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #bdcadb;
+  border-radius: 10px;
+}
+
+.folder-field:focus-within {
+  border-color: var(--blue);
+}
+
+.folder-field__prefix {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  padding: 0 12px;
+  color: var(--muted);
+  background: #edf2f8;
+  border-right: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.folder-field input {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 13px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+.path-preview {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.automatic-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 16px;
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.automatic-choice input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--blue);
+}
+
+.automatic-choice span {
+  display: grid;
+  gap: 4px;
+}
+
+.automatic-choice strong {
+  font-size: 14px;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-top: 26px;
+}
+
+.form-actions button {
+  min-height: 44px;
+  padding: 0 18px;
+  color: #fff;
+  background: var(--blue);
+  border: 0;
+  border-radius: 10px;
+  font-weight: 740;
+  cursor: pointer;
+}
+
+.form-actions button:hover {
+  background: var(--blue-dark);
+}
+
+.save-status[data-error="true"] {
+  color: var(--danger);
+}
+
+@media (max-width: 520px) {
+  .settings-shell {
+    width: 100%;
+    min-height: 100vh;
+    margin: 0;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .settings-header,
+  .settings-form {
+    padding-inline: 22px;
+  }
+
+  .folder-field {
+    grid-template-columns: 1fr;
+  }
+
+  .folder-field__prefix {
+    min-height: 34px;
+    justify-content: start;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}

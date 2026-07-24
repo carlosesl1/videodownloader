@@ -124,6 +124,7 @@ function memorySession(initial = {}) {
 
 function defaultDependencies(overrides = {}) {
   const session = overrides.storageSession ?? memorySession();
+  const local = overrides.storageLocal ?? memorySession();
   const sent = [];
   const removed = [];
   const downloadsStarted = [];
@@ -131,6 +132,7 @@ function defaultDependencies(overrides = {}) {
   const downloadSearches = [];
   return {
     session,
+    local,
     sent,
     removed,
     downloadsStarted,
@@ -138,6 +140,7 @@ function defaultDependencies(overrides = {}) {
     downloadSearches,
     dependencies: {
       storageSession: session,
+      storageLocal: local,
       createOperationId: () => 'operation-1',
       permissions: {
         contains: async () => true,
@@ -179,8 +182,34 @@ test('direct downloads keep the exact Chrome call contract', async () => {
 
   assert.deepEqual(await handlers.handle(directMessage()), { downloadId: 41 });
   assert.deepEqual(env.downloadsStarted, [{
-    url: 'https://cdn.test/aula.mp4', filename: 'aula.mp4', saveAs: true,
+    url: 'https://cdn.test/aula.mp4', filename: 'Video Radar/aula.mp4', saveAs: false,
   }]);
+});
+
+test('download preferences persist a relative subfolder and can restore Save As prompts', async () => {
+  const automatic = defaultDependencies({
+    storageLocal: memorySession({
+      downloadPreferences: { subfolder: 'Cursos/IA', automatic: true },
+    }),
+  });
+  await createBackgroundHandlers(automatic.dependencies).handle(directMessage());
+  assert.deepEqual(automatic.downloadsStarted[0], {
+    url: 'https://cdn.test/aula.mp4',
+    filename: 'Cursos/IA/aula.mp4',
+    saveAs: false,
+  });
+
+  const prompted = defaultDependencies({
+    storageLocal: memorySession({
+      downloadPreferences: { subfolder: '', automatic: false },
+    }),
+  });
+  await createBackgroundHandlers(prompted.dependencies).handle(directMessage());
+  assert.deepEqual(prompted.downloadsStarted[0], {
+    url: 'https://cdn.test/aula.mp4',
+    filename: 'aula.mp4',
+    saveAs: true,
+  });
 });
 
 test('DOWNLOAD_HLS persists then returns an acknowledged operation without waiting for assembly', async () => {
@@ -238,7 +267,8 @@ test('a recreated coordinator reuses an assembling operation and handles complet
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.equal(env.downloadsStarted.length, 1);
-  assert.equal(env.downloadsStarted[0].saveAs, true);
+  assert.equal(env.downloadsStarted[0].filename, 'Video Radar/aula.ts');
+  assert.equal(env.downloadsStarted[0].saveAs, false);
 });
 
 test('progress updates persist monotonically and a different HLS start waits', async () => {
