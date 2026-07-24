@@ -1,7 +1,7 @@
 # Destino unificado de downloads
 
 Data: 2026-07-24  
-Status: aguardando revisão escrita
+Status: aprovado
 
 ## Objetivo
 
