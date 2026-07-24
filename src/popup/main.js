@@ -358,7 +358,12 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
 
   function handleOperationRecord(operationId, rawRecord) {
     if (!validOperationRecord(rawRecord) || rawRecord.operationId !== operationId) return;
-    dispatch({ type: 'HLS_OPERATION_UPDATED', operationId, record: rawRecord });
+    const existing = state.items.some((entry) => entry.operationId === operationId);
+    if (existing) {
+      dispatch({ type: 'HLS_OPERATION_UPDATED', operationId, record: rawRecord });
+    } else if (ACTIVE_OPERATION_STATES.has(rawRecord.state)) {
+      dispatch({ type: 'HLS_OPERATION_RESTORED', record: rawRecord });
+    }
     if (rawRecord.state !== 'failed' || rawRecord.error?.code !== 'HLS_PERMISSION') return;
     const origins = permissionOriginsFromError(rawRecord.error);
     const item = state.items.find((entry) => entry.operationId === operationId);
@@ -369,6 +374,22 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       selectedIndex: item.selectedIndex ?? 0,
       origins,
     });
+  }
+
+  async function restoreHlsOperations() {
+    let stored;
+    try {
+      stored = await chromeApi.storage.session.get(null);
+    } catch {
+      return;
+    }
+    const records = Object.entries(stored ?? {})
+      .filter(([key]) => key.startsWith(OPERATION_PREFIX))
+      .map(([, value]) => value)
+      .filter((record) => validOperationRecord(record) && ACTIVE_OPERATION_STATES.has(record.state));
+    for (const record of records) {
+      handleOperationRecord(record.operationId, record);
+    }
   }
 
   async function reconcileOperations(items) {
@@ -623,6 +644,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   });
 
   draw();
+  void restoreHlsOperations();
   void restoreYouTubeJob();
 }
 

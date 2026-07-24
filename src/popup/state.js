@@ -119,6 +119,29 @@ function operationView(record) {
   return {};
 }
 
+function restoredHlsItem(record) {
+  const filename = typeof record.filename === 'string' && record.filename.trim()
+    ? record.filename
+    : 'video.ts';
+  return {
+    id: `hls-operation:${record.operationId}`,
+    kind: 'hls',
+    url: record.url,
+    filename,
+    variants: [{
+      url: record.url,
+      label: 'Qualidade escolhida',
+      filename,
+    }],
+    inspected: true,
+    selectedIndex: 0,
+    allowedOrigins: [],
+    format: 'ts',
+    operationId: record.operationId,
+    ...operationView(record),
+  };
+}
+
 function currentBusyId(items) {
   return items.find((item) => item.phase === 'preparing')?.id ?? null;
 }
@@ -259,6 +282,22 @@ export function reduceState(state, event) {
   if (event.type === 'HLS_OPERATION_UPDATED') {
     const items = updateOperation(state.items, event.operationId, event.record);
     return { ...state, items, busyId: currentBusyId(items) };
+  }
+
+  if (event.type === 'HLS_OPERATION_RESTORED') {
+    const restored = restoredHlsItem(event.record);
+    const existing = state.items.find((item) => item.operationId === event.record.operationId);
+    const items = existing
+      ? state.items.map((item) => item === existing ? { ...item, ...operationView(event.record) } : item)
+      : [...state.items, restored];
+    return {
+      ...state,
+      status: 'results',
+      target: state.target || 'download em andamento',
+      items,
+      busyId: currentBusyId(items),
+      message: `${items.length} ${items.length === 1 ? 'vÃ­deo encontrado' : 'vÃ­deos encontrados'}`,
+    };
   }
 
   if (event.type === 'PERMISSION_REQUIRED') {

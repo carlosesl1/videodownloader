@@ -494,7 +494,7 @@ export function createBackgroundHandlers({
     const downloadId = await downloads.download({
       url: record.blobUrl,
       filename: record.filename,
-      saveAs: false,
+      saveAs: true,
     });
     if (!Number.isInteger(downloadId)) throw new BackgroundError(
       'BACKGROUND_DOWNLOAD',
@@ -686,7 +686,7 @@ export function createBackgroundHandlers({
         const downloadId = await downloads.download({
           url: message.payload.url,
           filename: message.payload.filename,
-          saveAs: false,
+          saveAs: true,
         });
         return { downloadId };
       }

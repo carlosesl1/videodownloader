@@ -187,6 +187,36 @@ test('reconciles a persisted HLS operation by canonical media URL', () => {
   assert.equal(state.busyId, hlsItem.id);
 });
 
+test('restores a persisted HLS operation without requiring a new page scan', () => {
+  const state = reduceState(initialState, {
+    type: 'HLS_OPERATION_RESTORED',
+    record: {
+      operationId: 'op-reopen',
+      url: 'https://cdn.test/720.m3u8',
+      filename: 'aula.ts',
+      state: 'assembling',
+      progress: {
+        completedSegments: 15,
+        totalSegments: 60,
+        bytesReceived: 5_242_880,
+        estimatedTotalBytes: 20_971_520,
+        percent: 25,
+      },
+    },
+  });
+
+  assert.equal(state.status, 'results');
+  assert.equal(state.target, 'download em andamento');
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].operationId, 'op-reopen');
+  assert.equal(state.items[0].phase, 'preparing');
+  assert.equal(state.items[0].progress, 25);
+  assert.equal(
+    state.items[0].statusLabel,
+    'Baixando segmentos… 25% · 15/60 · 5 MB de ~20 MB',
+  );
+});
+
 test('direct download confirmation is stored on only the selected item', () => {
   const base = { ...initialState, status: 'results', items: [directItem, hlsItem] };
   const sent = reduceState(base, { type: 'DIRECT_SENT', id: directItem.id, selectedIndex: 0 });

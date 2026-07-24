@@ -179,7 +179,7 @@ test('direct downloads keep the exact Chrome call contract', async () => {
 
   assert.deepEqual(await handlers.handle(directMessage()), { downloadId: 41 });
   assert.deepEqual(env.downloadsStarted, [{
-    url: 'https://cdn.test/aula.mp4', filename: 'aula.mp4', saveAs: false,
+    url: 'https://cdn.test/aula.mp4', filename: 'aula.mp4', saveAs: true,
   }]);
 });
 
@@ -238,6 +238,7 @@ test('a recreated coordinator reuses an assembling operation and handles complet
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.deepEqual(await recreated.handle(completion(started.operationId)), { acknowledged: true });
   assert.equal(env.downloadsStarted.length, 1);
+  assert.equal(env.downloadsStarted[0].saveAs, true);
 });
 
 test('progress updates persist monotonically and a different HLS start waits', async () => {

@@ -142,6 +142,67 @@ test('boots one YouTube recovery request and one shared storage listener', async
   }
 });
 
+test('reopening the popup restores an active HLS operation from session storage', async () => {
+  class Element {
+    constructor() {
+      this.dataset = {};
+      this.children = [];
+      this.textContent = '';
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute() {}
+    addEventListener() {}
+  }
+  const find = (element, predicate) => {
+    if (predicate(element)) return element;
+    for (const child of element.children) {
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+    return null;
+  };
+  const root = new Element();
+  const announcer = new Element();
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        runtime: { sendMessage: async () => ({ ok: true, value: null }) },
+        storage: {
+          session: {
+            get: async () => ({
+              'hlsOperation:op-reopen': {
+                operationId: 'op-reopen',
+                url: 'https://cdn.test/720.m3u8',
+                filename: 'aula.ts',
+                state: 'assembling',
+                progress: {
+                  completedSegments: 15,
+                  totalSegments: 60,
+                  bytesReceived: 5_242_880,
+                  estimatedTotalBytes: 20_971_520,
+                  percent: 25,
+                },
+              },
+            }),
+          },
+          onChanged: { addListener() {} },
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const restored = find(root, (element) => element.dataset.itemId === 'hls-operation:op-reopen');
+    assert.ok(restored, 'active HLS operation was not restored');
+    assert.ok(find(restored, (element) => element.textContent.includes('25%')));
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
 test('clicking the rendered cancel control sends the active YouTube job id', async () => {
   class InteractiveElement {
     constructor(tagName = 'div') {
