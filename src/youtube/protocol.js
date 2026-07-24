@@ -81,13 +81,19 @@ function exactEvent(event, keys) {
 }
 
 export function assertWindowsAbsolutePath(value) {
-  if (!text(value, 1024) || value.includes('/')) invalid();
+  if (!text(value, 1024) || value.includes('/') || /^\\\\[?.]\\/.test(value)) invalid();
   let segments;
   if (/^[A-Za-z]:\\/.test(value)) {
     segments = value.slice(3).split('\\');
   } else if (value.startsWith('\\\\')) {
     segments = value.slice(2).split('\\');
-    if (segments.length < 2 || segments[0].length === 0 || segments[1].length === 0) invalid();
+    if (
+      segments.length < 2
+      || segments[0].length === 0
+      || segments[1].length === 0
+      || segments[0] === '?'
+      || segments[1] === '?'
+    ) invalid();
   } else {
     invalid();
   }

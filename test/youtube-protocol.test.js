@@ -136,6 +136,24 @@ test('rejeita caminhos relativos, segmentos ambíguos e chaves extras nos novos 
   ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
 });
 
+test('rejeita prefixos de dispositivo Windows em todos os caminhos do protocolo', () => {
+  for (const path of [
+    '\\\\?\\C:\\temp',
+    '\\\\.\\C:\\temp',
+    '\\\\?\\UNC\\server\\share\\temp',
+    '\\\\.\\Volume{1234}\\temp',
+  ]) {
+    for (const event of [
+      { type: 'folderSelected', requestId: 'r1', path },
+      { type: 'fileMoved', requestId: 'r1', downloadId: 1, finalPath: path },
+      {
+        type: 'ready', requestId: 'r1', protocolVersion: 2,
+        nativeName: 'host', defaultFolder: path,
+      },
+    ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/, `${event.type}: ${path}`);
+  }
+});
+
 test('ready do ping exige protocolo compatível, caminho absoluto e formato exato', () => {
   const ready = {
     type: 'ready', requestId: 'r1', protocolVersion: 2, nativeName: 'host',
