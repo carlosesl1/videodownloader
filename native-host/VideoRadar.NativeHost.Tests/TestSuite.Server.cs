@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
+using VideoRadar.NativeHost.Files;
 using VideoRadar.NativeHost.Host;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.Protocol;
@@ -25,6 +26,7 @@ internal static partial class TestSuite
         NativeHostServerMapsFolderPickerFailuresWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidPickedFoldersWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidFallbackFolders();
+        NativeHostServerMovesDownloadedFilesAndMapsFailuresSafely().GetAwaiter().GetResult();
         UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts().GetAwaiter().GetResult();
         ProgramPingDiagnosticIsPureAndMachineReadable();
     }
@@ -54,7 +56,8 @@ internal static partial class TestSuite
             service,
             updater,
             new FakeFolderPicker(),
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
         await output.WaitForTypeAsync("jobCompleted").WaitAsync(TimeSpan.FromSeconds(5));
         input.Complete();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
@@ -125,7 +128,8 @@ internal static partial class TestSuite
             service,
             new FakeUpdatePolicy(),
             new FakeFolderPicker(),
-            DefaultDownloadFolder);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover());
         var run = server.RunAsync(CancellationToken.None);
         await dynamicOutput.WaitForTypeAsync("jobStarted").WaitAsync(TimeSpan.FromSeconds(5));
         var started = Message(ReadFrames(dynamicOutput), "jobStarted", "r-first");
@@ -155,7 +159,8 @@ internal static partial class TestSuite
             service,
             updater,
             new FakeFolderPicker(),
-            DefaultDownloadFolder);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover());
         var run = server.RunAsync(CancellationToken.None);
 
         input.Append(FrameCommands(
@@ -212,7 +217,8 @@ internal static partial class TestSuite
                 service,
                 new FakeUpdatePolicy(),
                 new FakeFolderPicker(),
-                DefaultDownloadFolder)
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover())
             .RunAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
 
         True(cancellationObserved.Task.IsCompleted, "EOF returned before the active job observed cancellation.");
@@ -247,7 +253,8 @@ internal static partial class TestSuite
             service,
             updater,
             picker,
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
 
         var messages = ReadFrames(output);
         Equal("INVALID_COMMAND", Message(messages, "jobFailed", "r-command").GetProperty("code").GetString());
@@ -279,7 +286,8 @@ internal static partial class TestSuite
             service,
             new FakeUpdatePolicy(),
             new FakeFolderPicker(),
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
         await output.WaitForMessageAsync("jobFailed", "r-download").WaitAsync(TimeSpan.FromSeconds(5));
         input.Complete();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
@@ -309,7 +317,8 @@ internal static partial class TestSuite
             new FakeYouTubeService(),
             new FakeUpdatePolicy(),
             picker,
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
 
         var messages = ReadFrames(output);
         var selected = Message(messages, "folderSelected", "r-folder-selected");
@@ -334,7 +343,8 @@ internal static partial class TestSuite
             new FakeYouTubeService(),
             new FakeUpdatePolicy(),
             picker,
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
 
         var raw = Encoding.UTF8.GetString(output.ToArray());
         True(!raw.Contains("secret", StringComparison.OrdinalIgnoreCase), "A folder picker diagnostic leaked to Native Messaging stdout.");
@@ -359,7 +369,8 @@ internal static partial class TestSuite
             new FakeYouTubeService(),
             new FakeUpdatePolicy(),
             picker,
-            DefaultDownloadFolder).RunAsync(cancellation.Token);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(cancellation.Token);
 
         await picker.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
         cancellation.Cancel();
@@ -393,7 +404,8 @@ internal static partial class TestSuite
             new FakeYouTubeService(),
             new FakeUpdatePolicy(),
             picker,
-            DefaultDownloadFolder).RunAsync(CancellationToken.None);
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
 
         var messages = ReadFrames(output);
         for (var index = 0; index < invalidFolders.Length; index++)
@@ -420,10 +432,94 @@ internal static partial class TestSuite
         var picker = new FakeFolderPicker();
 
         foreach (var invalidFolder in InvalidDownloadFolders())
-            Throws<ArgumentException>(() => new NativeHostServer(channel, service, updater, picker, invalidFolder));
+            Throws<ArgumentException>(() => new NativeHostServer(
+                channel, service, updater, picker, invalidFolder, new FakeDownloadFileMover()));
 
-        _ = new NativeHostServer(channel, service, updater, picker, @"C:\");
-        _ = new NativeHostServer(channel, service, updater, picker, @"\\server\share\Videos");
+        _ = new NativeHostServer(channel, service, updater, picker, @"C:\", new FakeDownloadFileMover());
+        _ = new NativeHostServer(channel, service, updater, picker, @"\\server\share\Videos", new FakeDownloadFileMover());
+    }
+
+    private static async Task NativeHostServerMovesDownloadedFilesAndMapsFailuresSafely()
+    {
+        const string source = @"C:\Browser Downloads\Video Radar\.staging\op_42\aula.ts";
+        const string destination = @"D:\Cursos";
+        const string finalPath = @"D:\Cursos\aula.ts";
+        using var input = new MemoryStream(FrameCommands(
+            Command("moveDownloadedFile", "r-move", JsonSerializer.Serialize(new
+            {
+                downloadId = 42,
+                sourcePath = source,
+                destinationFolder = destination
+            })),
+            Command("moveDownloadedFile", "r-extra", JsonSerializer.Serialize(new
+            {
+                downloadId = 43,
+                sourcePath = source,
+                destinationFolder = destination,
+                extra = true
+            })),
+            Command("moveDownloadedFile", "r-negative", JsonSerializer.Serialize(new
+            {
+                downloadId = -1,
+                sourcePath = source,
+                destinationFolder = destination
+            })),
+            Command("moveDownloadedFile", "r-empty", JsonSerializer.Serialize(new
+            {
+                downloadId = 44,
+                sourcePath = source,
+                destinationFolder = ""
+            })),
+            Command("moveDownloadedFile", "r-invalid-path", JsonSerializer.Serialize(new
+            {
+                downloadId = 45,
+                sourcePath = "relative.ts",
+                destinationFolder = destination
+            })),
+            Command("moveDownloadedFile", "r-io", JsonSerializer.Serialize(new
+            {
+                downloadId = 46,
+                sourcePath = @"C:\Sensitive\copy-error.ts",
+                destinationFolder = destination
+            })),
+            Command("ping", "r-after-move-errors", "{}")));
+        using var output = new MemoryStream();
+        var mover = new FakeDownloadFileMover((sourcePath, destinationFolder, downloadId) =>
+        {
+            if (sourcePath == "relative.ts")
+                throw new ArgumentException("secret invalid path C:\\Sensitive");
+            if (sourcePath.EndsWith("copy-error.ts", StringComparison.Ordinal))
+                throw new IOException("secret IO path C:\\Sensitive");
+            return new FileMoveResult(downloadId, finalPath);
+        });
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            mover).RunAsync(CancellationToken.None);
+
+        var raw = Encoding.UTF8.GetString(output.ToArray());
+        True(!raw.Contains("secret", StringComparison.OrdinalIgnoreCase), "A mover diagnostic leaked to Native Messaging stdout.");
+        True(!raw.Contains("Sensitive", StringComparison.OrdinalIgnoreCase), "A mover path leaked to Native Messaging stdout.");
+        var messages = ReadFrames(output);
+        var moved = Message(messages, "fileMoved", "r-move");
+        Equal(42L, moved.GetProperty("downloadId").GetInt64());
+        Equal(finalPath, moved.GetProperty("finalPath").GetString());
+        True(
+            moved.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal)
+                .SetEquals(["type", "requestId", "downloadId", "finalPath"]),
+            "fileMoved exposed an unexpected property.");
+
+        foreach (var requestId in new[] { "r-extra", "r-negative", "r-empty", "r-invalid-path" })
+            Equal("DESTINATION_INVALID", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
+        Equal("DESTINATION_MOVE_FAILED", Message(messages, "jobFailed", "r-io").GetProperty("code").GetString());
+        _ = Message(messages, "ready", "r-after-move-errors");
+
+        Equal(3, mover.Calls.Count);
+        Equal(new FileMoveCall(source, destination, 42), mover.Calls[0]);
     }
 
     private static string[] InvalidDownloadFolders() =>
@@ -534,7 +630,7 @@ internal static partial class TestSuite
     private const string SelectedDownloadFolder = @"C:\Media\Video Radar";
 
     private static readonly HashSet<string> AllowedServerTypes =
-        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled"];
+        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled", "fileMoved"];
 
     private static string Command(string type, string requestId, string payload) =>
         $"{{\"type\":{JsonSerializer.Serialize(type)},\"requestId\":{JsonSerializer.Serialize(requestId)},\"payload\":{payload}}}";
@@ -598,6 +694,21 @@ internal static partial class TestSuite
             if (Error is not null) throw Error;
             if (Results.Count == 0) throw new InvalidOperationException("No folder picker result was configured.");
             return Task.FromResult(Results.Dequeue());
+        }
+    }
+
+    private sealed record FileMoveCall(string SourcePath, string DestinationFolder, long DownloadId);
+
+    private sealed class FakeDownloadFileMover(
+        Func<string, string, long, FileMoveResult>? handler = null) : IDownloadFileMover
+    {
+        public List<FileMoveCall> Calls { get; } = [];
+
+        public FileMoveResult Move(string sourcePath, string destinationFolder, long downloadId)
+        {
+            Calls.Add(new FileMoveCall(sourcePath, destinationFolder, downloadId));
+            return handler?.Invoke(sourcePath, destinationFolder, downloadId)
+                ?? new FileMoveResult(downloadId, Path.Combine(destinationFolder, Path.GetFileName(sourcePath)));
         }
     }
 

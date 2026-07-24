@@ -1,4 +1,5 @@
 using System.Text.Json;
+using VideoRadar.NativeHost.Files;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
 using VideoRadar.NativeHost.Windows;
@@ -16,14 +17,14 @@ public sealed class NativeHostServer(
     IYouTubeService youtubeService,
     IUpdatePolicy updatePolicy,
     IFolderPicker folderPicker,
-    string fallbackDownloadFolder) : INativeHostServer
+    string fallbackDownloadFolder,
+    IDownloadFileMover fileMover) : INativeHostServer
 {
     private const string UnknownRequestId = "unknown";
-    private const string InvalidFolderCharacters = "<>:\"/\\|?*";
-    private static readonly HashSet<string> ReservedFolderSegments = CreateReservedFolderSegments();
     private readonly IFolderPicker folderPicker = folderPicker ?? throw new ArgumentNullException(nameof(folderPicker));
+    private readonly IDownloadFileMover fileMover = fileMover ?? throw new ArgumentNullException(nameof(fileMover));
     private readonly string fallbackDownloadFolder =
-        RequireCanonicalAbsolutePath(fallbackDownloadFolder, nameof(fallbackDownloadFolder));
+        DownloadPaths.NormalizeDestination(fallbackDownloadFolder, nameof(fallbackDownloadFolder));
     private readonly object stateLock = new();
     private ActiveDownload? activeDownload;
     private JobSnapshot? lastSnapshot;
@@ -99,6 +100,7 @@ public sealed class NativeHostServer(
         "getJob" => HandleGetJobAsync(command, cancellationToken),
         "cancelDownload" => HandleCancelDownloadAsync(command, cancellationToken),
         "chooseDownloadFolder" => HandleChooseDownloadFolderAsync(command, cancellationToken),
+        "moveDownloadedFile" => HandleMoveDownloadedFileAsync(command, cancellationToken),
         _ => throw new CommandFailureException("INVALID_COMMAND", "Comando inválido.")
     };
 
@@ -129,7 +131,7 @@ public sealed class NativeHostServer(
             return;
         }
 
-        var canonicalPath = RequireCanonicalAbsolutePath(path, nameof(path));
+        var canonicalPath = DownloadPaths.NormalizeDestination(path, nameof(path));
         await channel.WriteAsync(new
         {
             type = "folderSelected",
@@ -181,6 +183,49 @@ public sealed class NativeHostServer(
                 combined = quality.Combined
             }).ToArray()
         }, cancellationToken);
+    }
+
+    private async Task HandleMoveDownloadedFileAsync(HostCommand command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            RequireExactProperties(command.Payload, "downloadId", "sourcePath", "destinationFolder");
+            if (!command.Payload.TryGetProperty("downloadId", out var downloadIdValue)
+                || downloadIdValue.ValueKind != JsonValueKind.Number
+                || !downloadIdValue.TryGetInt64(out var downloadId)
+                || downloadId < 0)
+            {
+                throw new CommandFailureException("INVALID_PAYLOAD", "Payload inválido.");
+            }
+
+            var payload = new MoveDownloadedFilePayload(
+                downloadId,
+                RequiredString(command.Payload, "sourcePath"),
+                RequiredString(command.Payload, "destinationFolder"));
+            var delivered = fileMover.Move(
+                payload.SourcePath,
+                payload.DestinationFolder,
+                payload.DownloadId);
+            await channel.WriteAsync(new
+            {
+                type = "fileMoved",
+                requestId = command.RequestId,
+                downloadId = delivered.DownloadId,
+                finalPath = delivered.FinalPath
+            }, cancellationToken);
+        }
+        catch (CommandFailureException)
+        {
+            throw new CommandFailureException("DESTINATION_INVALID", "O destino do download é inválido.");
+        }
+        catch (ArgumentException)
+        {
+            throw new CommandFailureException("DESTINATION_INVALID", "O destino do download é inválido.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new CommandFailureException("DESTINATION_MOVE_FAILED", "Não foi possível mover o arquivo.");
+        }
     }
 
     private async Task HandleStartDownloadAsync(HostCommand command, CancellationToken cancellationToken)
@@ -540,82 +585,6 @@ public sealed class NativeHostServer(
         return value.GetString()!;
     }
 
-    private static string RequireCanonicalAbsolutePath(string path, string parameterName)
-    {
-        if (path is null
-            || path.Length is 0 or > 1024
-            || path.Contains('/')
-            || path.StartsWith(@"\\?\", StringComparison.Ordinal)
-            || path.StartsWith(@"\\.\", StringComparison.Ordinal)
-            || path.StartsWith(@"\\??\", StringComparison.Ordinal))
-        {
-            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
-        }
-
-        string[] segments;
-        if (path.Length >= 3
-            && char.IsAsciiLetter(path[0])
-            && path[1] == ':'
-            && path[2] == '\\')
-        {
-            segments = path.Length == 3 ? [] : path[3..].Split('\\', StringSplitOptions.None);
-        }
-        else if (path.StartsWith(@"\\", StringComparison.Ordinal))
-        {
-            segments = path[2..].Split('\\', StringSplitOptions.None);
-            if (segments.Length < 2)
-                throw new ArgumentException("Path must be absolute and canonical.", parameterName);
-        }
-        else
-        {
-            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
-        }
-
-        if (segments.Any(IsInvalidFolderSegment))
-            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
-
-        string canonicalPath;
-        try
-        {
-            canonicalPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            throw new ArgumentException("Path must be absolute and canonical.", parameterName, exception);
-        }
-
-        if (!string.Equals(path, canonicalPath, StringComparison.Ordinal))
-            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
-        return canonicalPath;
-    }
-
-    private static bool IsInvalidFolderSegment(string segment)
-    {
-        if (segment.Length == 0
-            || segment is "." or ".."
-            || segment.EndsWith(' ')
-            || segment.EndsWith('.')
-            || segment.Any(character => char.IsControl(character) || InvalidFolderCharacters.Contains(character)))
-        {
-            return true;
-        }
-
-        var extension = segment.IndexOf('.');
-        var name = extension < 0 ? segment : segment[..extension];
-        return ReservedFolderSegments.Contains(name);
-    }
-
-    private static HashSet<string> CreateReservedFolderSegments()
-    {
-        var names = new HashSet<string>(["CON", "PRN", "AUX", "NUL"], StringComparer.OrdinalIgnoreCase);
-        for (var index = 1; index <= 9; index++)
-        {
-            names.Add($"COM{index}");
-            names.Add($"LPT{index}");
-        }
-        return names;
-    }
-
     private static string TryReadRequestId(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object
@@ -674,4 +643,9 @@ public sealed class NativeHostServer(
     {
         public string Code { get; } = code;
     }
+
+    private sealed record MoveDownloadedFilePayload(
+        long DownloadId,
+        string SourcePath,
+        string DestinationFolder);
 }

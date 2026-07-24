@@ -14,6 +14,12 @@ internal static partial class TestSuite
         DownloadArgumentsRejectUnsafeHeights();
         DownloadPathsReserveUniqueSafeStems();
         DownloadPathsConfineJobDirectoriesAndFinalFiles();
+        DownloadFileMoverMovesWithoutOverwrite();
+        DownloadFileMoverRejectsUnsafeStagingPaths();
+        DownloadFileMoverRejectsReparsePoints();
+        DownloadFileMoverCopiesAcrossVolumesBeforeDeletingSource();
+        DownloadFileMoverPreservesSourceWhenCopyFails();
+        DownloadFileMoverKeepsDeliveredFileWhenSourceCleanupFails();
         ProgressParserNormalizesKnownMessages();
         ProgressParserRejectsMalformedMessages();
         YouTubeServiceDownloadsWithHostOwnedPathsAndProgress();
@@ -123,6 +129,128 @@ internal static partial class TestSuite
         File.WriteAllText(confusingPath, "outside");
         True(!paths.ContainsFinalPath(confusingPath), "Home prefix confusion was accepted.");
         True(!paths.ContainsFinalPath(Path.Combine(scope.Root, "outside", "keep.txt")), "File from another root was accepted.");
+    }
+
+    private static void DownloadFileMoverMovesWithoutOverwrite()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_1", "aula.ts", "new");
+        var destination = scope.CreateDestination();
+        File.WriteAllText(Path.Combine(destination, "aula.ts"), "old");
+        var mover = new DownloadFileMover();
+
+        var result = mover.Move(source, destination, 42);
+
+        Equal(42L, result.DownloadId);
+        Equal(Path.Combine(destination, "aula (1).ts"), result.FinalPath);
+        Equal("old", File.ReadAllText(Path.Combine(destination, "aula.ts")));
+        Equal("new", File.ReadAllText(result.FinalPath));
+        True(!File.Exists(source), "Successful move left the staging file.");
+    }
+
+    private static void DownloadFileMoverRejectsUnsafeStagingPaths()
+    {
+        using var scope = new DownloadTestScope();
+        var mover = new DownloadFileMover();
+        var destination = scope.CreateDestination();
+
+        var outside = Path.Combine(scope.Root, "outside.ts");
+        File.WriteAllText(outside, "keep");
+        Throws<ArgumentException>(() => mover.Move(outside, destination, 1));
+        True(File.Exists(outside), "Rejected source outside staging was removed.");
+
+        var canonical = scope.CreateStagingFile("op_traversal", "traversal.ts", "keep");
+        var traversal = Path.Combine(
+            Path.GetDirectoryName(canonical)!,
+            "..",
+            "op_traversal",
+            Path.GetFileName(canonical));
+        Throws<ArgumentException>(() => mover.Move(traversal, destination, 2));
+        True(File.Exists(canonical), "Traversal rejection removed the source.");
+
+        var invalidOperation = scope.CreateStagingFile("bad operation", "unsafe.ts", "keep");
+        Throws<ArgumentException>(() => mover.Move(invalidOperation, destination, 3));
+        True(File.Exists(invalidOperation), "Invalid operation rejection removed the source.");
+
+        var valid = scope.CreateStagingFile("op_negative", "negative.ts", "keep");
+        Throws<ArgumentOutOfRangeException>(() => mover.Move(valid, destination, -1));
+        True(File.Exists(valid), "Invalid download id removed the source.");
+
+        Throws<ArgumentException>(() => mover.Move(valid, "relative", 4));
+        True(File.Exists(valid), "Invalid destination removed the source.");
+    }
+
+    private static void DownloadFileMoverRejectsReparsePoints()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_reparse", "aula.ts", "keep");
+        var transfer = new RecordingFileTransfer(sameVolume: true);
+        transfer.ReparsePaths.Add(Path.GetDirectoryName(Path.GetDirectoryName(source))!);
+        var mover = new DownloadFileMover(transfer);
+
+        Throws<ArgumentException>(() => mover.Move(source, scope.CreateDestination(), 5));
+
+        True(File.Exists(source), "Reparse-point rejection removed the source.");
+        Equal(0, transfer.Operations.Count);
+    }
+
+    private static void DownloadFileMoverCopiesAcrossVolumesBeforeDeletingSource()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_2", "aula.ts", "bytes");
+        var destination = scope.CreateDestination("other-volume");
+        var transfer = new RecordingFileTransfer(sameVolume: false);
+        var mover = new DownloadFileMover(transfer);
+
+        var result = mover.Move(source, destination, 7);
+
+        True(
+            transfer.Operations.SequenceEqual(["copy", "promote", "delete-source"]),
+            "Cross-volume delivery used an unsafe order.");
+        Equal(Path.Combine(destination, "aula.ts"), result.FinalPath);
+        Equal("bytes", File.ReadAllText(result.FinalPath));
+        True(!File.Exists(source), "Source was not removed after promotion.");
+    }
+
+    private static void DownloadFileMoverPreservesSourceWhenCopyFails()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_3", "aula.ts", "bytes");
+        var destination = scope.CreateDestination("failing-volume");
+        var transfer = new RecordingFileTransfer(sameVolume: false)
+        {
+            CopyError = new IOException("controlled copy failure")
+        };
+        var mover = new DownloadFileMover(transfer);
+
+        Throws<IOException>(() => mover.Move(source, destination, 8));
+
+        True(File.Exists(source), "Failed cross-volume copy removed the source.");
+        Equal("bytes", File.ReadAllText(source));
+        True(
+            transfer.Operations.SequenceEqual(["copy", "delete-partial"]),
+            "Failed copy did not clean only the partial file.");
+        Equal(0, Directory.EnumerateFiles(destination).Count());
+    }
+
+    private static void DownloadFileMoverKeepsDeliveredFileWhenSourceCleanupFails()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_4", "aula.ts", "bytes");
+        var destination = scope.CreateDestination("cleanup-failure");
+        var transfer = new RecordingFileTransfer(sameVolume: false)
+        {
+            DeleteSourceError = new IOException("controlled cleanup failure")
+        };
+        var mover = new DownloadFileMover(transfer);
+
+        var result = mover.Move(source, destination, 9);
+
+        True(
+            transfer.Operations.SequenceEqual(["copy", "promote", "delete-source"]),
+            "Cleanup failure changed the safe delivery order.");
+        Equal("bytes", File.ReadAllText(result.FinalPath));
+        True(File.Exists(source), "Cleanup failure should leave the staging copy for later maintenance.");
     }
 
     private static void ProgressParserNormalizesKnownMessages()
@@ -428,6 +556,23 @@ internal static partial class TestSuite
 
         public DownloadPaths CreatePaths() => new(Path.Combine(Root, "Video Radar"), Path.Combine(Root, "temp"));
 
+        public string CreateStagingFile(string operationId, string fileName, string contents)
+        {
+            var directory = Path.Combine(
+                Root,
+                "Browser Downloads",
+                "Video Radar",
+                ".staging",
+                operationId);
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, fileName);
+            File.WriteAllText(path, contents);
+            return path;
+        }
+
+        public string CreateDestination(string name = "target") =>
+            Directory.CreateDirectory(Path.Combine(Root, name)).FullName;
+
         public void Dispose()
         {
             if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
@@ -456,6 +601,54 @@ internal static partial class TestSuite
             Calls.Add(call);
             if (handlers.Count == 0) throw new InvalidOperationException("Unexpected process invocation.");
             return handlers.Dequeue()(call);
+        }
+    }
+
+    private sealed class RecordingFileTransfer(bool sameVolume) : IFileTransfer
+    {
+        public List<string> Operations { get; } = [];
+        public HashSet<string> ReparsePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Exception? CopyError { get; init; }
+        public Exception? DeleteSourceError { get; init; }
+
+        public FileAttributes GetAttributes(string path)
+        {
+            var attributes = File.GetAttributes(path);
+            return ReparsePaths.Contains(path) ? attributes | FileAttributes.ReparsePoint : attributes;
+        }
+
+        public bool IsSameVolume(string source, string destination) => sameVolume;
+
+        public void MoveSameVolume(string source, string destination)
+        {
+            Operations.Add("move");
+            File.Move(source, destination, overwrite: false);
+        }
+
+        public void CopyToPartial(string source, string partial)
+        {
+            Operations.Add("copy");
+            File.Copy(source, partial, overwrite: false);
+            if (CopyError is not null) throw CopyError;
+        }
+
+        public void PromotePartial(string partial, string destination)
+        {
+            Operations.Add("promote");
+            File.Move(partial, destination, overwrite: false);
+        }
+
+        public void DeleteSource(string source)
+        {
+            Operations.Add("delete-source");
+            if (DeleteSourceError is not null) throw DeleteSourceError;
+            File.Delete(source);
+        }
+
+        public void DeletePartial(string partial)
+        {
+            Operations.Add("delete-partial");
+            if (File.Exists(partial)) File.Delete(partial);
         }
     }
 }

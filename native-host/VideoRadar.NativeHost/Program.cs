@@ -42,6 +42,7 @@ public static class Program
             var downloadPaths = new DownloadPaths();
             var youtubeService = new YouTubeService(toolsDirectory, processRunner, downloadPaths);
             var updatePolicy = new UpdatePolicy(toolsDirectory, processRunner);
+            var fileMover = new DownloadFileMover();
             if (!OperatingSystem.IsWindows())
                 throw new PlatformNotSupportedException("The folder picker requires Windows.");
             var folderPicker = new WindowsFolderPicker(parentWindow);
@@ -50,7 +51,8 @@ public static class Program
                 youtubeService,
                 updatePolicy,
                 folderPicker,
-                downloadPaths.Home);
+                downloadPaths.Home,
+                fileMover);
             await server.RunAsync(CancellationToken.None);
             return 0;
         }

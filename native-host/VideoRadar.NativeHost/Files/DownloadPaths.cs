@@ -20,6 +20,7 @@ public sealed partial class DownloadPaths : IDownloadPaths
 {
     private const int MaxStemLength = 180;
     private const int MaxBaseStemLength = 170;
+    private const string InvalidPathCharacters = "<>:\"/\\|?*";
     private static readonly Guid DownloadsFolderId = new("374DE290-123F-4565-9164-39C4925E467B");
     private static readonly HashSet<string> ReservedNames = CreateReservedNames();
     private readonly object reservationLock = new();
@@ -43,6 +44,55 @@ public sealed partial class DownloadPaths : IDownloadPaths
     public string Home { get; }
 
     public string TempRoot { get; }
+
+    public static string NormalizeDestination(string path, string parameterName = "path")
+    {
+        if (path is null
+            || path.Length is 0 or > 1024
+            || path.Contains('/')
+            || path.StartsWith(@"\\?\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\.\", StringComparison.Ordinal)
+            || path.StartsWith(@"\\??\", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+
+        string[] segments;
+        if (path.Length >= 3
+            && char.IsAsciiLetter(path[0])
+            && path[1] == ':'
+            && path[2] == '\\')
+        {
+            segments = path.Length == 3 ? [] : path[3..].Split('\\', StringSplitOptions.None);
+        }
+        else if (path.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            segments = path[2..].Split('\\', StringSplitOptions.None);
+            if (segments.Length < 2)
+                throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+        else
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        }
+
+        if (segments.Any(IsInvalidPathSegment))
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+
+        string canonicalPath;
+        try
+        {
+            canonicalPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName, exception);
+        }
+
+        if (!string.Equals(path, canonicalPath, StringComparison.Ordinal))
+            throw new ArgumentException("Path must be absolute and canonical.", parameterName);
+        return canonicalPath;
+    }
 
     public string ReserveStem(string title, string videoId)
     {
@@ -172,6 +222,22 @@ public sealed partial class DownloadPaths : IDownloadPaths
 
     private static bool HasTraversalSegment(string path) =>
         path.Split(['/', '\\'], StringSplitOptions.None).Any(segment => segment is "." or "..");
+
+    private static bool IsInvalidPathSegment(string segment)
+    {
+        if (segment.Length == 0
+            || segment is "." or ".."
+            || segment.EndsWith(' ')
+            || segment.EndsWith('.')
+            || segment.Any(character => char.IsControl(character) || InvalidPathCharacters.Contains(character)))
+        {
+            return true;
+        }
+
+        var extension = segment.IndexOf('.');
+        var name = extension < 0 ? segment : segment[..extension];
+        return ReservedNames.Contains(name);
+    }
 
     private static bool IsStrictChild(string root, string candidate)
     {
