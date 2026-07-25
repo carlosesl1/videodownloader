@@ -47,3 +47,30 @@ test('infers extensionless media kinds from parameterized MIME types', () => {
 
   assert.deepEqual(candidates.map((candidate) => candidate.kind), ['direct', 'hls']);
 });
+
+test('dedupes rotated HLS query tokens while preserving the newest usable URL', () => {
+  const candidates = normalizeCandidates([
+    {
+      url: 'https://cdn.test/playlist.m3u8?token=old',
+      kind: 'hls',
+      source: 'performance',
+      startTime: 10,
+    },
+    {
+      url: 'https://cdn.test/playlist.m3u8?token=new',
+      kind: 'hls',
+      source: 'performance',
+      startTime: 20,
+    },
+    {
+      url: 'https://cdn.test/other.m3u8?token=one',
+      kind: 'hls',
+      source: 'performance',
+      startTime: 30,
+    },
+  ]);
+
+  assert.equal(candidates.length, 2);
+  assert.equal(candidates[0].url, 'https://cdn.test/playlist.m3u8?token=new');
+  assert.equal(candidates[1].url, 'https://cdn.test/other.m3u8?token=one');
+});

@@ -96,7 +96,14 @@ export function scanPage() {
     if (!url) return;
     const kind = classify(url, entry.initiatorType || '');
     if (!kind) return;
-    candidates.push({ url, type: '', label: '', kind, source: 'performance' });
+    candidates.push({
+      url,
+      type: '',
+      label: '',
+      kind,
+      source: 'performance',
+      startTime: Number.isFinite(entry.startTime) ? entry.startTime : undefined,
+    });
   });
 
   return { pageTitle: document.title, candidates };

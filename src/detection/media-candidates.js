@@ -29,7 +29,13 @@ function sourceRank(source) {
 }
 
 function mergeCandidate(first, second) {
-  const preferred = sourceRank(second.source) > sourceRank(first.source) ? second : first;
+  const firstRank = sourceRank(first.source);
+  const secondRank = sourceRank(second.source);
+  const secondIsNewer = Number.isFinite(second.startTime)
+    && (!Number.isFinite(first.startTime) || second.startTime > first.startTime);
+  const preferred = secondRank > firstRank || (secondRank === firstRank && secondIsNewer)
+    ? second
+    : first;
   const other = preferred === first ? second : first;
   const merged = { ...other, ...preferred };
 
@@ -42,7 +48,7 @@ function mergeCandidate(first, second) {
 }
 
 export function normalizeCandidates(candidates) {
-  const byUrl = new Map();
+  const byIdentity = new Map();
 
   for (const candidate of candidates || []) {
     if (!candidate || typeof candidate.url !== 'string') continue;
@@ -58,11 +64,12 @@ export function normalizeCandidates(candidates) {
     if (kind !== 'direct' && kind !== 'hls') continue;
 
     const normalized = { ...candidate, url: parsed.href, kind };
-    const existing = byUrl.get(parsed.href);
-    byUrl.set(parsed.href, existing ? mergeCandidate(existing, normalized) : normalized);
+    const identity = kind === 'hls' ? `${parsed.origin}${parsed.pathname}` : parsed.href;
+    const existing = byIdentity.get(identity);
+    byIdentity.set(identity, existing ? mergeCandidate(existing, normalized) : normalized);
   }
 
-  return [...byUrl.values()];
+  return [...byIdentity.values()];
 }
 
 export function groupDirectVariants(items) {

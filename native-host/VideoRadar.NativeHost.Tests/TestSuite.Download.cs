@@ -26,6 +26,7 @@ internal static partial class TestSuite
         YouTubeServiceDownloadsWithHostOwnedPathsAndProgress();
         YouTubeServiceRejectsInvalidFinalPathsAndSafeFailures();
         YouTubeServiceSerializesAndCancelsTheActiveJob();
+        ProcessRunnerClosesChildStandardInput();
         ProcessRunnerCancellationKillsTheChildTree();
     }
 
@@ -551,6 +552,37 @@ internal static partial class TestSuite
         cancellation.Cancel();
         Throws<OperationCanceledException>(() => run.GetAwaiter().GetResult());
         True(SpinWait.SpinUntil(() => !IsProcessRunning(pid), TimeSpan.FromSeconds(5)), "Cancellation did not kill the child process tree.");
+    }
+
+    private static void ProcessRunnerClosesChildStandardInput()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }
+        };
+        process.StartInfo.ArgumentList.Add("--process-runner-stdin-probe");
+        process.Start();
+
+        var exited = process.WaitForExitAsync().Wait(TimeSpan.FromSeconds(3));
+        if (!exited)
+        {
+            process.StandardInput.Close();
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+        }
+
+        True(exited, "ProcessRunner leaked the Native Messaging input pipe to its child.");
+        Equal(0, process.ExitCode);
+        Equal("EOF", process.StandardOutput.ReadToEnd().Trim());
+        Equal(string.Empty, process.StandardError.ReadToEnd());
     }
 
     private static bool IsProcessRunning(int pid)

@@ -97,6 +97,11 @@ export function canonicalMediaUrl(value) {
   return parsed.href;
 }
 
+function canonicalHlsIdentity(value) {
+  const parsed = httpUrl(value);
+  return `${parsed.origin}${parsed.pathname}`;
+}
+
 export function buildOriginGrant(values) {
   const origins = [];
   const seen = new Set();
@@ -318,13 +323,13 @@ export function findMatchingOperation(item, records) {
   const urls = new Set();
   for (const variant of item?.variants ?? []) {
     try {
-      urls.add(canonicalMediaUrl(variant.url));
+      urls.add(canonicalHlsIdentity(variant.url));
     } catch {
       // Invalid scan candidates are ignored before rendering.
     }
   }
   return records
-    .filter((record) => validOperationRecord(record) && urls.has(canonicalMediaUrl(record.url)))
+    .filter((record) => validOperationRecord(record) && urls.has(canonicalHlsIdentity(record.url)))
     .sort((left, right) => {
       const [leftActive, leftTime] = operationPriority(left);
       const [rightActive, rightTime] = operationPriority(right);

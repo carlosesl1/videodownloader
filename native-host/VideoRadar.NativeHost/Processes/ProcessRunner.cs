@@ -17,6 +17,7 @@ public sealed class ProcessRunner : IProcessRunner
             StartInfo = new ProcessStartInfo(executable)
             {
                 UseShellExecute = false,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 StandardOutputEncoding = Encoding.UTF8,
@@ -27,6 +28,7 @@ public sealed class ProcessRunner : IProcessRunner
 
         using var job = new ChildProcessJob();
         if (!process.Start()) throw new InvalidOperationException("Unable to start child process.");
+        process.StandardInput.Close();
         try
         {
             job.Assign(process);

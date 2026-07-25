@@ -92,6 +92,23 @@ test('matches the newest persisted operation by canonical variant URL', () => {
   assert.equal(found.operationId, 'new');
 });
 
+test('matches an active HLS operation after its signed query token rotates', () => {
+  const item = {
+    kind: 'hls',
+    variants: [{ url: 'https://cdn.test/playlist.m3u8?token=new' }],
+  };
+  const found = findMatchingOperation(item, [
+    {
+      operationId: 'active',
+      url: 'https://cdn.test/playlist.m3u8?token=old',
+      state: 'assembling',
+      updatedAt: 2,
+    },
+  ]);
+
+  assert.equal(found.operationId, 'active');
+});
+
 test('unwraps only a valid pure YouTube catalog and durable job snapshot', () => {
   const catalog = unwrapYouTubeFormats({ ok: true, value: {
     videoId: 'jNQXAC9IVRw', title: 'Me at the zoo', durationSeconds: 19,
