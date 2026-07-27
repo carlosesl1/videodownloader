@@ -107,6 +107,9 @@ function createEnv({
       if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
       if (type === HOST_COMMANDS.START_DOWNLOAD) return startedEvent();
       if (type === HOST_COMMANDS.CANCEL_DOWNLOAD) return { requested: true, requestId: 'cancel-1' };
+      if (type === HOST_COMMANDS.REVEAL_DOWNLOADED_FILE) {
+        return { type: 'fileRevealed', requestId: 'reveal-1' };
+      }
       if (type === HOST_COMMANDS.GET_JOB) return { type: 'ready', requestId: 'get-1', job: null };
       throw new Error(`unexpected command ${type}`);
     },
@@ -159,6 +162,29 @@ test('lista formatos sem persistir e reutiliza o catálogo em memória ao inicia
   assert.deepEqual(env.storageLocal.values.youtubeJob, snapshot);
   assert.deepEqual(Object.keys(env.coordinator), ['ready', 'handle', 'handleHostEvent']);
   assert.equal(Object.isFrozen(env.coordinator), true);
+});
+
+test('manda o auxiliar selecionar no Explorer somente um caminho Windows absoluto', async () => {
+  const env = createEnv();
+  await env.coordinator.ready;
+
+  assert.deepEqual(
+    await env.coordinator.handle(message(YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE, {
+      path: String.raw`C:\Users\Carlos\Downloads\Video Radar\aula.mp4`,
+    })),
+    { revealed: true },
+  );
+  assert.deepEqual(env.requests.at(-1), {
+    type: HOST_COMMANDS.REVEAL_DOWNLOADED_FILE,
+    payload: { path: String.raw`C:\Users\Carlos\Downloads\Video Radar\aula.mp4` },
+  });
+
+  for (const path of ['aula.mp4', 'C:/Downloads/aula.mp4', String.raw`C:\Downloads\..\Windows\aula.mp4`]) {
+    await assert.rejects(
+      env.coordinator.handle(message(YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE, { path })),
+      /inválida/i,
+    );
+  }
 });
 
 test('valida payload/altura, busca catálogo ausente e só resolve start após persistir', async () => {

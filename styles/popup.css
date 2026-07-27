@@ -347,6 +347,19 @@ h2 {
   max-width: 154px;
 }
 
+.button--reveal {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 36px;
+  color: var(--blue-dark);
+  background: #e8eefc;
+}
+
+.button--reveal:hover {
+  color: #fff;
+  background: var(--blue);
+}
+
 .button--cancel {
   align-self: end;
   min-height: 42px;
@@ -504,6 +517,10 @@ h2 {
   .button--download {
     width: 100%;
     max-width: none;
+  }
+
+  .button--reveal {
+    width: 100%;
   }
 }
 

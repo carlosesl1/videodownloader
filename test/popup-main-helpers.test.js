@@ -317,6 +317,7 @@ test('clicking the rendered cancel control sends the active YouTube job id', asy
 
     closest(selector) {
       if (selector === '[data-cancel]' && Object.hasOwn(this.dataset, 'cancel')) return this;
+      if (selector === '[data-reveal]' && Object.hasOwn(this.dataset, 'reveal')) return this;
       return this.parent?.closest?.(selector) ?? null;
     }
   }
@@ -369,6 +370,25 @@ test('clicking the rendered cancel control sends the active YouTube job id', asy
       target: 'background', action: 'YOUTUBE_CANCEL_DOWNLOAD', payload: { jobId: 'youtube-job-1' },
     });
     assert.equal(listeners.length, 1);
+
+    const completed = {
+      ...snapshot,
+      stage: 'complete',
+      percent: 100,
+      path: String.raw`C:\Users\Carlos\Downloads\Video Radar\video.mp4`,
+      updatedAt: 2,
+    };
+    listeners[0]({ youtubeJob: { newValue: completed } }, 'local');
+    const reveal = find(root, (element) => Object.hasOwn(element.dataset, 'reveal'));
+    assert.ok(reveal, 'completed YouTube job did not render the Explorer control');
+    root.listeners.get('click')({ target: reveal });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(messages.at(-1), {
+      target: 'background',
+      action: 'YOUTUBE_REVEAL_DOWNLOADED_FILE',
+      payload: { path: completed.path },
+    });
   } finally {
     globalThis.document = previousDocument;
   }

@@ -27,6 +27,7 @@ internal static partial class TestSuite
         NativeHostServerRejectsInvalidPickedFoldersWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidFallbackFolders();
         NativeHostServerMovesDownloadedFilesAndMapsFailuresSafely().GetAwaiter().GetResult();
+        NativeHostServerRevealsDownloadedFilesAndMapsFailuresSafely().GetAwaiter().GetResult();
         UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts().GetAwaiter().GetResult();
         ProgramPingDiagnosticIsPureAndMachineReadable();
     }
@@ -66,7 +67,7 @@ internal static partial class TestSuite
         True(messages.All(message => AllowedServerTypes.Contains(message.GetProperty("type").GetString()!)), "Server emitted a type outside the protocol allowlist.");
 
         var ready = Message(messages, "ready", "r-ping");
-        Equal(2, ready.GetProperty("protocolVersion").GetInt32());
+        Equal(3, ready.GetProperty("protocolVersion").GetInt32());
         Equal(HostInfo.NativeName, ready.GetProperty("nativeName").GetString());
         Equal(DefaultDownloadFolder, ready.GetProperty("defaultFolder").GetString());
 
@@ -547,6 +548,30 @@ internal static partial class TestSuite
         @"C:\" + new string('a', 1022)
     ];
 
+    private static async Task NativeHostServerRevealsDownloadedFilesAndMapsFailuresSafely()
+    {
+        using var input = new MemoryStream(FrameCommands(
+            Command("revealDownloadedFile", "r-reveal", "{\"path\":\"C:\\\\Downloads\\\\Video Radar\\\\aula.mp4\"}"),
+            Command("revealDownloadedFile", "r-invalid", "{\"path\":\"relative.mp4\"}"),
+            Command("ping", "r-after-reveal", "{}")));
+        using var output = new MemoryStream();
+        var mover = new FakeDownloadFileMover();
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            mover).RunAsync(CancellationToken.None);
+
+        var messages = ReadFrames(output);
+        _ = Message(messages, "fileRevealed", "r-reveal");
+        Equal(@"C:\Downloads\Video Radar\aula.mp4", mover.RevealCalls.Single());
+        Equal("FILE_INVALID", Message(messages, "jobFailed", "r-invalid").GetProperty("code").GetString());
+        _ = Message(messages, "ready", "r-after-reveal");
+    }
+
     private static async Task UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts()
     {
         var root = Path.Combine(Path.GetTempPath(), "video-radar-update-tests", Guid.NewGuid().ToString("N"));
@@ -633,7 +658,7 @@ internal static partial class TestSuite
     private const string SelectedDownloadFolder = @"C:\Media\Video Radar";
 
     private static readonly HashSet<string> AllowedServerTypes =
-        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled", "fileMoved"];
+        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled", "fileMoved", "fileRevealed"];
 
     private static string Command(string type, string requestId, string payload) =>
         $"{{\"type\":{JsonSerializer.Serialize(type)},\"requestId\":{JsonSerializer.Serialize(requestId)},\"payload\":{payload}}}";
@@ -706,12 +731,19 @@ internal static partial class TestSuite
         Func<string, string, long, FileMoveResult>? handler = null) : IDownloadFileMover
     {
         public List<FileMoveCall> Calls { get; } = [];
+        public List<string> RevealCalls { get; } = [];
 
         public FileMoveResult Move(string sourcePath, string destinationFolder, long downloadId)
         {
             Calls.Add(new FileMoveCall(sourcePath, destinationFolder, downloadId));
             return handler?.Invoke(sourcePath, destinationFolder, downloadId)
                 ?? new FileMoveResult(downloadId, Path.Combine(destinationFolder, Path.GetFileName(sourcePath)));
+        }
+
+        public void Reveal(string path)
+        {
+            RevealCalls.Add(path);
+            if (!Path.IsPathFullyQualified(path)) throw new ArgumentException("invalid path");
         }
     }
 

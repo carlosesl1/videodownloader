@@ -182,6 +182,9 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     const pathNode = node('p', 'media-row__path', path);
     pathNode.title = path;
     row.append(pathNode);
+    if (item.phase === 'complete') {
+      row.append(button('Mostrar no Explorer', 'button button--reveal', 'reveal', item.id));
+    }
   }
 
   if (pendingPermission?.id === item.id) {

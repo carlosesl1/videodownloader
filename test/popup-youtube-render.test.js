@@ -198,6 +198,8 @@ test('renders YouTube completion path and terminal states without cancel or prog
   }));
   assert.equal(one(complete, '.media-row__path').textContent, 'C:/Downloads/Me at the zoo-1080p.mp4');
   assert.equal(one(complete, '.media-row__path').title, 'C:/Downloads/Me at the zoo-1080p.mp4');
+  assert.equal(one(complete, '[data-reveal]').getAttribute('data-reveal'), 'youtube:jNQXAC9IVRw');
+  assert.equal(one(complete, '[data-reveal]').textContent, 'Mostrar no Explorer');
   assert.equal(one(complete, '.media-row__status').textContent, 'Concluído');
   assert.equal(complete.querySelectorAll('[data-cancel]').length, 0);
   assert.equal(complete.querySelectorAll('progress').length, 0);
@@ -209,6 +211,7 @@ test('renders YouTube completion path and terminal states without cancel or prog
     assert.equal(root.querySelectorAll('progress').length, 0, phase);
     assert.equal(one(root, '.media-row__status').textContent, 'Tente novamente.', phase);
     assert.equal(root.querySelectorAll('[data-download]').length, 1, phase);
+    assert.equal(root.querySelectorAll('[data-reveal]').length, 0, phase);
   }
 });
 

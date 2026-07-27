@@ -23,6 +23,12 @@ public static class YouTubeUrl
         {
             videoId = GetSingleQueryValue(uri.Query, "v");
         }
+        else if (IsWatchHost(uri.Host)
+            && uri.AbsolutePath.StartsWith("/shorts/", StringComparison.Ordinal)
+            && uri.AbsolutePath.Length == "/shorts/".Length + 11)
+        {
+            videoId = uri.AbsolutePath["/shorts/".Length..];
+        }
         else if (string.Equals(uri.Host, "youtu.be", StringComparison.OrdinalIgnoreCase))
         {
             var path = uri.AbsolutePath;

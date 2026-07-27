@@ -47,7 +47,7 @@ Se o popup informar que o auxiliar está ausente ou com erro, confirme a etapa 3
 
 - Não oferece suporte a DRM, conteúdo privado, ao vivo, com idade restrita ou que exija autenticação.
 - Não usa cookies, credenciais, `netrc` nem perfil do navegador.
-- Playlists, Shorts e formatos que o serviço não suporte não são tratados como download em lote.
+- Playlists não são tratadas como download em lote; Shorts individuais do YouTube são aceitos.
 - O acesso público é feito pelo `yt-dlp`; a política diária de atualização aplica-se somente ao `yt-dlp`.
 - A disponibilidade de uma URL não concede direito de baixar ou redistribuir o conteúdo.
 

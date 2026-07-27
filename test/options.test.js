@@ -44,7 +44,7 @@ test('mostra pasta atual e persiste o checkbox', async () => {
   const nativeClient = fakeNative([{
     type: 'ready',
     requestId: 'ping-1',
-    protocolVersion: 2,
+    protocolVersion: 3,
     nativeName: 'com.videoradar.helper',
     defaultFolder: String.raw`C:\Users\Carlos\Downloads\Video Radar`,
   }]);

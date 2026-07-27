@@ -28,7 +28,7 @@ test('conecta uma vez, correlaciona respostas e encaminha eventos posteriores', 
   assert.deepEqual(connections, [NATIVE_HOST]); assert.equal(port.messages.length, 2); assert.notEqual(port.messages[0].requestId, port.messages[1].requestId);
   port.emit({ type: 'ready', requestId: port.messages[1].requestId, job: null });
   port.emit({
-    type: 'ready', requestId: port.messages[0].requestId, protocolVersion: 2,
+    type: 'ready', requestId: port.messages[0].requestId, protocolVersion: 3,
     nativeName: 'host', defaultFolder: 'C:\\Users\\Carlos\\Downloads',
   });
   assert.equal((await first).type, 'ready'); assert.equal((await second).job, null);
@@ -132,6 +132,15 @@ test('correlaciona movimentação e ignora resposta de tipo errado', async () =>
     type: 'fileMoved', requestId, downloadId: 7,
     finalPath: 'D:\\Videos\\clip.mp4',
   });
+
+  const revealPayload = { path: 'D:\\Videos\\clip.mp4' };
+  const revealed = client.request(HOST_COMMANDS.REVEAL_DOWNLOADED_FILE, revealPayload);
+  const revealRequestId = port.messages.at(-1).requestId;
+  assert.deepEqual(port.messages.at(-1), {
+    type: 'revealDownloadedFile', requestId: revealRequestId, payload: revealPayload,
+  });
+  port.emit({ type: 'fileRevealed', requestId: revealRequestId });
+  assert.deepEqual(await revealed, { type: 'fileRevealed', requestId: revealRequestId });
 });
 
 test('timeout não tenta novamente e disconnect rejeita pendências e publica evento interno uma vez', async () => {

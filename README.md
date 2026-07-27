@@ -118,7 +118,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
 
 - No DRM, private, authenticated, age-restricted or live-content bypass.
 - No cookies, credentials, `netrc` or browser-profile access.
-- No bulk playlist or Shorts downloading.
+- No bulk playlist downloading; individual YouTube Shorts are supported.
 - HLS support currently targets MPEG-TS output; incompatible fragmented MP4
   playlists are rejected safely.
 - YouTube behavior depends on public formats supported by `yt-dlp` and may

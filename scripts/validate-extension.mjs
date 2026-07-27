@@ -46,7 +46,7 @@ sameSet(manifest.permissions ?? [], [
 assert(manifest.permissions.includes('nativeMessaging'), 'manifest must allow native messaging');
 assert(manifest.permissions.includes('downloads'), 'manifest must allow browser downloads');
 assert(manifest.options_ui?.page === 'options.html', 'manifest must expose options.html');
-assert(MIN_NATIVE_PROTOCOL_VERSION === 2, 'native protocol version must remain 2');
+assert(MIN_NATIVE_PROTOCOL_VERSION === 3, 'native protocol version must remain 3');
 assert(!manifest.host_permissions?.length, 'host_permissions must remain absent or empty');
 assert(JSON.stringify(manifest.optional_host_permissions) === JSON.stringify(['http://*/*', 'https://*/*']),
   'optional_host_permissions must be the approved HTTP(S) pair');

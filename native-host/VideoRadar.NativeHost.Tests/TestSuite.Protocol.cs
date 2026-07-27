@@ -93,7 +93,8 @@ internal static partial class TestSuite
             "cancelDownload",
             "getJob",
             "chooseDownloadFolder",
-            "moveDownloadedFile"
+            "moveDownloadedFile",
+            "revealDownloadedFile"
         })
         {
             using var document = JsonDocument.Parse($"{{\"type\":\"{type}\",\"requestId\":\"request-1\",\"payload\":{{\"value\":1}}}}");
@@ -145,6 +146,8 @@ internal static partial class TestSuite
         Equal(watch, shortUrl);
         True(YouTubeUrl.TryCanonicalize("https://m.youtube.com/watch?v=jNQXAC9IVRw", out var mobile), "mobile URL rejected");
         Equal(watch, mobile);
+        True(YouTubeUrl.TryCanonicalize("https://www.youtube.com/shorts/jNQXAC9IVRw?feature=share", out var shorts), "Shorts URL rejected");
+        Equal(watch, shorts);
         True(!YouTubeUrl.TryCanonicalize("http://youtube.com/watch?v=jNQXAC9IVRw", out _), "HTTP accepted");
         True(!YouTubeUrl.TryCanonicalize("https://evil.test/watch?v=jNQXAC9IVRw", out _), "foreign host accepted");
         True(!YouTubeUrl.TryCanonicalize("https://youtube.com/playlist?list=x", out _), "playlist accepted");
@@ -171,7 +174,8 @@ internal static partial class TestSuite
             "https://youtu.be/jNQXAC9IVR!",
             "https://www.youtube.com/watch?v=jNQXAC9IVR",
             "https://www.youtube.com/watch?v=jNQXAC9IVR!",
-            "https://www.youtube.com/shorts/jNQXAC9IVRw",
+            "https://www.youtube.com/shorts/jNQXAC9IVRw/extra",
+            "https://www.youtube.com/shorts/jNQXAC9IVR",
             "https://www.youtube.com/embed/jNQXAC9IVRw",
             "https://www.youtube.com/watch?video=jNQXAC9IVRw"
         })

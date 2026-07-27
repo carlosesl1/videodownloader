@@ -101,6 +101,7 @@ public sealed class NativeHostServer(
         "cancelDownload" => HandleCancelDownloadAsync(command, cancellationToken),
         "chooseDownloadFolder" => HandleChooseDownloadFolderAsync(command, cancellationToken),
         "moveDownloadedFile" => HandleMoveDownloadedFileAsync(command, cancellationToken),
+        "revealDownloadedFile" => HandleRevealDownloadedFileAsync(command, cancellationToken),
         _ => throw new CommandFailureException("INVALID_COMMAND", "Comando inválido.")
     };
 
@@ -225,6 +226,42 @@ public sealed class NativeHostServer(
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new CommandFailureException("DESTINATION_MOVE_FAILED", "Não foi possível mover o arquivo.");
+        }
+    }
+
+    private async Task HandleRevealDownloadedFileAsync(
+        HostCommand command,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            RequireExactProperties(command.Payload, "path");
+            var path = DownloadPaths.NormalizeDestination(
+                RequiredString(command.Payload, "path"),
+                "path");
+            fileMover.Reveal(path);
+            await channel.WriteAsync(new
+            {
+                type = "fileRevealed",
+                requestId = command.RequestId
+            }, cancellationToken);
+        }
+        catch (FileNotFoundException)
+        {
+            throw new CommandFailureException("FILE_NOT_FOUND", "O arquivo baixado não foi encontrado.");
+        }
+        catch (ArgumentException)
+        {
+            throw new CommandFailureException("FILE_INVALID", "O caminho do arquivo é inválido.");
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or System.ComponentModel.Win32Exception
+            or System.Runtime.InteropServices.COMException
+            or PlatformNotSupportedException)
+        {
+            throw new CommandFailureException("REVEAL_FAILED", "Não foi possível mostrar o arquivo.");
         }
     }
 

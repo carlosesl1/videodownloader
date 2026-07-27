@@ -5,7 +5,10 @@ import {
   assertFormatsResult,
   assertHostEvent,
 } from '../youtube/protocol.js';
-import { readDownloadPreferences } from '../shared/download-preferences.js';
+import {
+  normalizeWindowsFolder,
+  readDownloadPreferences,
+} from '../shared/download-preferences.js';
 import { assertJobSnapshot } from '../youtube/job-view.js';
 import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
 
@@ -131,6 +134,16 @@ function assertExtensionMessage(message) {
     assertPayload(message.payload, ['jobId']);
     if (typeof message.payload.jobId !== 'string' || !SAFE_ID.test(message.payload.jobId)) invalid();
     return { action: message.action, jobId: message.payload.jobId };
+  }
+  if (message.action === YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE) {
+    assertPayload(message.payload, ['path']);
+    let path;
+    try {
+      path = normalizeWindowsFolder(message.payload.path);
+    } catch {
+      invalid();
+    }
+    return { action: message.action, path };
   }
   assertPayload(message.payload, []);
   return { action: message.action };
@@ -371,6 +384,14 @@ export function createYouTubeCoordinator({ nativeClient, storageLocal, notificat
     }
   }
 
+  async function handleReveal(path) {
+    const event = assertHostEvent(
+      await nativeClient.request(HOST_COMMANDS.REVEAL_DOWNLOADED_FILE, { path }),
+    );
+    if (event.type !== HOST_EVENTS.FILE_REVEALED) invalid();
+    return { revealed: true };
+  }
+
   async function reconcileHostLocked(hostJob) {
     if (!current || !ACTIVE_STAGES.has(current.stage)) return;
     if (hostJob === null) {
@@ -452,6 +473,7 @@ export function createYouTubeCoordinator({ nativeClient, storageLocal, notificat
       if (message.action === YOUTUBE_ACTIONS.LIST_FORMATS) return requestCatalog(message.url);
       if (message.action === YOUTUBE_ACTIONS.START_DOWNLOAD) return handleStart(message.url, message.height);
       if (message.action === YOUTUBE_ACTIONS.CANCEL_DOWNLOAD) return handleCancel(message.jobId);
+      if (message.action === YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE) return handleReveal(message.path);
       return serializedState(() => copySnapshot(current));
     });
   }

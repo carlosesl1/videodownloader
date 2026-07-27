@@ -51,6 +51,8 @@ export function canonicalYouTubePageUrl(value) {
   let videoId = null;
   if (WATCH_HOSTS.has(url.hostname) && url.pathname === '/watch') {
     videoId = singleQueryValue(url.search, 'v');
+  } else if (WATCH_HOSTS.has(url.hostname) && /^\/shorts\/[A-Za-z0-9_-]{11}$/.test(url.pathname)) {
+    videoId = url.pathname.slice('/shorts/'.length);
   } else if (url.hostname === 'youtu.be' && /^\/[A-Za-z0-9_-]{11}$/.test(url.pathname)) {
     videoId = url.pathname.slice(1);
   }

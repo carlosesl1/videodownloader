@@ -2,10 +2,11 @@ import { assertJobSnapshot } from './job-view.js';
 import { normalizeWindowsFolder } from '../shared/download-preferences.js';
 
 export const NATIVE_HOST = 'com.videoradar.helper';
-export const MIN_NATIVE_PROTOCOL_VERSION = 2;
+export const MIN_NATIVE_PROTOCOL_VERSION = 3;
 export const YOUTUBE_ACTIONS = Object.freeze({
   LIST_FORMATS: 'YOUTUBE_LIST_FORMATS', START_DOWNLOAD: 'YOUTUBE_START_DOWNLOAD',
   CANCEL_DOWNLOAD: 'YOUTUBE_CANCEL_DOWNLOAD', GET_JOB: 'YOUTUBE_GET_JOB',
+  REVEAL_DOWNLOADED_FILE: 'YOUTUBE_REVEAL_DOWNLOADED_FILE',
 });
 export const HOST_COMMANDS = Object.freeze({
   PING: 'ping',
@@ -15,6 +16,7 @@ export const HOST_COMMANDS = Object.freeze({
   GET_JOB: 'getJob',
   CHOOSE_DOWNLOAD_FOLDER: 'chooseDownloadFolder',
   MOVE_DOWNLOADED_FILE: 'moveDownloadedFile',
+  REVEAL_DOWNLOADED_FILE: 'revealDownloadedFile',
 });
 export const HOST_EVENTS = Object.freeze({
   READY: 'ready',
@@ -27,6 +29,7 @@ export const HOST_EVENTS = Object.freeze({
   FOLDER_SELECTED: 'folderSelected',
   FOLDER_SELECTION_CANCELLED: 'folderSelectionCancelled',
   FILE_MOVED: 'fileMoved',
+  FILE_REVEALED: 'fileRevealed',
 });
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -141,6 +144,9 @@ export function assertHostEvent(event) {
     if (!finiteInteger(moved.downloadId)) invalid();
     assertWindowsAbsolutePath(moved.finalPath);
     return moved;
+  }
+  if (event.type === HOST_EVENTS.FILE_REVEALED) {
+    return exactEvent(event, ['type', 'requestId']);
   }
   if (event.type !== HOST_EVENTS.JOB_FAILED && !id(event.jobId)) invalid();
   if (event.type === HOST_EVENTS.JOB_STARTED) return { type: HOST_EVENTS.JOB_STARTED, requestId: event.requestId, jobId: event.jobId, job: assertJobSnapshot(event.job) };

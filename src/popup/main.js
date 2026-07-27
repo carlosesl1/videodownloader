@@ -664,6 +664,20 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
+  async function reveal(item) {
+    const visiblePath = item?.finalPath ?? item?.path;
+    if (typeof visiblePath !== 'string' || !visiblePath.trim()) return;
+    try {
+      await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE,
+        payload: { path: visiblePath.trim() },
+      });
+    } catch {
+      // The completed download and its path remain visible so the user can retry.
+    }
+  }
+
   root.addEventListener('change', (event) => {
     const select = event.target?.closest?.('[data-quality]');
     if (!select) return;
@@ -690,6 +704,12 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     if (cancelButton) {
       const item = state.items.find((entry) => entry.id === cancelButton.dataset.cancel);
       if (item) cancel(item);
+      return;
+    }
+    const revealButton = target?.closest?.('[data-reveal]');
+    if (revealButton) {
+      const item = state.items.find((entry) => entry.id === revealButton.dataset.reveal);
+      if (item) reveal(item);
       return;
     }
     const downloadButton = target?.closest?.('[data-download]');
