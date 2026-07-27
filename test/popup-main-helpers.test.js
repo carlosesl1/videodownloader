@@ -151,9 +151,178 @@ test('boots one YouTube recovery request and one shared storage listener', async
         storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
       },
     });
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(messages, [{ target: 'background', action: 'YOUTUBE_GET_JOB', payload: {} }]);
     assert.equal(listeners.length, 1);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('reopening the popup asks the background for the current tab discovery', async () => {
+  class Element {
+    constructor() {
+      this.dataset = {};
+      this.children = [];
+      this.textContent = '';
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute() {}
+    addEventListener() {}
+  }
+  const root = new Element();
+  const announcer = new Element();
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  const messages = [];
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        tabs: {
+          async query() {
+            return [{ id: 17, url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' }];
+          },
+        },
+        runtime: {
+          async sendMessage(message) {
+            messages.push(message);
+            if (message.action === 'DISCOVERY_GET') {
+              return { ok: true, value: {
+                schemaVersion: 1,
+                tabId: 17,
+                pageUrl: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+                target: 'youtube.com',
+                status: 'scanning',
+                kind: 'youtube',
+                mediaUrl: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+                result: null,
+                view: { selections: [], inspections: [] },
+                errorCode: null,
+                updatedAt: 50,
+              } };
+            }
+            return { ok: true, value: null };
+          },
+        },
+        storage: { onChanged: { addListener() {} } },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.ok(messages.some((message) => (
+      message.action === 'DISCOVERY_GET'
+      && message.payload?.tabId === 17
+    )), 'popup did not request the durable discovery for the active tab');
+    assert.match(announcer.textContent, /Carregando qualidades do YouTube/);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('reopening the popup renders the persisted discovery without scanning again', async () => {
+  class Element {
+    constructor() {
+      this.dataset = {};
+      this.children = [];
+      this.textContent = '';
+      this.className = '';
+      this.listeners = new Map();
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute() {}
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+  }
+  const find = (element, predicate) => {
+    if (predicate(element)) return element;
+    for (const child of element.children) {
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+    return null;
+  };
+  const root = new Element();
+  const announcer = new Element();
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  const messages = [];
+  try {
+    bootPopup({
+      documentApi: { querySelector: (selector) => selector === '#app' ? root : announcer },
+      chromeApi: {
+        tabs: {
+          async query() {
+            return [{ id: 17, url: 'https://escola.test/aula/42' }];
+          },
+        },
+        runtime: {
+          async sendMessage(message) {
+            messages.push(message);
+            if (message.action === 'DISCOVERY_GET') {
+              return { ok: true, value: {
+                schemaVersion: 1,
+                tabId: 17,
+                pageUrl: 'https://escola.test/aula/42',
+                target: 'escola.test',
+                status: 'results',
+                kind: 'page',
+                mediaUrl: null,
+                result: {
+                  pageTitle: 'Aula 42',
+                  candidates: [{
+                    url: 'https://cdn.test/aula-1080.mp4',
+                    type: 'video/mp4',
+                    kind: 'direct',
+                    source: 'dom-current',
+                    groupKey: 'video-0',
+                    width: 1920,
+                    height: 1080,
+                  }, {
+                    url: 'https://cdn.test/aula-720.mp4',
+                    type: 'video/mp4',
+                    kind: 'direct',
+                    source: 'dom-source',
+                    groupKey: 'video-0',
+                    width: 1280,
+                    height: 720,
+                  }],
+                },
+                view: {
+                  selections: [{ id: 'direct-video-0', selectedIndex: 1 }],
+                  inspections: [],
+                },
+                errorCode: null,
+                updatedAt: 100,
+              } };
+            }
+            return { ok: true, value: null };
+          },
+        },
+        storage: {
+          session: { async get() { return {}; } },
+          local: { async get() { return {}; } },
+          onChanged: { addListener() {} },
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.ok(find(root, (element) => element.dataset.itemId === 'direct-video-0'));
+    const quality = find(root, (element) => element.dataset.quality === 'direct-video-0');
+    assert.ok(quality, 'restored discovery did not render its quality selector');
+    assert.equal(quality.children[1].selected, true, 'persisted quality selection was not restored');
+    quality.value = '0';
+    root.listeners.get('change')({ target: { closest: () => quality } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const update = messages.find((message) => message.action === 'DISCOVERY_UPDATE_VIEW');
+    assert.equal(update.payload.view.selections[0].selectedIndex, 0);
+    assert.equal(
+      messages.some((message) => message.action === 'DISCOVERY_START'),
+      false,
+      'reopening must restore, not start another scan',
+    );
   } finally {
     globalThis.document = previousDocument;
   }

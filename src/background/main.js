@@ -7,6 +7,7 @@ import { createNativePortClient } from './native-port.js';
 import { createBackgroundRouter } from './router.js';
 import { createYouTubeCoordinator } from './youtube-coordinator.js';
 import { createDownloadRelocationCoordinator } from './download-relocation.js';
+import { createDiscoveryCoordinator } from './discovery-coordinator.js';
 
 export function createOffscreenSender({
   offscreen = globalThis.chrome.offscreen,
@@ -71,7 +72,18 @@ youtubeCoordinator = createYouTubeCoordinator({
   notifications: globalThis.chrome.notifications,
   now: () => Date.now(),
 });
-const router = createBackgroundRouter({ hls: hlsHandlers, youtube: youtubeCoordinator });
+const discoveryCoordinator = createDiscoveryCoordinator({
+  tabs: globalThis.chrome.tabs,
+  scripting: globalThis.chrome.scripting,
+  storageSession: globalThis.chrome.storage.session,
+  youtube: youtubeCoordinator,
+  now: () => Date.now(),
+});
+const router = createBackgroundRouter({
+  hls: hlsHandlers,
+  youtube: youtubeCoordinator,
+  discovery: discoveryCoordinator,
+});
 const handleTerminalDownload = createTerminalDownloadHandler(hlsHandlers);
 
 router.ready.catch(() => {
@@ -82,6 +94,17 @@ relocation.reconcile().catch(() => {
 });
 
 chrome.runtime.onMessage.addListener(createBackgroundMessageListener(router));
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  discoveryCoordinator.discard(tabId).catch(() => {
+    // Session state is also rejected if a stale tab id is requested later.
+  });
+});
+chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
+  if (typeof changeInfo?.url !== 'string') return;
+  discoveryCoordinator.discard(tabId).catch(() => {
+    // A later lookup validates the current page identity before restoring.
+  });
+});
 chrome.downloads.onChanged.addListener((delta) => {
   handleTerminalDownload(delta).catch(() => {
     // Tracking is intentionally retained so a later terminal event can retry.

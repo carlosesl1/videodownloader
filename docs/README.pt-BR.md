@@ -25,7 +25,10 @@ Se você recebeu o pacote distribuído já pronto, execute o launcher **dentro d
 
 1. Abra um vídeo público do YouTube que seja seu ou autorizado.
 2. Abra o popup, clique em **Buscar vídeos**, escolha a qualidade e clique em **Baixar**.
-3. O progresso permanece disponível ao fechar e reabrir o popup. Use **Cancelar** para interromper um trabalho em andamento.
+3. A busca em andamento, os vídeos encontrados, as qualidades inspecionadas e a
+   qualidade escolhida permanecem disponíveis ao fechar e reabrir o popup.
+4. O progresso do download também permanece disponível. Use **Cancelar** para
+   interromper um trabalho em andamento.
 
 ### Destino dos downloads
 

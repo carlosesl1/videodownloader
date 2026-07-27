@@ -1,5 +1,9 @@
-import { scanPage } from '../detection/scan-page.js';
 import { groupDirectVariants, normalizeCandidates } from '../detection/media-candidates.js';
+import {
+  DISCOVERY_ACTIONS,
+  DISCOVERY_PREFIX,
+  sanitizeDiscoverySnapshot,
+} from '../detection/discovery-protocol.js';
 import { buildDownloadFilename } from '../shared/filename.js';
 import { ACTIONS } from '../shared/messages.js';
 import {
@@ -264,6 +268,11 @@ export function unwrapYouTubeJob(response) {
   return value === null ? null : sanitizeYouTubeJobSnapshot(value);
 }
 
+function unwrapDiscovery(response) {
+  const value = unwrap(response, (candidate) => candidate === null || isObject(candidate));
+  return value === null ? null : sanitizeDiscoverySnapshot(value);
+}
+
 export function youtubeItem(formats, url) {
   const variants = formats.qualities.map((quality) => ({
     ...quality,
@@ -381,6 +390,8 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   if (!root || !announcer || !chromeApi) return;
 
   let state = initialState;
+  let activeTabId = null;
+  let discoveryItemIds = new Set();
 
   const draw = () => {
     renderPopup(root, state);
@@ -502,37 +513,129 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
+  async function queryActiveTab() {
+    if (typeof chromeApi.tabs?.query !== 'function') return null;
+    const tabs = await chromeApi.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    return Number.isInteger(tab?.id) ? tab : null;
+  }
+
+  async function applyDiscovery(snapshot) {
+    if (!snapshot || snapshot.tabId !== activeTabId) return;
+    if (snapshot.status === 'scanning') {
+      discoveryItemIds = new Set();
+      dispatch({ type: 'SCAN_STARTED' });
+      if (snapshot.kind === 'youtube') dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      return;
+    }
+    if (snapshot.status === 'error') {
+      discoveryItemIds = new Set();
+      dispatch({ type: 'SCAN_STARTED' });
+      if (snapshot.kind === 'youtube') dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      dispatch({ type: 'FAILED', code: snapshot.errorCode });
+      return;
+    }
+    if (snapshot.kind === 'youtube') {
+      const formats = unwrapYouTubeFormats({ ok: true, value: snapshot.result });
+      dispatch({
+        type: 'YOUTUBE_FORMATS_LOADED',
+        item: youtubeItem(formats, snapshot.mediaUrl),
+        target: snapshot.target,
+      });
+      discoveryItemIds = new Set(state.items.map((item) => item.id));
+      applyDiscoveryView(snapshot.view);
+      return;
+    }
+    const items = scanItems(snapshot.result);
+    dispatch({ type: 'SCAN_SUCCEEDED', items, target: snapshot.target });
+    discoveryItemIds = new Set(items.map((item) => item.id));
+    applyDiscoveryView(snapshot.view);
+    await reconcileOperations(items);
+  }
+
+  function applyDiscoveryView(view) {
+    for (const inspection of view?.inspections ?? []) {
+      const item = state.items.find((entry) => entry.id === inspection.id);
+      if (item?.kind !== 'hls') continue;
+      dispatch({
+        type: 'HLS_INSPECTED',
+        id: inspection.id,
+        variants: inspection.variants,
+        allowedOrigins: inspection.allowedOrigins,
+      });
+    }
+    for (const selection of view?.selections ?? []) {
+      const item = state.items.find((entry) => entry.id === selection.id);
+      if (!item || selection.selectedIndex >= (item.variants?.length ?? 0)) continue;
+      dispatch({
+        type: 'QUALITY_SELECTED',
+        id: selection.id,
+        selectedIndex: selection.selectedIndex,
+      });
+    }
+  }
+
+  function discoveryView() {
+    return {
+      selections: state.items
+        .filter((item) => (
+          discoveryItemIds.has(item.id)
+          && Number.isSafeInteger(item.selectedIndex)
+          && item.selectedIndex >= 0
+        ))
+        .map((item) => ({ id: item.id, selectedIndex: item.selectedIndex })),
+      inspections: state.items
+        .filter((item) => discoveryItemIds.has(item.id) && item.kind === 'hls' && item.inspected)
+        .map((item) => ({
+          id: item.id,
+          variants: item.variants,
+          allowedOrigins: item.allowedOrigins ?? [],
+        })),
+    };
+  }
+
+  async function persistDiscoveryView() {
+    if (!Number.isInteger(activeTabId)) return;
+    try {
+      await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: DISCOVERY_ACTIONS.UPDATE_VIEW,
+        payload: { tabId: activeTabId, view: discoveryView() },
+      });
+    } catch {
+      // The visible state remains usable; the next interaction can persist it again.
+    }
+  }
+
+  async function restoreDiscovery() {
+    try {
+      const tab = await queryActiveTab();
+      if (!tab) return;
+      activeTabId = tab.id;
+      const response = await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: DISCOVERY_ACTIONS.GET,
+        payload: { tabId: tab.id },
+      });
+      await applyDiscovery(unwrapDiscovery(response));
+    } catch {
+      // Discovery recovery is best-effort; durable downloads are restored separately.
+    }
+  }
+
   async function scan() {
     dispatch({ type: 'SCAN_STARTED' });
     try {
-      const tabs = await chromeApi.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs[0];
-      if (!Number.isInteger(tab?.id)) throw new Error('Aba ativa indisponível');
-      const youtubeUrl = canonicalYouTubePageUrl(tab.url);
-      if (youtubeUrl) {
-        dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
-        const response = await chromeApi.runtime.sendMessage({
-          target: 'background',
-          action: YOUTUBE_ACTIONS.LIST_FORMATS,
-          payload: { url: youtubeUrl },
-        });
-        const formats = unwrapYouTubeFormats(response);
-        dispatch({ type: 'YOUTUBE_FORMATS_LOADED', item: youtubeItem(formats, youtubeUrl), target: 'youtube.com' });
-        return;
-      }
-      const executions = await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: scanPage,
+      const tab = await queryActiveTab();
+      if (!tab) throw Object.assign(new Error('Aba ativa indisponível'), { code: 'SCAN_FAILED' });
+      activeTabId = tab.id;
+      if (canonicalYouTubePageUrl(tab.url)) dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      const response = await chromeApi.runtime.sendMessage({
+        target: 'background',
+        action: DISCOVERY_ACTIONS.START,
+        payload: { tabId: tab.id },
       });
-      const items = scanItems(executions?.[0]?.result);
-      let target = 'aba atual';
-      try {
-        target = httpUrl(tab.url).host;
-      } catch {
-        // Restricted pages are surfaced by executeScript when scanning is attempted.
-      }
-      dispatch({ type: 'SCAN_SUCCEEDED', items, target });
-      await reconcileOperations(items);
+      await applyDiscovery(unwrapDiscovery(response));
     } catch (error) {
       dispatch({ type: 'FAILED', code: error?.code ?? 'SCAN_FAILED' });
     }
@@ -555,6 +658,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
         variants: inspection.variants,
         allowedOrigins: grant.origins,
       });
+      await persistDiscoveryView();
     } catch (error) {
       dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'UNKNOWN', details: error?.details });
     }
@@ -683,6 +787,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     const select = event.target?.closest?.('[data-quality]');
     if (!select) return;
     dispatch({ type: 'QUALITY_SELECTED', id: select.dataset.quality, selectedIndex: Number(select.value) });
+    void persistDiscoveryView();
   });
 
   root.addEventListener('click', (event) => {
@@ -724,6 +829,16 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
 
   chromeApi.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === 'session') {
+      const discoveryChange = Number.isInteger(activeTabId)
+        ? changes[`${DISCOVERY_PREFIX}${activeTabId}`]
+        : null;
+      if (discoveryChange?.newValue) {
+        try {
+          void applyDiscovery(sanitizeDiscoverySnapshot(discoveryChange.newValue));
+        } catch {
+          // Corrupt storage data must not enter popup state.
+        }
+      }
       for (const [key, change] of Object.entries(changes)) {
         if (!key.startsWith(OPERATION_PREFIX) || !change?.newValue) continue;
         handleOperationRecord(key.slice(OPERATION_PREFIX.length), change.newValue);
@@ -753,10 +868,14 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   });
 
+  async function restorePopupState() {
+    await restoreDiscovery();
+    await Promise.all([restoreHlsOperations(), restoreRelocations()]);
+    await restoreYouTubeJob();
+  }
+
   draw();
-  void restoreHlsOperations();
-  void restoreRelocations();
-  void restoreYouTubeJob();
+  void restorePopupState();
 }
 
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined') bootPopup();

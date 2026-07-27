@@ -1,6 +1,7 @@
 import { normalizeJobView } from '../youtube/job-view.js';
 
 const ERROR_MESSAGES = Object.freeze({
+  SCAN_INTERRUPTED: 'A busca foi interrompida pelo navegador. Clique em Buscar novamente.',
   PERMISSION_DENIED: 'Autorize o acesso ao servidor de mídia para continuar.',
   BACKGROUND_PERMISSION_BUSY: 'A autorização expirou. Autorize o servidor de mídia novamente.',
   HLS_ENCRYPTED: 'Esta playlist usa criptografia não suportada.',

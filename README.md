@@ -26,6 +26,8 @@ when the user explicitly clicks **Buscar vídeos** ("Search videos").
   MPEG-TS segments with up to eight concurrent requests.
 - **Quality selection:** exposes HLS variants and public YouTube formats when
   available.
+- **Durable discovery:** an in-progress scan, its results, inspected HLS
+  variants and the selected quality are restored when the popup reopens.
 - **Durable progress:** closing and reopening the popup does not lose an active
   job's status.
 - **Unified destinations:** use a default Windows folder or ask where each

@@ -685,6 +685,16 @@ test('Chrome 116 getContexts skips an existing document and coalesces concurrent
   const creation = deferred();
   let contexts = [{ contextType: 'OFFSCREEN_DOCUMENT' }];
   globalThis.chrome = {
+    tabs: {
+      async get(tabId) { return { id: tabId, url: 'https://example.test/video' }; },
+      onRemoved: { addListener() {} },
+      onUpdated: { addListener() {} },
+    },
+    scripting: {
+      async executeScript() {
+        return [{ result: { pageTitle: 'Video', candidates: [] } }];
+      },
+    },
     downloads: {
       onChanged: { addListener(listener) { downloadListeners.push(listener); } },
       async search() { return []; },
