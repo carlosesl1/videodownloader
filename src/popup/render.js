@@ -49,13 +49,14 @@ function appendIdle(surface) {
   appendScanAction(surface, 'Buscar vídeos nesta página');
 }
 
-function appendScanning(surface) {
+function appendScanning(surface, state) {
+  const youtube = state.target === 'youtube.com';
   const panel = node('section', 'state-panel state-panel--scanning');
   panel.setAttribute('role', 'status');
   panel.append(
-    node('span', 'state-kicker', 'VARREDURA HÍBRIDA'),
-    node('h2', '', 'Analisando a página…'),
-    node('p', '', 'Verificando players e recursos já carregados.'),
+    node('span', 'state-kicker', youtube ? 'YOUTUBE DETECTADO' : 'VARREDURA HÍBRIDA'),
+    node('h2', '', youtube ? 'Vídeo do YouTube encontrado' : 'Analisando a página…'),
+    node('p', '', youtube ? state.message : 'Verificando players e recursos já carregados.'),
   );
   surface.append(panel);
 }
@@ -223,7 +224,7 @@ export function renderPopup(root, state) {
 
   const surface = node('main', 'surface');
   if (state.status === 'idle') appendIdle(surface);
-  else if (state.status === 'scanning') appendScanning(surface);
+  else if (state.status === 'scanning') appendScanning(surface, state);
   else if (state.status === 'results') appendResults(surface, state);
   else appendNoResults(surface, state);
 

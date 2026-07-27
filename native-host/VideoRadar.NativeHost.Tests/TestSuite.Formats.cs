@@ -13,6 +13,7 @@ internal static partial class TestSuite
         FormatCatalogFallsBackToWebmWithoutMp4AndM4a();
         MetadataArgumentsAreHardenedAndCanonical();
         YouTubeServiceCanonicalizesBeforeCallingRunner();
+        YouTubeServiceCachesSuccessfulCatalogsAndRetriesFailures();
         YouTubeServiceDoesNotRunForInvalidUrl();
         YouTubeServiceDoesNotLeakYtDlpStandardError();
     }
@@ -118,6 +119,37 @@ internal static partial class TestSuite
         Equal(0, runner.CallCount);
     }
 
+    private static void YouTubeServiceCachesSuccessfulCatalogsAndRetriesFailures()
+    {
+        var successfulRunner = new FakeProcessRunner(
+            new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
+        var service = new YouTubeService("tools", successfulRunner);
+
+        var first = service.ListFormatsAsync(
+            "https://www.youtube.com/shorts/jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult();
+        var second = service.ListFormatsAsync(
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(1, successfulRunner.CallCount);
+        Equal(first, second);
+
+        var retryRunner = new FakeProcessRunner(call => call == 1
+            ? new VideoRadar.NativeHost.Processes.ProcessResult(1, string.Empty, "offline")
+            : new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
+        var retryService = new YouTubeService("tools", retryRunner);
+        Throws<InvalidOperationException>(() => retryService.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult());
+
+        var recovered = retryService.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult();
+        Equal("jNQXAC9IVRw", recovered.VideoId);
+        Equal(2, retryRunner.CallCount);
+    }
+
     private static void YouTubeServiceDoesNotLeakYtDlpStandardError()
     {
         var runner = new FakeProcessRunner(new VideoRadar.NativeHost.Processes.ProcessResult(1, string.Empty, "secret cookie and raw diagnostics"));
@@ -138,8 +170,20 @@ internal static partial class TestSuite
 
     private static string ReadFixture() => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "youtube-info.json"));
 
-    private sealed class FakeProcessRunner(VideoRadar.NativeHost.Processes.ProcessResult result) : IProcessRunner
+    private sealed class FakeProcessRunner : IProcessRunner
     {
+        private readonly Func<int, VideoRadar.NativeHost.Processes.ProcessResult> result;
+
+        public FakeProcessRunner(VideoRadar.NativeHost.Processes.ProcessResult result)
+            : this(_ => result)
+        {
+        }
+
+        public FakeProcessRunner(Func<int, VideoRadar.NativeHost.Processes.ProcessResult> result)
+        {
+            this.result = result;
+        }
+
         public int CallCount { get; private set; }
         public string Executable { get; private set; } = string.Empty;
         public IReadOnlyList<string> Arguments { get; private set; } = [];
@@ -149,7 +193,7 @@ internal static partial class TestSuite
             CallCount++;
             Executable = executable;
             Arguments = arguments;
-            return Task.FromResult(result);
+            return Task.FromResult(result(CallCount));
         }
     }
 }

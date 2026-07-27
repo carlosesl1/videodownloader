@@ -510,6 +510,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       if (!Number.isInteger(tab?.id)) throw new Error('Aba ativa indisponível');
       const youtubeUrl = canonicalYouTubePageUrl(tab.url);
       if (youtubeUrl) {
+        dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
         const response = await chromeApi.runtime.sendMessage({
           target: 'background',
           action: YOUTUBE_ACTIONS.LIST_FORMATS,

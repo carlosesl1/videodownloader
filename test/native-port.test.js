@@ -16,8 +16,9 @@ function fakePort() {
 
 function clock() {
   const timers = []; return {
-    set(fn) { const timer = { fn, active: true }; timers.push(timer); return timer; },
+    set(fn, delay) { const timer = { fn, delay, active: true }; timers.push(timer); return timer; },
     clear(timer) { timer.active = false; }, fire() { for (const timer of timers) if (timer.active) { timer.active = false; timer.fn(); } },
+    get delays() { return timers.map(({ delay }) => delay); },
   };
 }
 
@@ -146,8 +147,30 @@ test('correlaciona movimentação e ignora resposta de tipo errado', async () =>
 test('timeout não tenta novamente e disconnect rejeita pendências e publica evento interno uma vez', async () => {
   const port = fakePort(); const timers = clock(); const events = []; const client = createNativePortClient({ connectNative: () => port, setTimeoutFn: timers.set, clearTimeoutFn: timers.clear, onEvent: (event) => events.push(event) });
   const timed = client.request(HOST_COMMANDS.LIST_FORMATS, { url: 'https://youtu.be/jNQXAC9IVRw' });
+  assert.deepEqual(timers.delays, [45_000]);
   timers.fire(); await assert.rejects(timed, /tempo/); assert.equal(port.messages.length, 1);
   const pending = client.request(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER); port.disconnect();
   await assert.rejects(pending, /conexão/i); assert.deepEqual(events, [{ type: 'nativeDisconnected' }]); assert.equal(client.connected, false);
   port.disconnect(); assert.equal(events.length, 1);
+});
+
+test('preserva o código seguro devolvido pelo auxiliar', async () => {
+  const port = fakePort();
+  const client = createNativePortClient({ connectNative: () => port, onEvent() {} });
+  const request = client.request(HOST_COMMANDS.LIST_FORMATS, {
+    url: 'https://youtu.be/jNQXAC9IVRw',
+  });
+  port.emit({
+    type: 'jobFailed',
+    requestId: port.messages[0].requestId,
+    code: 'YOUTUBE_METADATA_TIMEOUT',
+    message: 'O YouTube demorou demais para responder.',
+    details: { operation: 'listFormats' },
+  });
+
+  await assert.rejects(request, (error) => {
+    assert.equal(error.code, 'YOUTUBE_METADATA_TIMEOUT');
+    assert.equal(error.message, 'O YouTube demorou demais para responder.');
+    return true;
+  });
 });

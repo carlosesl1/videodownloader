@@ -48,6 +48,11 @@ test('moves from idle through scanning to results and empty', () => {
   assert.equal(scanning.status, 'scanning');
   assert.match(scanning.message, /Analisando/);
 
+  const youtubeLookup = reduceState(scanning, { type: 'YOUTUBE_LOOKUP_STARTED' });
+  assert.equal(youtubeLookup.status, 'scanning');
+  assert.equal(youtubeLookup.target, 'youtube.com');
+  assert.match(youtubeLookup.message, /qualidades/i);
+
   const results = reduceState(scanning, {
     type: 'SCAN_SUCCEEDED',
     items: [directItem],

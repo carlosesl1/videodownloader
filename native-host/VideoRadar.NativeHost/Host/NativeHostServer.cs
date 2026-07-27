@@ -18,13 +18,16 @@ public sealed class NativeHostServer(
     IUpdatePolicy updatePolicy,
     IFolderPicker folderPicker,
     string fallbackDownloadFolder,
-    IDownloadFileMover fileMover) : INativeHostServer
+    IDownloadFileMover fileMover,
+    TimeSpan? metadataTimeout = null) : INativeHostServer
 {
     private const string UnknownRequestId = "unknown";
+    private static readonly TimeSpan DefaultMetadataTimeout = TimeSpan.FromSeconds(40);
     private readonly IFolderPicker folderPicker = folderPicker ?? throw new ArgumentNullException(nameof(folderPicker));
     private readonly IDownloadFileMover fileMover = fileMover ?? throw new ArgumentNullException(nameof(fileMover));
     private readonly string fallbackDownloadFolder =
         DownloadPaths.NormalizeDestination(fallbackDownloadFolder, nameof(fallbackDownloadFolder));
+    private readonly TimeSpan metadataTimeout = ValidateMetadataTimeout(metadataTimeout);
     private readonly object stateLock = new();
     private ActiveDownload? activeDownload;
     private JobSnapshot? lastSnapshot;
@@ -148,15 +151,30 @@ public sealed class NativeHostServer(
         if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
             throw new CommandFailureException("INVALID_URL", "URL do YouTube inválida.");
 
-        await EnsureUpdateCheckedAsync(cancellationToken);
         FormatCatalog catalog;
+        using var metadataCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        metadataCancellation.CancelAfter(metadataTimeout);
         try
         {
-            catalog = await youtubeService.ListFormatsAsync(canonicalUrl, cancellationToken);
+            catalog = await ListFormatsWithRecoveryAsync(
+                canonicalUrl,
+                metadataCancellation.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            await WriteFailureAsync(
+                command.RequestId,
+                "YOUTUBE_METADATA_TIMEOUT",
+                "O YouTube demorou demais para responder.",
+                command.Type,
+                null,
+                cancellationToken);
+            return;
         }
         catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException)
         {
@@ -399,7 +417,6 @@ public sealed class NativeHostServer(
     {
         try
         {
-            await EnsureUpdateCheckedAsync(job.Cancellation.Token);
             var result = await youtubeService.StartDownloadAsync(
                 job.JobId,
                 url,
@@ -512,6 +529,30 @@ public sealed class NativeHostServer(
         {
             // Update failures are intentionally non-blocking for YouTube commands.
         }
+    }
+
+    private async Task<FormatCatalog> ListFormatsWithRecoveryAsync(
+        string canonicalUrl,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await youtubeService.ListFormatsAsync(canonicalUrl, cancellationToken);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException)
+        {
+            await EnsureUpdateCheckedAsync(cancellationToken);
+            return await youtubeService.ListFormatsAsync(canonicalUrl, cancellationToken);
+        }
+    }
+
+    private static TimeSpan ValidateMetadataTimeout(TimeSpan? value)
+    {
+        var timeout = value ?? DefaultMetadataTimeout;
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(5))
+            throw new ArgumentOutOfRangeException(nameof(value));
+        return timeout;
     }
 
     private JobSnapshot? CurrentSnapshot()

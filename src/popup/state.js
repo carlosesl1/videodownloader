@@ -18,6 +18,7 @@ const ERROR_MESSAGES = Object.freeze({
   NATIVE_JOB_MISMATCH: 'O download aberto não corresponde a esta solicitação. Tente novamente.',
   YOUTUBE_BUSY: 'Aguarde o download do YouTube em andamento terminar.',
   YOUTUBE_METADATA: 'Não foi possível ler as qualidades deste vídeo do YouTube. Tente novamente.',
+  YOUTUBE_METADATA_TIMEOUT: 'O YouTube demorou demais para responder. Tente novamente.',
   YOUTUBE_DOWNLOAD: 'Não foi possível iniciar o download do YouTube. Tente novamente.',
   INVALID_URL: 'Esta URL do YouTube não é válida. Abra um vídeo e tente novamente.',
   DESTINATION_INVALID: 'A pasta de downloads não é válida. Configure outra pasta.',
@@ -251,6 +252,18 @@ export function reduceState(state, event) {
       busyId: null,
       pendingPermission: null,
       message: 'Analisando a página…',
+    };
+  }
+
+  if (event.type === 'YOUTUBE_LOOKUP_STARTED') {
+    return {
+      ...state,
+      status: 'scanning',
+      target: 'youtube.com',
+      items: [],
+      busyId: null,
+      pendingPermission: null,
+      message: 'Carregando qualidades do YouTube…',
     };
   }
 

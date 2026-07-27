@@ -6,6 +6,7 @@ namespace VideoRadar.NativeHost.YouTube;
 
 public sealed partial class YouTubeService : IYouTubeService
 {
+    private const int MaximumCachedCatalogs = 16;
     private const string MetadataLookupError = "Unable to retrieve YouTube video metadata.";
     private const string DownloadError = "Unable to download the YouTube video.";
     private const string InvalidOutputError = "The downloaded file was not reported safely.";
@@ -13,6 +14,9 @@ public sealed partial class YouTubeService : IYouTubeService
     private readonly IProcessRunner processRunner;
     private readonly IDownloadPathsFactory downloadPathsFactory;
     private readonly object stateLock = new();
+    private readonly Dictionary<string, Lazy<Task<FormatCatalog>>> catalogCache =
+        new(StringComparer.Ordinal);
+    private readonly Queue<string> catalogOrder = new();
     private ActiveJob? activeJob;
     private JobSnapshot? snapshot;
 
@@ -37,11 +41,37 @@ public sealed partial class YouTubeService : IYouTubeService
         this.downloadPathsFactory = downloadPathsFactory;
     }
 
-    public async Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
+    public Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
     {
         if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
             throw new InvalidDataException("Invalid YouTube URL.");
 
+        Lazy<Task<FormatCatalog>> lookup;
+        lock (stateLock)
+        {
+            if (!catalogCache.TryGetValue(canonicalUrl, out lookup!))
+            {
+                lookup = new Lazy<Task<FormatCatalog>>(
+                    () => LoadCatalogAsync(canonicalUrl, cancellationToken),
+                    LazyThreadSafetyMode.ExecutionAndPublication);
+                catalogCache.Add(canonicalUrl, lookup);
+                catalogOrder.Enqueue(canonicalUrl);
+                while (catalogCache.Count > MaximumCachedCatalogs)
+                {
+                    var oldest = catalogOrder.Dequeue();
+                    if (!string.Equals(oldest, canonicalUrl, StringComparison.Ordinal))
+                        catalogCache.Remove(oldest);
+                }
+            }
+        }
+
+        return ObserveCatalogAsync(canonicalUrl, lookup);
+    }
+
+    private async Task<FormatCatalog> LoadCatalogAsync(
+        string canonicalUrl,
+        CancellationToken cancellationToken)
+    {
         var result = await processRunner.RunAsync(
             Path.Combine(tools, "yt-dlp.exe"),
             YtDlpArguments.Metadata(tools, canonicalUrl),
@@ -50,6 +80,33 @@ public sealed partial class YouTubeService : IYouTubeService
 
         if (result.ExitCode != 0) throw new InvalidOperationException(MetadataLookupError);
         return FormatCatalog.Parse(result.StandardOutput);
+    }
+
+    private async Task<FormatCatalog> ObserveCatalogAsync(
+        string canonicalUrl,
+        Lazy<Task<FormatCatalog>> lookup)
+    {
+        try
+        {
+            return await lookup.Value;
+        }
+        catch
+        {
+            lock (stateLock)
+            {
+                if (catalogCache.TryGetValue(canonicalUrl, out var current)
+                    && ReferenceEquals(current, lookup))
+                {
+                    catalogCache.Remove(canonicalUrl);
+                    var retained = catalogOrder
+                        .Where(url => !string.Equals(url, canonicalUrl, StringComparison.Ordinal))
+                        .ToArray();
+                    catalogOrder.Clear();
+                    foreach (var url in retained) catalogOrder.Enqueue(url);
+                }
+            }
+            throw;
+        }
     }
 
     public async Task<JobResult> StartDownloadAsync(

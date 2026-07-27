@@ -12,7 +12,8 @@ const RESPONSE_TYPES = Object.freeze({
   [HOST_COMMANDS.MOVE_DOWNLOADED_FILE]: new Set([HOST_EVENTS.FILE_MOVED]),
   [HOST_COMMANDS.REVEAL_DOWNLOADED_FILE]: new Set([HOST_EVENTS.FILE_REVEALED]),
 });
-const TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
+const FORMAT_TIMEOUT_MS = 45_000;
 const DISCONNECTED = 'A conexão com o host nativo foi encerrada.';
 const TIMED_OUT = 'A conexão com o host nativo excedeu o tempo esperado.';
 
@@ -63,7 +64,10 @@ export function createNativePortClient({
     try { event = assertHostEvent(raw); } catch { onEvent({ type: 'nativeProtocolError' }); return; }
     const current = pending.get(event.requestId);
     if (current && event.type === HOST_EVENTS.JOB_FAILED) {
-      settle(event.requestId, current.reject, new Error(event.message));
+      const error = new Error(event.message);
+      error.code = event.code;
+      error.details = event.details;
+      settle(event.requestId, current.reject, error);
       return;
     }
     if (current && current.expected(event)) {
@@ -98,7 +102,7 @@ export function createNativePortClient({
         if (!current) return;
         pending.delete(requestId);
         reject(new Error(TIMED_OUT));
-      }, TIMEOUT_MS);
+      }, type === HOST_COMMANDS.LIST_FORMATS ? FORMAT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
       pending.set(requestId, {
         expected(event) {
           if (!RESPONSE_TYPES[type]?.has(event.type)) return false;

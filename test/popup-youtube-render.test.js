@@ -137,6 +137,19 @@ function youtubeItem(overrides = {}) {
 test.beforeEach(() => installDocument());
 test.afterEach(() => { globalThis.document = originalDocument; });
 
+test('shows immediately that YouTube was detected while qualities load', () => {
+  const root = new FakeElement('div');
+  renderPopup(root, {
+    status: 'scanning',
+    target: 'youtube.com',
+    items: [],
+    message: 'Carregando qualidades do YouTube…',
+  });
+
+  assert.equal(one(root, 'h2').textContent, 'Vídeo do YouTube encontrado');
+  assert.match(one(root, '.state-panel--scanning').textContent, /Carregando qualidades/);
+});
+
 test('renders ready YouTube variants with selected output format and download action', () => {
   const root = renderItem(youtubeItem());
 

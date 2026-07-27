@@ -16,7 +16,9 @@ internal static partial class TestSuite
     private static void ServerTests()
     {
         NativeHostServerRunsTheFramedProtocol().GetAwaiter().GetResult();
-        NativeHostServerEmitsPersistentJobBeforeBlockedUpdateAndCancelsIt().GetAwaiter().GetResult();
+        NativeHostServerUpdatesOnlyAfterMetadataFailureAndRetries().GetAwaiter().GetResult();
+        NativeHostServerCancelsMetadataBeforeTheBrowserDeadline().GetAwaiter().GetResult();
+        NativeHostServerStartsAndCancelsWithoutRunningUpdater().GetAwaiter().GetResult();
         NativeHostServerRejectsBusyAndCancelsTheCurrentJob().GetAwaiter().GetResult();
         NativeHostServerCancelsAndAwaitsTheJobAtEof().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidPayloadsWithoutStopping().GetAwaiter().GetResult();
@@ -76,7 +78,7 @@ internal static partial class TestSuite
         Equal("Me at the zoo", formats.GetProperty("title").GetString());
         Equal(19d, formats.GetProperty("durationSeconds").GetDouble());
         Equal(1080, formats.GetProperty("qualities")[0].GetProperty("height").GetInt32());
-        Equal(1, updater.CallCount);
+        Equal(0, updater.CallCount);
         Equal(1, service.ListCallCount);
 
         var emptyJob = Message(messages, "ready", "r-empty");
@@ -151,12 +153,87 @@ internal static partial class TestSuite
         Equal<string?>(null, service.DestinationFolders.Single());
     }
 
-    private static async Task NativeHostServerEmitsPersistentJobBeforeBlockedUpdateAndCancelsIt()
+    private static async Task NativeHostServerUpdatesOnlyAfterMetadataFailureAndRetries()
+    {
+        using var input = new MemoryStream(FrameCommands(
+            Command("listFormats", "r-formats-retry", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}")));
+        using var output = new MemoryStream();
+        var updater = new FakeUpdatePolicy();
+        var service = new FakeYouTubeService
+        {
+            ListHandler = (call, _, _) => call == 1
+                ? Task.FromException<FormatCatalog>(new InvalidOperationException("outdated extractor"))
+                : Task.FromResult(FakeYouTubeService.Catalog())
+        };
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            updater,
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
+
+        _ = Message(ReadFrames(output), "formats", "r-formats-retry");
+        Equal(2, service.ListCallCount);
+        Equal(1, updater.CallCount);
+    }
+
+    private static async Task NativeHostServerCancelsMetadataBeforeTheBrowserDeadline()
+    {
+        using var input = new MemoryStream(FrameCommands(
+            Command("listFormats", "r-formats-timeout", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}")));
+        using var output = new MemoryStream();
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var updater = new FakeUpdatePolicy();
+        var service = new FakeYouTubeService
+        {
+            ListHandler = async (_, _, cancellationToken) =>
+            {
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    throw new InvalidOperationException("unreachable");
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled.TrySetResult();
+                    throw;
+                }
+            }
+        };
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            updater,
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover(),
+            metadataTimeout: TimeSpan.FromMilliseconds(20)).RunAsync(CancellationToken.None);
+
+        var failure = Message(ReadFrames(output), "jobFailed", "r-formats-timeout");
+        Equal("YOUTUBE_METADATA_TIMEOUT", failure.GetProperty("code").GetString());
+        True(cancelled.Task.IsCompleted, "Metadata extraction was not cancelled.");
+        Equal(0, updater.CallCount);
+    }
+
+    private static async Task NativeHostServerStartsAndCancelsWithoutRunningUpdater()
     {
         using var input = new AppendableInputStream();
         using var output = new SignallingOutputStream();
         var updater = new BlockingUpdatePolicy();
+        var downloadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var service = new FakeYouTubeService();
+        service.StartHandler = async (jobId, _, height, _, _, cancellationToken) =>
+        {
+            service.Snapshot = new JobSnapshot(
+                jobId, "jNQXAC9IVRw", "Me at the zoo", height,
+                "video", 1, null, null);
+            downloadStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        };
         var server = new NativeHostServer(
             new NativeMessageChannel(input, output),
             service,
@@ -173,22 +250,21 @@ internal static partial class TestSuite
         var jobId = started.GetProperty("jobId").GetString()!;
         True(started.GetProperty("job").GetProperty("stage").GetString() == "preparing", "jobStarted did not persist the preparing snapshot.");
 
-        await updater.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await downloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         input.Append(FrameCommands(Command("getJob", "r-persisted", "{}")));
         await output.WaitForMessageAsync("ready", "r-persisted").WaitAsync(TimeSpan.FromSeconds(5));
         var persisted = Message(ReadFrames(output), "ready", "r-persisted");
         Equal(jobId, persisted.GetProperty("job").GetProperty("jobId").GetString());
-        Equal("preparing", persisted.GetProperty("job").GetProperty("stage").GetString());
+        Equal("video", persisted.GetProperty("job").GetProperty("stage").GetString());
 
         input.Append(FrameCommands(Command("cancelDownload", "r-cancel-blocked", JsonSerializer.Serialize(new { jobId }))));
-        await updater.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await output.WaitForMessageAsync("jobCancelled", "r-blocked").WaitAsync(TimeSpan.FromSeconds(5));
         input.Complete();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Equal(1, updater.CallCount);
+        Equal(0, updater.CallCount);
         Equal(1, service.CancelCallCount);
-        Equal(0, service.StartCallCount);
+        Equal(1, service.StartCallCount);
         Equal(jobId, Message(ReadFrames(output), "jobCancelled", "r-blocked").GetProperty("jobId").GetString());
     }
 
@@ -796,6 +872,7 @@ internal static partial class TestSuite
         public int StartCallCount { get; private set; }
         public int CancelCallCount { get; private set; }
         public Exception? ListError { get; init; }
+        public Func<int, string, CancellationToken, Task<FormatCatalog>>? ListHandler { get; init; }
         public JobSnapshot? Snapshot { get; set; }
         public List<string?> DestinationFolders { get; } = [];
         public Func<string, string, int, string?, Func<JobProgress, Task>, CancellationToken, Task<JobResult>>? StartHandler { get; set; }
@@ -803,13 +880,17 @@ internal static partial class TestSuite
         public Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
         {
             ListCallCount++;
+            if (ListHandler is not null) return ListHandler(ListCallCount, url, cancellationToken);
             if (ListError is not null) throw ListError;
-            return Task.FromResult(new FormatCatalog(
+            return Task.FromResult(Catalog());
+        }
+
+        public static FormatCatalog Catalog() =>
+            new(
                 "jNQXAC9IVRw",
                 "Me at the zoo",
                 19,
-                [new QualityOption(1080, "1080p", "MP4", false), new QualityOption(720, "720p", "MP4", false)]));
-        }
+                [new QualityOption(1080, "1080p", "MP4", false), new QualityOption(720, "720p", "MP4", false)]);
 
         public Task<JobResult> StartDownloadAsync(
             string jobId,
