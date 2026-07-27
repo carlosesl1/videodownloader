@@ -1,0 +1,3 @@
+# Test fixtures have byte-exact assertions and must not be rewritten by
+# Windows checkout settings.
+test/fixtures/** text eol=lf
