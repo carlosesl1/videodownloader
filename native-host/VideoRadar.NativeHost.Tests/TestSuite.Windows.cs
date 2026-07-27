@@ -30,10 +30,31 @@ internal static partial class TestSuite
         Equal(foregroundRoot, api.LastRestoredWindow);
         Equal(foregroundRoot, api.LastForegroundWindow);
         Equal(foregroundRoot, api.LastRaisedWindow);
+
+        var browserWindow = new IntPtr(401);
+        var explorerWindow = new IntPtr(402);
+        var blockedApi = new FakeWindowApi
+        {
+            ForegroundWindow = browserWindow,
+            DirectActivationSucceeds = false
+        };
+        blockedApi.ValidWindows.UnionWith([browserWindow, explorerWindow]);
+
+        new DialogOwnerWindow(blockedApi).Activate(explorerWindow);
+
+        Equal(1, blockedApi.AttachedActivationCount);
+        Equal(explorerWindow, blockedApi.ForegroundWindow);
     }
 
     private static void ExplorerFileRevealerTests()
     {
+        True(
+            WindowsFileUrl.TryConvert(
+                "file:///C:/Users/Carlos/Documents/Extens%E3o%20Chrome/Video%20Radar",
+                out var decodedFolder),
+            "Windows Shell file URL was not converted.");
+        Equal(@"C:\Users\Carlos\Documents\Extensão Chrome\Video Radar", decodedFolder);
+
         var explorerWindow = new IntPtr(301);
         var windowApi = new FakeWindowApi();
         windowApi.ValidWindows.Add(explorerWindow);
@@ -62,7 +83,9 @@ internal static partial class TestSuite
     {
         public HashSet<IntPtr> ValidWindows { get; } = [];
         public Dictionary<IntPtr, IntPtr> RootOwners { get; } = [];
-        public IntPtr ForegroundWindow { get; init; }
+        public IntPtr ForegroundWindow { get; set; }
+        public bool DirectActivationSucceeds { get; init; } = true;
+        public int AttachedActivationCount { get; private set; }
         public IntPtr LastRestoredWindow { get; private set; }
         public IntPtr LastForegroundWindow { get; private set; }
         public IntPtr LastRaisedWindow { get; private set; }
@@ -76,9 +99,19 @@ internal static partial class TestSuite
 
         public void Restore(IntPtr window) => LastRestoredWindow = window;
 
-        public void SetForeground(IntPtr window) => LastForegroundWindow = window;
+        public void SetForeground(IntPtr window)
+        {
+            LastForegroundWindow = window;
+            if (DirectActivationSucceeds) ForegroundWindow = window;
+        }
 
         public void Raise(IntPtr window) => LastRaisedWindow = window;
+
+        public void AttachToForegroundAndActivate(IntPtr window)
+        {
+            AttachedActivationCount++;
+            ForegroundWindow = window;
+        }
     }
 
     private sealed class FakeExplorerShell : IExplorerShell

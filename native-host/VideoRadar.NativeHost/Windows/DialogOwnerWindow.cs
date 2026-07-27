@@ -10,6 +10,7 @@ internal interface IWindowApi
     void Restore(IntPtr window);
     void SetForeground(IntPtr window);
     void Raise(IntPtr window);
+    void AttachToForegroundAndActivate(IntPtr window);
 }
 
 internal sealed class DialogOwnerWindow(IWindowApi api)
@@ -30,6 +31,8 @@ internal sealed class DialogOwnerWindow(IWindowApi api)
         api.Restore(owner);
         api.Raise(owner);
         api.SetForeground(owner);
+        if (api.GetForegroundWindow() != owner)
+            api.AttachToForegroundAndActivate(owner);
     }
 
     private IntPtr Normalize(IntPtr window)
@@ -64,6 +67,38 @@ internal sealed class User32WindowApi : IWindowApi
     public void Raise(IntPtr window) =>
         _ = NativeMethods.BringWindowToTop(window);
 
+    public void AttachToForegroundAndActivate(IntPtr window)
+    {
+        var foreground = NativeMethods.GetForegroundWindow();
+        var currentThread = NativeMethods.GetCurrentThreadId();
+        var foregroundThread = NativeMethods.GetWindowThreadProcessId(
+            foreground,
+            IntPtr.Zero);
+        var attached = foreground != IntPtr.Zero
+            && foregroundThread != 0
+            && foregroundThread != currentThread
+            && NativeMethods.AttachThreadInput(
+                currentThread,
+                foregroundThread,
+                attach: true);
+
+        try
+        {
+            _ = NativeMethods.BringWindowToTop(window);
+            _ = NativeMethods.SetForegroundWindow(window);
+        }
+        finally
+        {
+            if (attached)
+            {
+                _ = NativeMethods.AttachThreadInput(
+                    currentThread,
+                    foregroundThread,
+                    attach: false);
+            }
+        }
+    }
+
     private static class NativeMethods
     {
         [DllImport("user32.dll")]
@@ -91,5 +126,20 @@ internal sealed class User32WindowApi : IWindowApi
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool BringWindowToTop(IntPtr window);
+
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        internal static extern uint GetWindowThreadProcessId(
+            IntPtr window,
+            IntPtr processId);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool AttachThreadInput(
+            uint attachThread,
+            uint attachToThread,
+            [MarshalAs(UnmanagedType.Bool)] bool attach);
     }
 }

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace VideoRadar.NativeHost.Windows;
 
@@ -99,7 +100,7 @@ internal sealed class WindowsExplorerShell : IExplorerShell
                     if (windowObject is null) continue;
                     dynamic window = windowObject;
                     var location = Convert.ToString(window.LocationURL);
-                    if (!TryGetFolderPath(location, out string windowFolder)
+                    if (!WindowsFileUrl.TryConvert(location, out string windowFolder)
                         || !string.Equals(
                             NormalizeFolder(windowFolder),
                             NormalizeFolder(folder),
@@ -132,20 +133,6 @@ internal sealed class WindowsExplorerShell : IExplorerShell
         return IntPtr.Zero;
     }
 
-    private static bool TryGetFolderPath(string? location, out string folder)
-    {
-        folder = string.Empty;
-        if (string.IsNullOrWhiteSpace(location)
-            || !Uri.TryCreate(location, UriKind.Absolute, out var uri)
-            || !uri.IsFile)
-        {
-            return false;
-        }
-
-        folder = uri.LocalPath;
-        return Path.IsPathFullyQualified(folder);
-    }
-
     private static string NormalizeFolder(string folder) =>
         Path.GetFullPath(folder).TrimEnd(
             Path.DirectorySeparatorChar,
@@ -171,5 +158,36 @@ internal sealed class WindowsExplorerShell : IExplorerShell
         IntPtr folder,
         uint itemCount,
         IntPtr items,
+        uint flags);
+}
+
+internal static class WindowsFileUrl
+{
+    private const int MaximumPathLength = 32768;
+
+    public static bool TryConvert(string? location, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(location)
+            || !location.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+            || !OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var buffer = new StringBuilder(MaximumPathLength);
+        var length = (uint)buffer.Capacity;
+        var result = PathCreateFromUrl(location, buffer, ref length, 0);
+        if (result < 0) return false;
+
+        path = buffer.ToString();
+        return Path.IsPathFullyQualified(path);
+    }
+
+    [DllImport("shlwapi.dll", EntryPoint = "PathCreateFromUrlW", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int PathCreateFromUrl(
+        string url,
+        StringBuilder path,
+        ref uint pathLength,
         uint flags);
 }
