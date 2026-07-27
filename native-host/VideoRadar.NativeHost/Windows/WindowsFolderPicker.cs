@@ -14,14 +14,22 @@ public sealed class WindowsFolderPicker : IFolderPicker
     private const uint SigdnFileSystemPath = 0x80058000;
     private const int ErrorCancelled = unchecked((int)0x800704C7);
     private readonly IntPtr parentWindow;
+    private readonly DialogOwnerWindow dialogOwner;
 
     public WindowsFolderPicker(IntPtr parentWindow)
+        : this(parentWindow, new DialogOwnerWindow(new User32WindowApi()))
+    {
+    }
+
+    internal WindowsFolderPicker(IntPtr parentWindow, DialogOwnerWindow dialogOwner)
     {
         this.parentWindow = parentWindow;
+        this.dialogOwner = dialogOwner;
     }
 
     public Task<string?> PickAsync(CancellationToken cancellationToken)
     {
+        var ownerWindow = dialogOwner.Resolve(parentWindow);
         var completion = new TaskCompletionSource<string?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var cancellationState = new DialogCancellationState();
@@ -41,8 +49,9 @@ public sealed class WindowsFolderPicker : IFolderPicker
             {
                 try
                 {
+                    dialogOwner.Activate(ownerWindow);
                     completion.TrySetResult(ShowDialog(
-                        parentWindow,
+                        ownerWindow,
                         cancellationToken,
                         cancellationState,
                         cancellationRegistration));
