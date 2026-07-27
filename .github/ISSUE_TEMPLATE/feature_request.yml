@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement within the project's responsible-use scope
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What authorized-use problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: This request does not require DRM bypass, credentials, cookies, private-content access or evasion of platform controls.
+          required: true

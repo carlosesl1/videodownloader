@@ -2,6 +2,24 @@
   "name": "video-radar-extension",
   "version": "1.0.0",
   "private": true,
+  "description": "On-demand Chromium extension for authorized direct, HLS and public YouTube video downloads.",
+  "license": "MIT",
+  "author": "Carlos (carlosesl1)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/carlosesl1/videodownloader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/carlosesl1/videodownloader/issues"
+  },
+  "homepage": "https://github.com/carlosesl1/videodownloader#readme",
+  "keywords": [
+    "chrome-extension",
+    "manifest-v3",
+    "video-downloader",
+    "hls",
+    "native-messaging"
+  ],
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",

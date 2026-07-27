@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem without sharing private media data
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use only authorized media. Remove signed URLs, tokens, cookies, credentials and personal information.
+  - type: dropdown
+    id: media
+    attributes:
+      label: Media type
+      options:
+        - Direct file (.mp4, .webm, .mov)
+        - HLS (.m3u8)
+        - Public YouTube video
+        - Native helper or installation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 140 on Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a public test page or sanitized description.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Responsible-use confirmation
+      options:
+        - label: I tested only with media I own or am authorized to download.
+          required: true
