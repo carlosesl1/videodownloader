@@ -8,6 +8,7 @@ internal static partial class TestSuite
         ProtocolVersionTest();
         NativeInvocationParserTest();
         DialogOwnerWindowTests();
+        ExplorerFileRevealerTests();
         HostExecutableTest();
         HostExecutableRejectsInvalidNativeInvocationTest();
         DotnetWrapperForwardsInfoArgumentsTest();

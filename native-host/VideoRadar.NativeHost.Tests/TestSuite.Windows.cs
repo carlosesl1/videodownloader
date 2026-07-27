@@ -32,6 +32,32 @@ internal static partial class TestSuite
         Equal(foregroundRoot, api.LastRaisedWindow);
     }
 
+    private static void ExplorerFileRevealerTests()
+    {
+        var explorerWindow = new IntPtr(301);
+        var windowApi = new FakeWindowApi();
+        windowApi.ValidWindows.Add(explorerWindow);
+        var shell = new FakeExplorerShell();
+        shell.Windows.Enqueue(IntPtr.Zero);
+        shell.Windows.Enqueue(explorerWindow);
+        var delayCount = 0;
+        var revealer = new ExplorerFileRevealer(
+            shell,
+            new DialogOwnerWindow(windowApi),
+            _ => delayCount++);
+        const string path = @"C:\Users\Carlos\Downloads\Video Radar\video.mp4";
+
+        revealer.Reveal(path);
+
+        Equal(path, shell.OpenedPath);
+        Equal(@"C:\Users\Carlos\Downloads\Video Radar", shell.SearchedFolders[0]);
+        Equal(@"C:\Users\Carlos\Downloads\Video Radar", shell.SearchedFolders[1]);
+        Equal(1, delayCount);
+        Equal(explorerWindow, windowApi.LastRestoredWindow);
+        Equal(explorerWindow, windowApi.LastForegroundWindow);
+        Equal(explorerWindow, windowApi.LastRaisedWindow);
+    }
+
     private sealed class FakeWindowApi : IWindowApi
     {
         public HashSet<IntPtr> ValidWindows { get; } = [];
@@ -53,5 +79,20 @@ internal static partial class TestSuite
         public void SetForeground(IntPtr window) => LastForegroundWindow = window;
 
         public void Raise(IntPtr window) => LastRaisedWindow = window;
+    }
+
+    private sealed class FakeExplorerShell : IExplorerShell
+    {
+        public Queue<IntPtr> Windows { get; } = [];
+        public List<string> SearchedFolders { get; } = [];
+        public string? OpenedPath { get; private set; }
+
+        public void OpenFolderAndSelect(string path) => OpenedPath = path;
+
+        public IntPtr FindWindow(string folder)
+        {
+            SearchedFolders.Add(folder);
+            return Windows.Dequeue();
+        }
     }
 }

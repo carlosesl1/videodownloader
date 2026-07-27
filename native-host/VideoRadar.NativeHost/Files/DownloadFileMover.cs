@@ -1,5 +1,5 @@
-using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using VideoRadar.NativeHost.Windows;
 
 namespace VideoRadar.NativeHost.Files;
 
@@ -8,15 +8,22 @@ public sealed class DownloadFileMover : IDownloadFileMover
     private static readonly Regex SafeOperationId =
         new("^[A-Za-z0-9_-]{1,128}$", RegexOptions.CultureInvariant);
     private readonly IFileTransfer transfer;
+    private readonly ExplorerFileRevealer fileRevealer;
 
     public DownloadFileMover()
-        : this(new FileTransfer())
+        : this(new FileTransfer(), new ExplorerFileRevealer())
     {
     }
 
     internal DownloadFileMover(IFileTransfer transfer)
+        : this(transfer, new ExplorerFileRevealer())
+    {
+    }
+
+    internal DownloadFileMover(IFileTransfer transfer, ExplorerFileRevealer fileRevealer)
     {
         this.transfer = transfer ?? throw new ArgumentNullException(nameof(transfer));
+        this.fileRevealer = fileRevealer ?? throw new ArgumentNullException(nameof(fileRevealer));
     }
 
     public FileMoveResult Move(string sourcePath, string destinationFolder, long downloadId)
@@ -50,33 +57,8 @@ public sealed class DownloadFileMover : IDownloadFileMover
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Windows Explorer is required.");
 
-        var result = SHParseDisplayName(canonical, IntPtr.Zero, out var item, 0, IntPtr.Zero);
-        Marshal.ThrowExceptionForHR(result);
-        try
-        {
-            result = SHOpenFolderAndSelectItems(item, 0, IntPtr.Zero, 0);
-            Marshal.ThrowExceptionForHR(result);
-        }
-        finally
-        {
-            Marshal.FreeCoTaskMem(item);
-        }
+        fileRevealer.Reveal(canonical);
     }
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    private static extern int SHParseDisplayName(
-        string name,
-        IntPtr bindContext,
-        out IntPtr item,
-        uint attributesIn,
-        IntPtr attributesOut);
-
-    [DllImport("shell32.dll", PreserveSig = true)]
-    private static extern int SHOpenFolderAndSelectItems(
-        IntPtr folder,
-        uint itemCount,
-        IntPtr items,
-        uint flags);
 
     private void ValidateStagingSource(string source)
     {

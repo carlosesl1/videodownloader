@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 
 namespace VideoRadar.NativeHost.Windows;
 
@@ -40,7 +39,6 @@ internal sealed class DialogOwnerWindow(IWindowApi api)
     }
 }
 
-[SupportedOSPlatform("windows")]
 internal sealed class User32WindowApi : IWindowApi
 {
     private const uint GaRootOwner = 3;
