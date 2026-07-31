@@ -1,6 +1,6 @@
 # Vídeo Radar — documentação em português
 
-[English overview](../README.md)
+[Visão geral e instalação rápida](../README.md)
 
 O Vídeo Radar tem duas partes: a extensão Manifest V3 nesta **pasta raiz** (onde está `manifest.json`) e o auxiliar nativo empacotado. O auxiliar usa Native Messaging por `stdio`: não inicia `localhost`, socket ou servidor. O armazenamento da extensão guarda apenas um snapshot local do estado do trabalho.
 
