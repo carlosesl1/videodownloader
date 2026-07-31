@@ -25,14 +25,17 @@ internal static class MediaFormatPolicy
     public static string Selector(string platform, int height) => platform switch
     {
         "tiktok" => $"b[height={height}][ext=mp4][vcodec!*=h265][vcodec!*=hev]/b[height={height}][ext=mp4]/b[height={height}]",
-        "instagram" or "x" => $"b[height={height}][ext=mp4]/b[height={height}]",
+        "instagram" => $"b[height={height}][ext=mp4]/bv[height={height}][ext=mp4]+ba[ext=m4a]/b[height={height}]",
+        "x" => $"b[height={height}][ext=mp4]/b[height={height}]",
         _ => $"b[height={height}][ext=mp4]/bv*[height={height}][ext=mp4]+ba[ext=m4a]/b[height={height}]/bv*[height={height}]+ba"
     };
 
     private static bool IsSelectable(string platform, MediaFormatDescriptor format, bool hasM4aAudio)
     {
         if (format.Height <= 0 || !format.IsVideo) return false;
-        return platform == "youtube" ? format.IsCombined || hasM4aAudio : format.IsCombined;
+        return platform is "youtube" or "instagram"
+            ? format.IsCombined || hasM4aAudio
+            : format.IsCombined;
     }
 
     private static QualityOption CreateQuality(
@@ -43,7 +46,7 @@ internal static class MediaFormatPolicy
     {
         var values = formats.ToList();
         var combinedMp4 = values.Any(format => format.IsCombined && format.IsMp4);
-        var separateMp4 = platform == "youtube"
+        var separateMp4 = platform is "youtube" or "instagram"
             && hasM4aAudio
             && values.Any(format => !format.IsCombined && format.IsMp4);
         var container = combinedMp4 || separateMp4 ? "MP4" : "WebM";

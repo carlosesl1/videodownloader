@@ -203,6 +203,26 @@ test('shows platform-aware scanning copy for Instagram and X', () => {
   }
 });
 
+test('distinguishes a previous download from the current page search', () => {
+  const root = new FakeElement('div');
+  renderPopup(root, {
+    status: 'results',
+    target: 'downloads',
+    items: [],
+    downloads: [socialItem({
+      id: 'x:1907123456789012345',
+      platform: 'x',
+      phase: 'complete',
+      statusLabel: 'Concluído',
+    })],
+    pendingPermission: null,
+  });
+
+  assert.match(root.textContent, /Nenhuma busca feita nesta página/);
+  assert.match(one(root, '.downloads-heading').textContent, /HISTÓRICO RECENTE · TODOS OS SITES/);
+  assert.match(one(root, '.downloads-heading').textContent, /1 download anterior/);
+});
+
 test('renders a known active YouTube job as one announced stage with cancellable native progress', () => {
   const root = renderItem(youtubeItem({
     phase: 'video', active: true, jobId: 'job-42', progress: 62, statusLabel: 'Baixando vídeo…',

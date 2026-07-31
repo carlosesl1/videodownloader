@@ -241,7 +241,7 @@ function appendResults(surface, state) {
     const summaryCopy = node('div');
     summaryCopy.append(
       node('span', 'state-kicker', 'BUSCA SOB DEMANDA'),
-      node('h2', '', 'Nenhuma busca nesta página'),
+      node('h2', '', 'Nenhuma busca feita nesta página'),
     );
     summary.append(summaryCopy, button('Buscar vídeos', 'button button--quiet', 'scan'));
     surface.append(summary);
@@ -250,8 +250,8 @@ function appendResults(surface, state) {
   if (downloads.length > 0) {
     const heading = node('div', 'downloads-heading');
     heading.append(
-      node('span', 'state-kicker', 'OPERAÇÕES RECENTES'),
-      node('h2', '', downloads.length === 1 ? '1 download' : `${downloads.length} downloads`),
+      node('span', 'state-kicker', 'HISTÓRICO RECENTE · TODOS OS SITES'),
+      node('h2', '', downloads.length === 1 ? '1 download anterior' : `${downloads.length} downloads anteriores`),
     );
     surface.append(heading);
     const list = node('ul', 'media-list media-list--downloads');

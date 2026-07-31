@@ -12,11 +12,13 @@ internal static partial class TestSuite
         FormatCatalogRejectsUnavailableOrIncompleteMetadata();
         FormatCatalogRejectsMissingPositiveHeights();
         FormatCatalogRequiresAudioForSeparateYouTubeVideo();
+        FormatCatalogAcceptsSeparateInstagramVideoWithM4aAudio();
         FormatCatalogAcceptsPublicSocialMetadataWithoutAvailability();
         FormatCatalogFiltersSocialQualitiesToCombinedFormats();
         FormatCatalogRejectsExplicitlyRestrictedSocialMetadata();
         MetadataArgumentsAreHardenedAndCanonical();
         DownloadArgumentsUsePlatformSpecificSelectors();
+        DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio();
         YouTubeServiceCanonicalizesBeforeCallingRunner();
         YouTubeServiceAcceptsAllowlistedSocialPages();
         YouTubeServiceCachesSuccessfulCatalogsAndRetriesFailures();
@@ -79,6 +81,24 @@ internal static partial class TestSuite
             """;
 
         Throws<InvalidDataException>(() => FormatCatalog.Parse(json));
+    }
+
+    private static void FormatCatalogAcceptsSeparateInstagramVideoWithM4aAudio()
+    {
+        const string instagram = """
+            {"id":"DbdpUhpg1bx","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"height":null,"vcodec":"none","acodec":"mp4a.40.5","ext":"m4a"},
+              {"height":1920,"vcodec":"vp09.00.40.08","acodec":"none","ext":"mp4"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(instagram);
+
+        Equal("instagram", catalog.Platform);
+        Equal(1, catalog.Qualities.Count);
+        Equal(1920, catalog.Qualities[0].Height);
+        Equal("MP4", catalog.Qualities[0].Container);
+        True(!catalog.Qualities[0].Combined, "Separate Instagram streams must remain marked for merging.");
     }
 
     private static void FormatCatalogAcceptsPublicSocialMetadataWithoutAvailability()
@@ -165,6 +185,23 @@ internal static partial class TestSuite
         True(selector.Contains("ext=mp4", StringComparison.Ordinal), "TikTok selector did not prefer MP4.");
         True(!selector.Contains("height<=", StringComparison.Ordinal), "Social selector must not silently download a lower quality.");
         True(selector.Split('/').All(option => option.Contains("height=720", StringComparison.Ordinal)), "Every social fallback must preserve the selected height.");
+    }
+
+    private static void DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio()
+    {
+        var arguments = YtDlpArguments.Download(
+            "tools",
+            "home",
+            "temp",
+            "stem",
+            "https://www.instagram.com/reel/DbdpUhpg1bx/",
+            1920);
+
+        var selector = arguments[arguments.ToList().IndexOf("--format") + 1];
+
+        Equal(
+            "b[height=1920][ext=mp4]/bv[height=1920][ext=mp4]+ba[ext=m4a]/b[height=1920]",
+            selector);
     }
 
     private static void YouTubeServiceCanonicalizesBeforeCallingRunner()
