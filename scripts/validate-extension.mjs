@@ -41,7 +41,7 @@ const required = [
 await Promise.all(required.map((file) => access(fromRoot(file))));
 
 sameSet(manifest.permissions ?? [], [
-  'activeTab', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage',
+  'activeTab', 'alarms', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage',
 ], 'manifest permissions');
 assert(manifest.permissions.includes('nativeMessaging'), 'manifest must allow native messaging');
 assert(manifest.permissions.includes('downloads'), 'manifest must allow browser downloads');

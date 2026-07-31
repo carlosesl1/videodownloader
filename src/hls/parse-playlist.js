@@ -1,3 +1,12 @@
+export const DEFAULT_HLS_PLAYLIST_LIMITS = Object.freeze({
+  maxManifestBytes: 2 * 1024 * 1024,
+  maxLineBytes: 16 * 1024,
+  maxLines: 50_000,
+  maxVariants: 100,
+  maxSegments: 20_000,
+  maxDurationSeconds: 24 * 60 * 60,
+});
+
 export class HlsError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -9,6 +18,63 @@ export class HlsError extends Error {
 
 function invalid(details) {
   return new HlsError('HLS_INVALID', 'Invalid HLS playlist', { reason: details });
+}
+
+function playlistLimit(code, message, details) {
+  return new HlsError(code, message, details);
+}
+
+function validateLimits(options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalid('Invalid HLS playlist limits');
+  }
+  const limits = { ...DEFAULT_HLS_PLAYLIST_LIMITS, ...options };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw invalid(`Invalid HLS playlist limit: ${name}`);
+    }
+  }
+  return limits;
+}
+
+function utf8ByteLength(value, stopAfter = Number.MAX_SAFE_INTEGER) {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint > 0xffff) index += 1;
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    if (bytes > stopAfter) return bytes;
+  }
+  return bytes;
+}
+
+function splitAndValidateLines(text, limits) {
+  if (utf8ByteLength(text, limits.maxManifestBytes) > limits.maxManifestBytes) {
+    throw playlistLimit(
+      'HLS_MANIFEST_TOO_LARGE',
+      'A playlist HLS excede o limite de tamanho permitido.',
+      { maxManifestBytes: limits.maxManifestBytes },
+    );
+  }
+
+  const rawLines = text.split(/\r\n?|\n/);
+  if (rawLines.length > limits.maxLines) {
+    throw playlistLimit(
+      'HLS_MANIFEST_TOO_LARGE',
+      'A playlist HLS contém linhas demais.',
+      { maxLines: limits.maxLines },
+    );
+  }
+  for (const line of rawLines) {
+    if (utf8ByteLength(line, limits.maxLineBytes) > limits.maxLineBytes) {
+      throw playlistLimit(
+        'HLS_MANIFEST_TOO_LARGE',
+        'A playlist HLS contém uma linha grande demais.',
+        { maxLineBytes: limits.maxLineBytes },
+      );
+    }
+  }
+  return rawLines.map((line) => line.trim()).filter(Boolean);
 }
 
 const MEDIA_ONLY_TAG_PREFIXES = [
@@ -155,7 +221,7 @@ function assertNoUnpairedUris(lines, consumedUriIndices) {
   }
 }
 
-function parseMaster(lines, playlistUrl) {
+function parseMaster(lines, playlistUrl, limits) {
   const variants = [];
   const consumedUriIndices = new Set();
 
@@ -165,6 +231,13 @@ function parseMaster(lines, playlistUrl) {
 
     const uri = lines[index + 1];
     if (!uri || uri.startsWith('#')) throw invalid('Missing URI after EXT-X-STREAM-INF');
+    if (variants.length >= limits.maxVariants) {
+      throw playlistLimit(
+        'HLS_VARIANT_LIMIT',
+        'A playlist HLS contém qualidades demais.',
+        { maxVariants: limits.maxVariants },
+      );
+    }
     const attributes = parseAttributes(tagValue(line, '#EXT-X-STREAM-INF:'));
     variants.push(parseStreamVariant(attributes, uri, playlistUrl));
     consumedUriIndices.add(index + 1);
@@ -179,10 +252,11 @@ function parseMaster(lines, playlistUrl) {
   return { kind: 'master', variants };
 }
 
-function parseMedia(lines, playlistUrl) {
+function parseMedia(lines, playlistUrl, limits) {
   const segments = [];
   const consumedUriIndices = new Set();
   let hasEndList = false;
+  let totalDuration = 0;
 
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index];
@@ -215,6 +289,21 @@ function parseMedia(lines, playlistUrl) {
     if (/\.[^/.]+$/.test(pathname) && !/\.ts$/i.test(pathname)) {
       throw invalid('Media segment is not MPEG-TS');
     }
+    if (segments.length >= limits.maxSegments) {
+      throw playlistLimit(
+        'HLS_SEGMENT_LIMIT',
+        'A playlist HLS contém segmentos demais.',
+        { maxSegments: limits.maxSegments },
+      );
+    }
+    totalDuration += duration;
+    if (!Number.isFinite(totalDuration) || totalDuration > limits.maxDurationSeconds) {
+      throw playlistLimit(
+        'HLS_DURATION_LIMIT',
+        'A playlist HLS excede a duração máxima permitida.',
+        { maxDurationSeconds: limits.maxDurationSeconds },
+      );
+    }
     segments.push({ url, duration });
   }
 
@@ -232,11 +321,13 @@ function isMasterOnlyTag(line) {
   return MASTER_ONLY_TAG_PREFIXES.some((prefix) => line.startsWith(prefix));
 }
 
-export function parseHlsPlaylist(text, playlistUrl) {
+export function parseHlsPlaylist(text, playlistUrl, options = {}) {
+  const limits = validateLimits(options);
   let lines;
   try {
-    lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  } catch {
+    lines = splitAndValidateLines(String(text), limits);
+  } catch (error) {
+    if (error instanceof HlsError) throw error;
     throw invalid('Invalid HLS playlist text');
   }
   if (lines[0] !== '#EXTM3U') throw invalid('Playlist must begin with EXTM3U');
@@ -252,6 +343,6 @@ export function parseHlsPlaylist(text, playlistUrl) {
   }
   rejectUnsupportedTags(lines);
   return hasMasterVariants
-    ? parseMaster(lines, playlistUrl)
-    : parseMedia(lines, playlistUrl);
+    ? parseMaster(lines, playlistUrl, limits)
+    : parseMedia(lines, playlistUrl, limits);
 }

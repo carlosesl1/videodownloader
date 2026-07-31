@@ -24,7 +24,12 @@ internal static partial class TestSuite
         ProgressParserNormalizesKnownMessages();
         ProgressParserRejectsMalformedMessages();
         YouTubeServiceDownloadsWithHostOwnedPathsAndProgress();
+        YouTubeServiceReusesInstagramMetadataForDownload();
+        YouTubeServiceRefreshesExpiredInstagramMetadataBeforeDownload();
+        YouTubeServiceRetriesInstagramAccessDeniedWithFreshMetadata();
+        YouTubeServiceDoesNotRetryOtherInstagramFailures();
         YouTubeServiceRejectsInvalidFinalPathsAndSafeFailures();
+        YouTubeServiceClassifiesDownloadFailuresSafely();
         YouTubeServiceSerializesAndCancelsTheActiveJob();
         ProcessRunnerClosesChildStandardInput();
         ProcessRunnerCancellationKillsTheChildTree();
@@ -46,7 +51,7 @@ internal static partial class TestSuite
             "--windows-filenames", "--trim-filenames", "180", "--no-overwrites",
             "--paths", home, "--paths", $"temp:{temp}",
             "--output", $"{stem}.%(ext)s",
-            "--format", "b[height=1080][ext=mp4]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/bv*[height<=1080]+ba",
+            "--format", "b[height=1080][ext=mp4]/bv*[height=1080][ext=mp4]+ba[ext=m4a]/b[height=1080]/bv*[height=1080]+ba",
             "--merge-output-format", "mp4/webm",
             "--newline", "--progress", "--progress-delta", "0.5",
             "--progress-template", "download:VR_PROGRESS:{\"progress\":%(progress)j,\"vcodec\":%(info.vcodec)j,\"acodec\":%(info.acodec)j}",
@@ -406,6 +411,186 @@ internal static partial class TestSuite
             "YouTube wrote the per-job download to the fallback folder.");
     }
 
+    private static void YouTubeServiceReusesInstagramMetadataForDownload()
+    {
+        const string instagramUrl = "https://www.instagram.com/reel/C8x_example/";
+        const string metadata = """
+            {"id":"C8x_example","title":"Video by video.radar","extractor_key":"Instagram","formats":[
+              {"format_id":"http-960","url":"https://cdn.test/reel.mp4","height":960,"vcodec":"avc1.64001f","acodec":"mp4a.40.2","ext":"mp4"}
+            ]}
+            """;
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var expectedPath = Path.Combine(paths.Home, "Video by video.radar [C8x_example].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, metadata, string.Empty)),
+            async call =>
+            {
+                var loadIndex = call.Arguments.ToList().IndexOf("--load-info-json");
+                True(loadIndex >= 0, "Instagram download did not reuse its metadata.");
+                var metadataPath = call.Arguments[loadIndex + 1];
+                Equal(
+                    Path.Combine(paths.TempRoot, "instagram-job", "media.info.json"),
+                    Path.GetFullPath(metadataPath));
+                Equal(metadata, File.ReadAllText(metadataPath));
+                True(!call.Arguments.Contains(instagramUrl), "Instagram download queried the post a second time.");
+
+                File.WriteAllText(expectedPath, "video");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty);
+            });
+        var service = new YouTubeService("tools", runner, paths);
+
+        var result = service.StartDownloadAsync(
+            "instagram-job",
+            instagramUrl,
+            960,
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(2, runner.Calls.Count);
+    }
+
+    private static void YouTubeServiceRefreshesExpiredInstagramMetadataBeforeDownload()
+    {
+        const string instagramUrl = "https://www.instagram.com/reel/C8x_example/";
+        const string staleMetadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"format_id":"stale","url":"https://cdn.test/stale.mp4","height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        const string freshMetadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"format_id":"fresh","url":"https://cdn.test/fresh.mp4","height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var expectedPath = Path.Combine(paths.Home, "Public Reel [C8x_example].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, staleMetadata, string.Empty)),
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, freshMetadata, string.Empty)),
+            async call =>
+            {
+                var metadataPath = call.Arguments[call.Arguments.ToList().IndexOf("--load-info-json") + 1];
+                Equal(freshMetadata, File.ReadAllText(metadataPath));
+                File.WriteAllText(expectedPath, "video");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty);
+            });
+        var time = new ManualTimeProvider(new DateTimeOffset(2026, 7, 29, 0, 0, 0, TimeSpan.Zero));
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            time);
+
+        service.ListFormatsAsync(instagramUrl, CancellationToken.None).GetAwaiter().GetResult();
+        time.Advance(TimeSpan.FromMinutes(5));
+        var result = service.StartDownloadAsync(
+            "expired-instagram",
+            instagramUrl,
+            720,
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(3, runner.Calls.Count);
+    }
+
+    private static void YouTubeServiceRetriesInstagramAccessDeniedWithFreshMetadata()
+    {
+        const string instagramUrl = "https://www.instagram.com/reel/C8x_example/";
+        const string staleMetadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"format_id":"stale","url":"https://cdn.test/stale.mp4","height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        const string freshMetadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"format_id":"fresh","url":"https://cdn.test/fresh.mp4","height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var temp = Path.Combine(paths.TempRoot, "retry-instagram");
+        var marker = Path.Combine(temp, "stale.part");
+        var expectedPath = Path.Combine(paths.Home, "Public Reel [C8x_example].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, staleMetadata, string.Empty)),
+            call =>
+            {
+                var metadataPath = call.Arguments[call.Arguments.ToList().IndexOf("--load-info-json") + 1];
+                Equal(staleMetadata, File.ReadAllText(metadataPath));
+                File.WriteAllText(marker, "partial");
+                return Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(
+                    1,
+                    string.Empty,
+                    "ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+            },
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, freshMetadata, string.Empty)),
+            async call =>
+            {
+                var metadataPath = call.Arguments[call.Arguments.ToList().IndexOf("--load-info-json") + 1];
+                Equal(freshMetadata, File.ReadAllText(metadataPath));
+                True(!File.Exists(marker), "Retry retained a partial file from the denied attempt.");
+                File.WriteAllText(expectedPath, "video");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty);
+            });
+        var service = new YouTubeService("tools", runner, paths);
+
+        var result = service.StartDownloadAsync(
+            "retry-instagram",
+            instagramUrl,
+            720,
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(4, runner.Calls.Count);
+        Equal("complete", service.GetJob()!.Stage);
+        True(!Directory.Exists(temp), "Successful retry temp was not cleaned.");
+    }
+
+    private static void YouTubeServiceDoesNotRetryOtherInstagramFailures()
+    {
+        const string instagramUrl = "https://www.instagram.com/reel/C8x_example/";
+        const string metadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, metadata, string.Empty)),
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(
+                1,
+                string.Empty,
+                "ERROR: Login required. Use --cookies-from-browser.")));
+        var service = new YouTubeService("tools", runner, paths);
+
+        try
+        {
+            service.StartDownloadAsync(
+                "login-instagram",
+                instagramUrl,
+                720,
+                _ => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (MediaDownloadException exception)
+        {
+            Equal("LOGIN_REQUIRED", exception.Code);
+            Equal(2, runner.Calls.Count);
+            return;
+        }
+
+        throw new InvalidOperationException("Instagram login failure should not be retried.");
+    }
+
     private static void YouTubeServiceRejectsInvalidFinalPathsAndSafeFailures()
     {
         using var scope = new DownloadTestScope();
@@ -451,11 +636,54 @@ internal static partial class TestSuite
         catch (InvalidOperationException exception)
         {
             True(!exception.Message.Contains("secret cookie", StringComparison.Ordinal), "Raw download stderr leaked into the error.");
-            Equal("download_failed", failureService.GetJob()!.ErrorCode);
+            Equal("MEDIA_DOWNLOAD_FAILED", failureService.GetJob()!.ErrorCode);
             return;
         }
 
         throw new InvalidOperationException("Non-zero download exit should fail.");
+    }
+
+    private static void YouTubeServiceClassifiesDownloadFailuresSafely()
+    {
+        var cases = new[]
+        {
+            ("login", "ERROR: Login required. Use --cookies-from-browser.", "LOGIN_REQUIRED"),
+            ("rate", "ERROR: HTTP Error 429: Too Many Requests", "RATE_LIMITED"),
+            ("format", "ERROR: Requested format is not available", "FORMAT_UNAVAILABLE"),
+            ("access", "ERROR: unable to download video data: HTTP Error 403: Forbidden", "MEDIA_ACCESS_DENIED"),
+            ("no-video", "ERROR: There is no video in this post; only images are available", "NO_VIDEO"),
+            ("unknown", "ERROR: private diagnostic secret https://sensitive.example/video", "MEDIA_DOWNLOAD_FAILED")
+        };
+
+        foreach (var (jobId, standardError, expectedCode) in cases)
+        {
+            using var scope = new DownloadTestScope();
+            var paths = scope.CreatePaths();
+            var runner = new ScriptedProcessRunner(
+                _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty)),
+                _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(1, string.Empty, standardError)));
+            var service = new YouTubeService("tools", runner, paths);
+
+            try
+            {
+                service.StartDownloadAsync(
+                    jobId,
+                    "https://youtu.be/jNQXAC9IVRw",
+                    1080,
+                    _ => Task.CompletedTask,
+                    CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (MediaDownloadException exception)
+            {
+                Equal(expectedCode, exception.Code);
+                Equal(expectedCode, service.GetJob()!.ErrorCode);
+                True(!exception.Message.Contains("secret", StringComparison.OrdinalIgnoreCase), "Raw stderr leaked into the safe error.");
+                True(!exception.Message.Contains("sensitive.example", StringComparison.OrdinalIgnoreCase), "A sensitive URL leaked into the safe error.");
+                continue;
+            }
+
+            throw new InvalidOperationException($"Download failure '{jobId}' was not classified.");
+        }
     }
 
     private static void YouTubeServiceSerializesAndCancelsTheActiveJob()

@@ -134,6 +134,21 @@ function youtubeItem(overrides = {}) {
   };
 }
 
+function socialItem(overrides = {}) {
+  return youtubeItem({
+    id: 'tiktok:7488298911734435077',
+    kind: 'remote-media',
+    platform: 'tiktok',
+    url: 'https://www.tiktok.com/@video.radar/video/7488298911734435077',
+    title: 'Public TikTok',
+    filename: 'Public TikTok-720p.mp4',
+    variants: [
+      { height: 720, label: '720p', container: 'mp4', combined: true, filename: 'Public TikTok-720p.mp4' },
+    ],
+    ...overrides,
+  });
+}
+
 test.beforeEach(() => installDocument());
 test.afterEach(() => { globalThis.document = originalDocument; });
 
@@ -146,7 +161,7 @@ test('shows immediately that YouTube was detected while qualities load', () => {
     message: 'Carregando qualidades do YouTube…',
   });
 
-  assert.equal(one(root, 'h2').textContent, 'Vídeo do YouTube encontrado');
+  assert.equal(one(root, 'h2').textContent, 'Consultando vídeo do YouTube');
   assert.match(one(root, '.state-panel--scanning').textContent, /Carregando qualidades/);
 });
 
@@ -166,6 +181,28 @@ test('renders ready YouTube variants with selected output format and download ac
   assert.equal(one(webmRoot, '.media-row__metadata').textContent, 'YOUTUBE  /  SAÍDA .WEBM');
 });
 
+test('renders TikTok as a native remote-media card with a single quality', () => {
+  const root = renderItem(socialItem());
+
+  assert.equal(one(root, '.media-row__metadata').textContent, 'TIKTOK  /  SAÍDA .MP4');
+  assert.equal(one(root, '.quality-single').textContent, '720p');
+  assert.equal(one(root, '[data-download]').getAttribute('data-download'), 'tiktok:7488298911734435077');
+});
+
+test('shows platform-aware scanning copy for Instagram and X', () => {
+  for (const [target, name] of [['instagram.com', 'Instagram'], ['x.com', 'X']]) {
+    const root = new FakeElement('div');
+    renderPopup(root, {
+      status: 'scanning',
+      target,
+      items: [],
+      message: `Carregando qualidades do ${name}â€¦`,
+    });
+    assert.match(one(root, 'h2').textContent, new RegExp(name));
+    assert.match(one(root, '.state-panel--scanning').textContent, /Carregando qualidades/);
+  }
+});
+
 test('renders a known active YouTube job as one announced stage with cancellable native progress', () => {
   const root = renderItem(youtubeItem({
     phase: 'video', active: true, jobId: 'job-42', progress: 62, statusLabel: 'Baixando vídeo…',
@@ -183,9 +220,9 @@ test('renders a known active YouTube job as one announced stage with cancellable
   assert.equal(progress.getAttribute('value'), '62');
   assert.match(progress.getAttribute('aria-valuetext'), /Baixando vídeo.*62%/);
   const stage = one(root, '.media-row__stage');
-  assert.equal(stage.getAttribute('role'), 'status');
+  assert.equal(stage.getAttribute('role'), null);
   assert.equal(stage.textContent, 'Baixando vídeo…');
-  assert.equal(root.querySelectorAll('[role]').filter((element) => element.getAttribute('role') === 'status').length, 1);
+  assert.equal(root.querySelectorAll('[role]').filter((element) => element.getAttribute('role') === 'status').length, 0);
   assert.equal(one(root, 'select').disabled, true);
 
   const missingJob = renderItem(youtubeItem({ phase: 'video', active: true, jobId: '', statusLabel: 'Baixando vídeo…' }));
@@ -252,11 +289,12 @@ test('renders a preserved relocation failure with a row-level settings action', 
 test('keeps HLS preparation determinate and direct downloads unchanged', () => {
   const hls = renderItem({
     id: 'hls-1', kind: 'hls', filename: 'master.ts', format: 'ts', inspected: true,
-    variants: [{ label: '720p' }], selectedIndex: 0, phase: 'preparing', progress: 0,
+    variants: [{ label: '720p' }, { label: '480p' }], selectedIndex: 0, phase: 'preparing', progress: 0,
     statusLabel: 'Preparando a playlist…',
   });
   assert.equal(one(hls, 'progress').value, 0);
   assert.equal(one(hls, '.media-row__status').textContent, 'Preparando a playlist…');
+  assert.equal(one(hls, 'select').disabled, true);
 
   const hlsProgress = renderItem({
     id: 'hls-2', kind: 'hls', filename: 'master.ts', format: 'ts', inspected: true,
@@ -274,4 +312,20 @@ test('keeps HLS preparation determinate and direct downloads unchanged', () => {
   });
   assert.equal(one(direct, '[data-download]').getAttribute('data-download'), 'direct-1');
   assert.equal(direct.querySelectorAll('[data-cancel]').length, 0);
+});
+
+test('shows requested HLS origins while permission is pending', () => {
+  const root = new FakeElement('div');
+  renderPopup(root, {
+    status: 'results', target: 'example.test',
+    items: [{
+      id: 'hls-permission', kind: 'hls', filename: 'master.ts', format: 'ts', inspected: true,
+      variants: [{ label: '720p' }, { label: '480p' }], selectedIndex: 0,
+      phase: 'permission', statusLabel: 'Autorize o servidor de mídia para continuar.',
+    }],
+    pendingPermission: { id: 'hls-permission', selectedIndex: 0, origins: ['https://cdn.test', 'https://segments.test'] },
+  });
+
+  assert.equal(one(root, 'select').disabled, true);
+  assert.match(one(root, '.media-row__permission-origins').textContent, /cdn\.test.*segments\.test/);
 });

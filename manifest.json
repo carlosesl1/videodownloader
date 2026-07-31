@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "permissions": [
     "activeTab",
+    "alarms",
     "downloads",
     "nativeMessaging",
     "notifications",

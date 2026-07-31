@@ -7,16 +7,22 @@ import {
 import { buildDownloadFilename } from '../shared/filename.js';
 import { ACTIONS } from '../shared/messages.js';
 import {
+  DELIVERY_RESULT_INDEX,
   DELIVERY_RESULT_PREFIX,
+  HLS_OPERATION_INDEX,
+  HLS_OPERATION_PREFIX,
+  RELOCATION_INDEX,
   RELOCATION_PREFIX,
-} from '../background/download-relocation.js';
+  downloadIdIndex,
+  stringIndex,
+} from '../shared/persistence-keys.js';
 import { YOUTUBE_ACTIONS, assertFormatsResult } from '../youtube/protocol.js';
-import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
+import { canonicalMediaPage } from '../media/page-url.js';
 import { assertJobSnapshot } from '../youtube/job-view.js';
 import { initialState, reduceState } from './state.js';
 import { renderPopup } from './render.js';
 
-const OPERATION_PREFIX = 'hlsOperation:';
+const OPERATION_PREFIX = HLS_OPERATION_PREFIX;
 const OPERATION_STATES = new Set([
   'starting',
   'assembling',
@@ -28,7 +34,7 @@ const OPERATION_STATES = new Set([
 ]);
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
 const OPERATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const ERROR_CODE = /^[A-Z0-9_]{1,64}$/;
+const ERROR_CODE = /^[A-Za-z0-9_]{1,64}$/;
 const RELOCATION_STATUSES = new Set(['downloading', 'moving', 'complete', 'moveFailed']);
 const RELOCATION_MEDIA_KINDS = new Set(['direct', 'hls']);
 const YOUTUBE_SNAPSHOT_FIELDS = [
@@ -224,7 +230,9 @@ function sanitizeYouTubeJobSnapshot(value) {
   } catch {
     throw invalidYouTubeResponse();
   }
-  if (!videoId || !title || canonicalYouTubePageUrl(url) !== url || !url.endsWith(`v=${videoId}`)
+  const page = canonicalMediaPage(url);
+  if (!videoId || !title || !page || page.canonicalUrl !== url
+    || (page.platform === 'youtube' && page.mediaId !== videoId)
     || !(percent === null || (Number.isSafeInteger(percent) && percent >= 0 && percent <= 100))
     || ![downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds].every((entry) => entry === null || (Number.isSafeInteger(entry) && entry >= 0))
     || !(error === null || (typeof error === 'string' && ERROR_CODE.test(error)))
@@ -249,7 +257,10 @@ function sanitizeYouTubeJobSnapshot(value) {
 
 export function unwrapYouTubeFormats(response) {
   const catalog = unwrap(response, (value) => {
-    if (!isObject(value) || !hasOnlyKeys(value, ['videoId', 'title', 'durationSeconds', 'qualities'])
+    const keys = value && Object.hasOwn(value, 'platform')
+      ? ['platform', 'videoId', 'title', 'durationSeconds', 'qualities']
+      : ['videoId', 'title', 'durationSeconds', 'qualities'];
+    if (!isObject(value) || !hasOnlyKeys(value, keys)
       || !Array.isArray(value.qualities)
       || !value.qualities.every((quality) => isObject(quality) && hasOnlyKeys(quality, ['height', 'label', 'container', 'combined']))) return false;
     try {
@@ -274,14 +285,20 @@ function unwrapDiscovery(response) {
 }
 
 export function youtubeItem(formats, url) {
+  const page = canonicalMediaPage(url);
+  if (!page || (formats.platform && formats.platform !== page.platform)) {
+    throw invalidYouTubeResponse();
+  }
+  const platform = formats.platform ?? page.platform;
   const variants = formats.qualities.map((quality) => ({
     ...quality,
     filename: `${formats.title}-${quality.label}.${quality.container}`,
   }));
   const first = variants[0];
   return {
-    id: `youtube:${formats.videoId}`,
-    kind: 'youtube', url, title: formats.title, filename: first.filename, variants,
+    id: `${platform}:${formats.videoId}`,
+    kind: platform === 'youtube' ? 'youtube' : 'remote-media',
+    platform, url, title: formats.title, filename: first.filename, variants,
     selectedIndex: 0, predictedFormat: first.container, phase: 'ready', jobId: null,
     active: false, progress: null, statusLabel: '', path: null, error: null,
   };
@@ -392,14 +409,28 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   let state = initialState;
   let activeTabId = null;
   let discoveryItemIds = new Set();
+  let interactionGeneration = 0;
+  let drawSuspended = false;
+  let operationFlushScheduled = false;
+  const pendingOperationRecords = new Map();
 
+  const allItems = () => [...state.items, ...(state.downloads ?? [])];
+  const findItem = (id) => allItems().find((item) => item.id === id);
+  const focusKeys = ['quality', 'download', 'inspect', 'cancel', 'reveal', 'authorize', 'scan', 'settings'];
   const draw = () => {
+    const focused = documentApi.activeElement;
+    const focusEntry = focusKeys.find((key) => Object.hasOwn(focused?.dataset ?? {}, key));
+    const focusValue = focusEntry ? focused.dataset[focusEntry] : null;
     renderPopup(root, state);
     announcer.textContent = state.message;
+    if (!focusEntry || typeof root.querySelectorAll !== 'function') return;
+    const replacement = [...root.querySelectorAll(`[data-${focusEntry}]`)]
+      .find((element) => element.dataset?.[focusEntry] === focusValue);
+    replacement?.focus?.({ preventScroll: true });
   };
   const dispatch = (event) => {
     state = reduceState(state, event);
-    draw();
+    if (!drawSuspended) draw();
   };
 
   async function requestOrigins(values) {
@@ -411,6 +442,34 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     return grant;
   }
 
+  async function readIndexed(storage, indexKey, prefix, normalizeIndex) {
+    if (typeof storage?.get !== 'function') return [];
+    const indexResult = await storage.get(indexKey);
+    const ids = normalizeIndex(indexResult?.[indexKey]);
+    if (ids.length === 0) return [];
+    const keys = ids.map((id) => `${prefix}${id}`);
+    const stored = await storage.get(keys);
+    return ids.map((id) => stored?.[`${prefix}${id}`]).filter(Boolean);
+  }
+
+  async function readOperationRecords() {
+    return readIndexed(
+      chromeApi.storage?.session,
+      HLS_OPERATION_INDEX,
+      OPERATION_PREFIX,
+      stringIndex,
+    );
+  }
+
+  async function readRelocationRecords() {
+    const storage = chromeApi.storage?.local;
+    const [active, completed] = await Promise.all([
+      readIndexed(storage, RELOCATION_INDEX, RELOCATION_PREFIX, downloadIdIndex),
+      readIndexed(storage, DELIVERY_RESULT_INDEX, DELIVERY_RESULT_PREFIX, downloadIdIndex),
+    ]);
+    return [...active, ...completed];
+  }
+
   async function readOperation(operationId) {
     const key = `${OPERATION_PREFIX}${operationId}`;
     const values = await chromeApi.storage.session.get(key);
@@ -419,15 +478,15 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
 
   function handleOperationRecord(operationId, rawRecord) {
     if (!validOperationRecord(rawRecord) || rawRecord.operationId !== operationId) return;
-    const existing = state.items.some((entry) => entry.operationId === operationId);
+    const existing = allItems().some((entry) => entry.operationId === operationId);
     if (existing) {
       dispatch({ type: 'HLS_OPERATION_UPDATED', operationId, record: rawRecord });
-    } else if (ACTIVE_OPERATION_STATES.has(rawRecord.state)) {
+    } else {
       dispatch({ type: 'HLS_OPERATION_RESTORED', record: rawRecord });
     }
     if (rawRecord.state !== 'failed' || rawRecord.error?.code !== 'HLS_PERMISSION') return;
     const origins = permissionOriginsFromError(rawRecord.error);
-    const item = state.items.find((entry) => entry.operationId === operationId);
+    const item = allItems().find((entry) => entry.operationId === operationId);
     if (!item || origins.length === 0) return;
     dispatch({
       type: 'PERMISSION_REQUIRED',
@@ -437,33 +496,48 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     });
   }
 
-  async function restoreHlsOperations() {
-    let stored;
+  function queueOperationRecord(operationId, rawRecord) {
+    if (rawRecord?.state !== 'assembling') {
+      handleOperationRecord(operationId, rawRecord);
+      return;
+    }
+    pendingOperationRecords.set(operationId, rawRecord);
+    if (operationFlushScheduled) return;
+    operationFlushScheduled = true;
+    queueMicrotask(() => {
+      operationFlushScheduled = false;
+      const records = [...pendingOperationRecords.entries()];
+      pendingOperationRecords.clear();
+      for (const [pendingId, pendingRecord] of records) {
+        handleOperationRecord(pendingId, pendingRecord);
+      }
+    });
+  }
+
+  async function restoreHlsOperations(generation) {
+    let records;
     try {
-      stored = await chromeApi.storage.session.get(null);
+      records = await readOperationRecords();
     } catch {
       return;
     }
-    const records = Object.entries(stored ?? {})
-      .filter(([key]) => key.startsWith(OPERATION_PREFIX))
-      .map(([, value]) => value)
-      .filter((record) => validOperationRecord(record) && ACTIVE_OPERATION_STATES.has(record.state));
+    if (generation !== interactionGeneration) return;
+    records = records
+      .filter(validOperationRecord)
+      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
+      .slice(0, 20);
     for (const record of records) {
       handleOperationRecord(record.operationId, record);
     }
   }
 
   async function reconcileOperations(items) {
-    let stored;
+    let records;
     try {
-      stored = await chromeApi.storage.session.get(null);
+      records = (await readOperationRecords()).filter(validOperationRecord);
     } catch {
       return;
     }
-    const records = Object.entries(stored ?? {})
-      .filter(([key]) => key.startsWith(OPERATION_PREFIX))
-      .map(([, value]) => value)
-      .filter(validOperationRecord);
     for (const item of items) {
       if (item.kind !== 'hls') continue;
       const record = findMatchingOperation(item, records);
@@ -482,13 +556,14 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
-  async function restoreYouTubeJob() {
+  async function restoreYouTubeJob(generation) {
     try {
       const response = await chromeApi.runtime.sendMessage({
         target: 'background',
         action: YOUTUBE_ACTIONS.GET_JOB,
         payload: {},
       });
+      if (generation !== interactionGeneration) return;
       const snapshot = unwrapYouTubeJob(response);
       if (snapshot) dispatch({ type: 'YOUTUBE_JOB_RESTORED', snapshot });
     } catch {
@@ -496,15 +571,16 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
-  async function restoreRelocations() {
-    let stored;
+  async function restoreRelocations(generation) {
+    let records;
     try {
-      stored = await chromeApi.storage?.local?.get?.(null);
+      records = await readRelocationRecords();
     } catch {
       return;
     }
-    for (const [key, value] of Object.entries(stored ?? {})) {
-      if (!key.startsWith(RELOCATION_PREFIX) && !key.startsWith(DELIVERY_RESULT_PREFIX)) continue;
+    if (generation !== interactionGeneration) return;
+    records.sort((left, right) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0));
+    for (const value of records.slice(0, 20)) {
       try {
         dispatch({ type: 'DOWNLOAD_RELOCATION_UPDATED', record: sanitizeRelocationRecord(value) });
       } catch {
@@ -525,17 +601,21 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     if (snapshot.status === 'scanning') {
       discoveryItemIds = new Set();
       dispatch({ type: 'SCAN_STARTED' });
-      if (snapshot.kind === 'youtube') dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      if (snapshot.kind === 'youtube' || snapshot.kind === 'remote-media') {
+        dispatch({ type: 'MEDIA_LOOKUP_STARTED', target: snapshot.target });
+      }
       return;
     }
     if (snapshot.status === 'error') {
       discoveryItemIds = new Set();
       dispatch({ type: 'SCAN_STARTED' });
-      if (snapshot.kind === 'youtube') dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      if (snapshot.kind === 'youtube' || snapshot.kind === 'remote-media') {
+        dispatch({ type: 'MEDIA_LOOKUP_STARTED', target: snapshot.target });
+      }
       dispatch({ type: 'FAILED', code: snapshot.errorCode });
       return;
     }
-    if (snapshot.kind === 'youtube') {
+    if (snapshot.kind === 'youtube' || snapshot.kind === 'remote-media') {
       const formats = unwrapYouTubeFormats({ ok: true, value: snapshot.result });
       dispatch({
         type: 'YOUTUBE_FORMATS_LOADED',
@@ -607,16 +687,17 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
   }
 
-  async function restoreDiscovery() {
+  async function restoreDiscovery(generation) {
     try {
       const tab = await queryActiveTab();
-      if (!tab) return;
+      if (!tab || generation !== interactionGeneration) return;
       activeTabId = tab.id;
       const response = await chromeApi.runtime.sendMessage({
         target: 'background',
         action: DISCOVERY_ACTIONS.GET,
         payload: { tabId: tab.id },
       });
+      if (generation !== interactionGeneration) return;
       await applyDiscovery(unwrapDiscovery(response));
     } catch {
       // Discovery recovery is best-effort; durable downloads are restored separately.
@@ -624,12 +705,20 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   }
 
   async function scan() {
+    interactionGeneration += 1;
+    drawSuspended = false;
     dispatch({ type: 'SCAN_STARTED' });
     try {
       const tab = await queryActiveTab();
       if (!tab) throw Object.assign(new Error('Aba ativa indisponível'), { code: 'SCAN_FAILED' });
       activeTabId = tab.id;
-      if (canonicalYouTubePageUrl(tab.url)) dispatch({ type: 'YOUTUBE_LOOKUP_STARTED' });
+      const mediaPage = canonicalMediaPage(tab.url);
+      if (mediaPage) {
+        dispatch({
+          type: 'MEDIA_LOOKUP_STARTED',
+          target: mediaPage.platform === 'x' ? 'x.com' : `${mediaPage.platform}.com`,
+        });
+      }
       const response = await chromeApi.runtime.sendMessage({
         target: 'background',
         action: DISCOVERY_ACTIONS.START,
@@ -642,7 +731,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   }
 
   async function inspect(item) {
-    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex: 0 });
+    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex: 0, kind: 'hls' });
     try {
       const playlistUrl = item.variants[0].url;
       const grant = await requestOrigins([playlistUrl]);
@@ -666,7 +755,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
 
   async function startHls(item, selectedIndex, existingGrant) {
     const variant = item.variants[selectedIndex] ?? item.variants[0];
-    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex });
+    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex, kind: 'hls' });
     try {
       const grant = existingGrant ?? await requestOrigins([variant.url]);
       const response = await chromeApi.runtime.sendMessage({
@@ -703,8 +792,10 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   }
 
   async function download(item, selectedIndex) {
-    if (item.kind === 'youtube') {
+    if (item.active || ['permission', 'preparing', 'sent'].includes(item.phase)) return;
+    if (item.kind === 'youtube' || item.kind === 'remote-media') {
       const variant = item.variants[selectedIndex] ?? item.variants[0];
+      dispatch({ type: 'MEDIA_DOWNLOAD_STARTED', id: item.id, selectedIndex, kind: item.kind });
       try {
         const response = await chromeApi.runtime.sendMessage({
           target: 'background',
@@ -718,7 +809,11 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
         const snapshot = unwrapYouTubeJob(response);
         if (snapshot) dispatch({ type: 'YOUTUBE_JOB_UPDATED', snapshot });
       } catch (error) {
-        dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'YOUTUBE_DOWNLOAD' });
+        dispatch({
+          type: 'FAILED',
+          id: item.id,
+          code: error?.code ?? (item.kind === 'remote-media' ? 'MEDIA_DOWNLOAD_FAILED' : 'YOUTUBE_DOWNLOAD'),
+        });
       }
       return;
     }
@@ -726,7 +821,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       await startHls(item, selectedIndex);
       return;
     }
-    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex });
+    dispatch({ type: 'DOWNLOAD_STARTED', id: item.id, selectedIndex, kind: 'direct' });
     try {
       const variant = item.variants[selectedIndex] ?? item.variants[0];
       const response = await chromeApi.runtime.sendMessage({
@@ -744,7 +839,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   async function authorizePending() {
     const pending = state.pendingPermission;
     if (!pending) return;
-    const item = state.items.find((entry) => entry.id === pending.id);
+    const item = findItem(pending.id);
     if (!item) return;
     const variant = item.variants[pending.selectedIndex] ?? item.variants[0];
     try {
@@ -756,7 +851,7 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
   }
 
   async function cancel(item) {
-    if (item?.kind !== 'youtube' || !item.jobId) return;
+    if (!['youtube', 'remote-media'].includes(item?.kind) || !item.jobId) return;
     try {
       const response = await chromeApi.runtime.sendMessage({
         target: 'background',
@@ -765,7 +860,11 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       });
       unwrap(response, (value) => isObject(value) && value.requested === true);
     } catch (error) {
-      dispatch({ type: 'FAILED', id: item.id, code: error?.code ?? 'YOUTUBE_DOWNLOAD' });
+      dispatch({
+        type: 'FAILED',
+        id: item.id,
+        code: error?.code ?? (item.kind === 'remote-media' ? 'MEDIA_DOWNLOAD_FAILED' : 'YOUTUBE_DOWNLOAD'),
+      });
     }
   }
 
@@ -773,13 +872,14 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     const visiblePath = item?.finalPath ?? item?.path;
     if (typeof visiblePath !== 'string' || !visiblePath.trim()) return;
     try {
-      await chromeApi.runtime.sendMessage({
+      const response = await chromeApi.runtime.sendMessage({
         target: 'background',
         action: YOUTUBE_ACTIONS.REVEAL_DOWNLOADED_FILE,
         payload: { path: visiblePath.trim() },
       });
+      unwrap(response, (value) => isObject(value) && value.revealed === true);
     } catch {
-      // The completed download and its path remain visible so the user can retry.
+      dispatch({ type: 'REVEAL_FAILED', id: item.id });
     }
   }
 
@@ -802,25 +902,25 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
     }
     const inspectButton = target?.closest?.('[data-inspect]');
     if (inspectButton) {
-      const item = state.items.find((entry) => entry.id === inspectButton.dataset.inspect);
+      const item = findItem(inspectButton.dataset.inspect);
       if (item) inspect(item);
       return;
     }
     const cancelButton = target?.closest?.('[data-cancel]');
     if (cancelButton) {
-      const item = state.items.find((entry) => entry.id === cancelButton.dataset.cancel);
+      const item = findItem(cancelButton.dataset.cancel);
       if (item) cancel(item);
       return;
     }
     const revealButton = target?.closest?.('[data-reveal]');
     if (revealButton) {
-      const item = state.items.find((entry) => entry.id === revealButton.dataset.reveal);
+      const item = findItem(revealButton.dataset.reveal);
       if (item) reveal(item);
       return;
     }
     const downloadButton = target?.closest?.('[data-download]');
     if (downloadButton) {
-      const item = state.items.find((entry) => entry.id === downloadButton.dataset.download);
+      const item = findItem(downloadButton.dataset.download);
       if (item) download(item, item.selectedIndex ?? 0);
       return;
     }
@@ -841,8 +941,12 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
       }
       for (const [key, change] of Object.entries(changes)) {
         if (!key.startsWith(OPERATION_PREFIX) || !change?.newValue) continue;
-        handleOperationRecord(key.slice(OPERATION_PREFIX.length), change.newValue);
+        queueOperationRecord(key.slice(OPERATION_PREFIX.length), change.newValue);
       }
+      if (
+        changes[HLS_OPERATION_INDEX]?.oldValue === undefined
+        && changes[HLS_OPERATION_INDEX]?.newValue
+      ) void restoreHlsOperations(interactionGeneration);
       return;
     }
     if (areaName !== 'local') return;
@@ -866,12 +970,30 @@ export function bootPopup({ chromeApi = globalThis.chrome, documentApi = globalT
         // Corrupt storage data must not enter popup state.
       }
     }
+    if (
+      (changes[RELOCATION_INDEX]?.oldValue === undefined && changes[RELOCATION_INDEX]?.newValue)
+      || (changes[DELIVERY_RESULT_INDEX]?.oldValue === undefined
+        && changes[DELIVERY_RESULT_INDEX]?.newValue)
+    ) void restoreRelocations(interactionGeneration);
   });
 
   async function restorePopupState() {
-    await restoreDiscovery();
-    await Promise.all([restoreHlsOperations(), restoreRelocations()]);
-    await restoreYouTubeJob();
+    const generation = interactionGeneration;
+    drawSuspended = true;
+    try {
+      await Promise.all([
+        restoreDiscovery(generation),
+        restoreHlsOperations(generation),
+        restoreRelocations(generation),
+        restoreYouTubeJob(generation),
+      ]);
+      if (generation === interactionGeneration) dispatch({ type: 'RESTORE_COMPLETED' });
+    } finally {
+      if (generation === interactionGeneration) {
+        drawSuspended = false;
+        draw();
+      }
+    }
   }
 
   draw();

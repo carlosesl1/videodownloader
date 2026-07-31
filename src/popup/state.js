@@ -1,4 +1,5 @@
 import { normalizeJobView } from '../youtube/job-view.js';
+import { canonicalMediaPage } from '../media/page-url.js';
 
 const ERROR_MESSAGES = Object.freeze({
   SCAN_INTERRUPTED: 'A busca foi interrompida pelo navegador. Clique em Buscar novamente.',
@@ -8,7 +9,11 @@ const ERROR_MESSAGES = Object.freeze({
   HLS_FMP4: 'Esta playlist usa segmentos fMP4, não suportados nesta versão.',
   HLS_BYTERANGE: 'Esta playlist usa intervalos de bytes não suportados.',
   HLS_LIVE: 'Transmissões HLS ao vivo não são suportadas nesta versão.',
-  HLS_TOO_LARGE: 'O vídeo ultrapassa o limite seguro de 1 GiB para HLS.',
+  HLS_MANIFEST_TOO_LARGE: 'A playlist HLS ultrapassa os limites seguros de análise.',
+  HLS_VARIANT_LIMIT: 'A playlist HLS anuncia qualidades demais para processar com segurança.',
+  HLS_SEGMENT_LIMIT: 'A playlist HLS contém segmentos demais para processar com segurança.',
+  HLS_DURATION_LIMIT: 'O vídeo HLS ultrapassa a duração máxima segura.',
+  HLS_TOO_LARGE: 'O vídeo ultrapassa o limite seguro de 256 MiB para HLS.',
   HLS_TIMEOUT: 'Um segmento demorou demais para responder. Tente novamente.',
   HLS_BUSY: 'Aguarde o outro vídeo HLS terminar e tente novamente.',
   HLS_NETWORK: 'Não foi possível acessar todos os segmentos. Tente novamente.',
@@ -20,12 +25,23 @@ const ERROR_MESSAGES = Object.freeze({
   YOUTUBE_BUSY: 'Aguarde o download do YouTube em andamento terminar.',
   YOUTUBE_METADATA: 'Não foi possível ler as qualidades deste vídeo do YouTube. Tente novamente.',
   YOUTUBE_METADATA_TIMEOUT: 'O YouTube demorou demais para responder. Tente novamente.',
-  YOUTUBE_DOWNLOAD: 'Não foi possível iniciar o download do YouTube. Tente novamente.',
+  YOUTUBE_DOWNLOAD: 'Não foi possível iniciar o download do vídeo. Tente novamente.',
   INVALID_URL: 'Esta URL do YouTube não é válida. Abra um vídeo e tente novamente.',
+  LOGIN_REQUIRED: 'A plataforma exigiu login para acessar este vídeo.',
+  RATE_LIMITED: 'A plataforma limitou temporariamente as consultas. Tente novamente mais tarde.',
+  FORMAT_UNAVAILABLE: 'A qualidade escolhida não está mais disponível. Busque o vídeo novamente.',
+  MEDIA_ACCESS_DENIED: 'O servidor da plataforma recusou o arquivo. Busque o vídeo novamente ou tente mais tarde.',
+  MEDIA_DOWNLOAD_FAILED: 'Não foi possível baixar o arquivo de vídeo. Tente novamente.',
+  PRIVATE_CONTENT: 'Este vídeo não está disponível publicamente.',
+  NO_VIDEO: 'Este post não contém um vídeo compatível.',
+  UNSUPPORTED_POST: 'Este tipo de publicação ainda não é compatível.',
+  EXTRACTOR_CHANGED: 'A plataforma mudou e o auxiliar precisa ser atualizado.',
   DESTINATION_INVALID: 'A pasta de downloads não é válida. Configure outra pasta.',
   DESTINATION_NOT_CONFIGURED: 'Escolha uma pasta para salvar os downloads.',
   DESTINATION_MOVE_FAILED: 'Não foi possível mover o arquivo para a pasta escolhida.',
+  DESTINATION_HELPER_UNAVAILABLE: 'O auxiliar de downloads não está disponível. Verifique a instalação.',
   HELPER_UNAVAILABLE: 'O auxiliar de downloads não está disponível. Verifique a instalação.',
+  REVEAL_FAILED: 'Não foi possível mostrar o arquivo no Explorer. Tente novamente.',
 });
 
 const ACTIVE_OPERATION_STATES = new Set(['starting', 'assembling', 'assembled']);
@@ -33,16 +49,18 @@ const DESTINATION_ERRORS = new Set([
   'DESTINATION_INVALID',
   'DESTINATION_NOT_CONFIGURED',
   'DESTINATION_MOVE_FAILED',
+  'DESTINATION_HELPER_UNAVAILABLE',
   'HELPER_UNAVAILABLE',
   'NATIVE_DISCONNECTED',
 ]);
 
 export const initialState = Object.freeze({
-  status: 'idle',
+  status: 'restoring',
   target: '',
   items: [],
+  downloads: [],
   busyId: null,
-  message: '',
+  message: 'Restaurando downloads…',
   pendingPermission: null,
 });
 
@@ -114,7 +132,7 @@ function operationView(record) {
     };
   }
   if (record?.state === 'downloading') {
-    return { phase: 'sent', statusLabel: 'Download enviado ao Chrome' };
+    return { phase: 'sent', statusLabel: 'Download em andamento' };
   }
   if (record?.state === 'complete') {
     return { phase: 'complete', statusLabel: 'Download concluído' };
@@ -202,8 +220,23 @@ function restoredRelocationItem(record) {
   };
 }
 
-function currentBusyId(items) {
-  return items.find((item) => item.phase === 'preparing')?.id ?? null;
+function currentBusyId(items, downloads = []) {
+  return [...items, ...downloads].find((item) => item.phase === 'preparing')?.id ?? null;
+}
+
+function updateStateItem(state, id, update) {
+  if (state.items.some((item) => item.id === id)) {
+    return { ...state, items: updateItem(state.items, id, update) };
+  }
+  return { ...state, downloads: updateItem(state.downloads ?? [], id, update) };
+}
+
+function updateStateOperation(state, operationId, record) {
+  return {
+    ...state,
+    items: updateOperation(state.items, operationId, record),
+    downloads: updateOperation(state.downloads ?? [], operationId, record),
+  };
 }
 
 function youtubeFilename(title, format) {
@@ -211,6 +244,8 @@ function youtubeFilename(title, format) {
 }
 
 function youtubeView(snapshot, existing) {
+  const page = canonicalMediaPage(snapshot.url);
+  const platform = page?.platform ?? 'youtube';
   const view = normalizeJobView({
     jobId: snapshot.jobId,
     videoId: snapshot.videoId,
@@ -225,14 +260,15 @@ function youtubeView(snapshot, existing) {
     ...snapshot.format,
     filename: youtubeFilename(snapshot.title, snapshot.format),
   };
-  const variants = existing?.kind === 'youtube' && existing.variants?.length
+  const variants = ['youtube', 'remote-media'].includes(existing?.kind) && existing.variants?.length
     ? existing.variants.map((variant) => variant.height === snapshot.format.height ? persistedVariant : variant)
     : [persistedVariant];
   const selectedIndex = Math.max(0, variants.findIndex((variant) => variant.height === snapshot.format.height));
   const selected = variants[selectedIndex] ?? persistedVariant;
   return {
-    id: `youtube:${snapshot.videoId}`,
-    kind: 'youtube', url: snapshot.url, title: snapshot.title, filename: selected.filename,
+    id: `${platform}:${snapshot.videoId}`,
+    kind: platform === 'youtube' ? 'youtube' : 'remote-media',
+    platform, url: snapshot.url, title: snapshot.title, filename: selected.filename,
     variants, selectedIndex, predictedFormat: selected.container,
     phase: view.stage, jobId: snapshot.jobId, active: view.active, progress: view.percent,
     statusLabel: snapshot.stage === 'failed' && snapshot.error ? userMessageForError(snapshot.error) : view.statusLabel,
@@ -244,6 +280,17 @@ function youtubeView(snapshot, existing) {
 }
 
 export function reduceState(state, event) {
+  if (event.type === 'RESTORE_COMPLETED') {
+    if (state.status !== 'restoring') return state;
+    const hasDownloads = (state.downloads ?? []).length > 0;
+    return {
+      ...state,
+      status: hasDownloads ? 'results' : 'idle',
+      target: hasDownloads ? 'downloads' : '',
+      message: hasDownloads ? 'Downloads restaurados' : '',
+    };
+  }
+
   if (event.type === 'SCAN_STARTED') {
     return {
       ...state,
@@ -256,15 +303,22 @@ export function reduceState(state, event) {
     };
   }
 
-  if (event.type === 'YOUTUBE_LOOKUP_STARTED') {
+  if (event.type === 'YOUTUBE_LOOKUP_STARTED' || event.type === 'MEDIA_LOOKUP_STARTED') {
+    const target = event.target ?? 'youtube.com';
+    const platformLabel = {
+      'youtube.com': 'YouTube',
+      'tiktok.com': 'TikTok',
+      'instagram.com': 'Instagram',
+      'x.com': 'X',
+    }[target] ?? target.split('.')[0].replace(/^./, (letter) => letter.toUpperCase());
     return {
       ...state,
       status: 'scanning',
-      target: 'youtube.com',
+      target,
       items: [],
       busyId: null,
       pendingPermission: null,
-      message: 'Carregando qualidades do YouTube…',
+      message: `Carregando qualidades do ${platformLabel}…`,
     };
   }
 
@@ -283,17 +337,21 @@ export function reduceState(state, event) {
     };
   }
 
-  if (event.type === 'DOWNLOAD_STARTED') {
-    const items = updateItem(state.items, event.id, () => ({
-      selectedIndex: event.selectedIndex ?? 0,
-      phase: 'preparing',
-      progress: 0,
-      completedSegments: 0,
-      totalSegments: 0,
-      statusLabel: 'Preparando a playlist…',
-      error: undefined,
-    }));
-    return { ...state, items, busyId: event.id };
+  if (event.type === 'DOWNLOAD_STARTED' || event.type === 'MEDIA_DOWNLOAD_STARTED') {
+    const next = updateStateItem(state, event.id, (item) => {
+      const hls = event.kind === 'hls' || item.kind === 'hls';
+      return {
+        selectedIndex: event.selectedIndex ?? 0,
+        phase: 'preparing',
+        active: false,
+        progress: hls ? 0 : null,
+        completedSegments: hls ? 0 : undefined,
+        totalSegments: hls ? 0 : undefined,
+        statusLabel: hls ? 'Preparando a playlist…' : 'Iniciando download…',
+        error: undefined,
+      };
+    });
+    return { ...next, busyId: event.id };
   }
 
   if (event.type === 'HLS_INSPECTED') {
@@ -315,17 +373,16 @@ export function reduceState(state, event) {
   }
 
   if (event.type === 'QUALITY_SELECTED') {
-    return {
-      ...state,
-      items: updateItem(state.items, event.id, (item) => {
-        const selected = item.variants[event.selectedIndex];
-        return {
-          selectedIndex: event.selectedIndex,
-          filename: selected?.filename ?? item.filename,
-          ...(item.kind === 'youtube' && selected ? { predictedFormat: selected.container } : {}),
-        };
-      }),
-    };
+    return updateStateItem(state, event.id, (item) => {
+      if (item.active || ['permission', 'preparing', 'sent'].includes(item.phase)) return {};
+      const selected = item.variants[event.selectedIndex];
+      if (!selected) return {};
+      return {
+        selectedIndex: event.selectedIndex,
+        filename: selected.filename ?? item.filename,
+        ...(['youtube', 'remote-media'].includes(item.kind) ? { predictedFormat: selected.container } : {}),
+      };
+    });
   }
 
   if (event.type === 'HLS_QUEUED') {
@@ -351,40 +408,49 @@ export function reduceState(state, event) {
       selectedIndex: event.selectedIndex,
       ...operationView(event.record),
     }));
-    return { ...state, items, busyId: currentBusyId(items) };
+    const downloads = (state.downloads ?? []).filter((item) => item.operationId !== event.record.operationId);
+    return { ...state, items, downloads, busyId: currentBusyId(items, downloads) };
   }
 
   if (event.type === 'HLS_OPERATION_UPDATED') {
-    const items = updateOperation(state.items, event.operationId, event.record);
-    return { ...state, items, busyId: currentBusyId(items) };
+    const next = updateStateOperation(state, event.operationId, event.record);
+    return { ...next, busyId: currentBusyId(next.items, next.downloads) };
   }
 
   if (event.type === 'HLS_OPERATION_RESTORED') {
     const restored = restoredHlsItem(event.record);
-    const existing = state.items.find((item) => item.operationId === event.record.operationId);
-    const items = existing
-      ? state.items.map((item) => item === existing ? { ...item, ...operationView(event.record) } : item)
-      : [...state.items, restored];
+    const existingItem = state.items.find((item) => item.operationId === event.record.operationId);
+    if (existingItem) {
+      const items = state.items.map((item) => item === existingItem
+        ? { ...item, ...operationView(event.record) }
+        : item);
+      return { ...state, items, busyId: currentBusyId(items, state.downloads) };
+    }
+    const downloads = [
+      ...(state.downloads ?? []).filter((item) => item.operationId !== event.record.operationId),
+      restored,
+    ];
     return {
       ...state,
-      status: 'results',
-      target: state.target || 'download em andamento',
-      items,
-      busyId: currentBusyId(items),
-      message: `${items.length} ${items.length === 1 ? 'vÃ­deo encontrado' : 'vÃ­deos encontrados'}`,
+      status: state.status === 'restoring' ? 'restoring' : 'results',
+      target: state.target || 'downloads',
+      downloads,
+      busyId: currentBusyId(state.items, downloads),
+      message: restored.phase === 'complete'
+        ? 'Download concluído'
+        : restored.phase === 'error' ? restored.statusLabel : 'Download em andamento',
     };
   }
 
   if (event.type === 'PERMISSION_REQUIRED') {
-    const items = updateItem(state.items, event.id, () => ({
+    const next = updateStateItem(state, event.id, () => ({
       phase: 'permission',
       selectedIndex: event.selectedIndex,
       statusLabel: ERROR_MESSAGES.HLS_PERMISSION,
     }));
     return {
-      ...state,
-      items,
-      busyId: currentBusyId(items),
+      ...next,
+      busyId: currentBusyId(next.items, next.downloads),
       pendingPermission: {
         id: event.id,
         selectedIndex: event.selectedIndex,
@@ -395,22 +461,27 @@ export function reduceState(state, event) {
   }
 
   if (event.type === 'DIRECT_SENT') {
-    const items = updateItem(state.items, event.id, () => ({
+    const next = updateStateItem(state, event.id, () => ({
       selectedIndex: event.selectedIndex,
       downloadId: event.downloadId,
       phase: 'sent',
-      statusLabel: 'Download enviado ao Chrome',
+      statusLabel: 'Download iniciado',
       error: undefined,
     }));
-    return { ...state, items, busyId: currentBusyId(items), message: 'Download enviado ao Chrome' };
+    return {
+      ...next,
+      busyId: currentBusyId(next.items, next.downloads),
+      message: 'Download iniciado',
+    };
   }
 
   if (event.type === 'DOWNLOAD_RELOCATION_UPDATED') {
     const record = event.record;
-    const existing = state.items.find((item) => (
-      item.downloadId === record.downloadId
-      || item.operationId === record.operationId
-    ));
+    const matches = (item) => item.downloadId === record.downloadId
+      || item.operationId === record.operationId;
+    const existingItem = state.items.find(matches);
+    const existingDownload = (state.downloads ?? []).find(matches);
+    const existing = existingItem ?? existingDownload;
     const updated = existing
       ? {
           ...existing,
@@ -419,21 +490,20 @@ export function reduceState(state, event) {
           ...relocationView(record),
         }
       : restoredRelocationItem(record);
-    const items = [
-      ...state.items.filter((item) => (
-        item !== existing
-        && item.downloadId !== record.downloadId
-        && item.operationId !== record.operationId
-      )),
-      updated,
-    ];
+    const items = existingItem
+      ? state.items.map((item) => item === existingItem ? updated : item)
+      : state.items;
+    const downloads = existingItem
+      ? (state.downloads ?? []).filter((item) => !matches(item))
+      : [...(state.downloads ?? []).filter((item) => !matches(item)), updated];
     return {
       ...state,
-      status: 'results',
+      status: state.status === 'restoring' ? 'restoring' : 'results',
       target: state.target || 'downloads',
       items,
-      busyId: currentBusyId(items),
-      message: `${items.length} ${items.length === 1 ? 'vídeo encontrado' : 'vídeos encontrados'}`,
+      downloads,
+      busyId: currentBusyId(items, downloads),
+      message: record.status === 'complete' ? 'Download concluído' : 'Download atualizado',
     };
   }
 
@@ -447,66 +517,94 @@ export function reduceState(state, event) {
 
   if (event.type === 'YOUTUBE_JOB_RESTORED') {
     if (!event.snapshot) return state;
-    const item = youtubeView(event.snapshot, state.items.find((entry) => entry.id === `youtube:${event.snapshot.videoId}`));
-    const items = [...state.items.filter((entry) => entry.id !== item.id), item];
+    const page = canonicalMediaPage(event.snapshot.url);
+    const itemId = `${page?.platform ?? 'youtube'}:${event.snapshot.videoId}`;
+    const existingItem = state.items.find((entry) => entry.id === itemId);
+    const existingDownload = (state.downloads ?? []).find((entry) => entry.id === itemId);
+    const item = youtubeView(event.snapshot, existingItem ?? existingDownload);
+    const items = existingItem
+      ? state.items.map((entry) => entry === existingItem ? item : entry)
+      : state.items;
+    const downloads = existingItem
+      ? (state.downloads ?? []).filter((entry) => entry.id !== item.id)
+      : [...(state.downloads ?? []).filter((entry) => entry.id !== item.id), item];
     return {
       ...state,
-      status: 'results', target: 'youtube.com', items,
-      busyId: item.active ? item.id : currentBusyId(items), message: '1 vídeo encontrado',
+      status: state.status === 'restoring' ? 'restoring' : 'results',
+      target: state.target || (page?.platform === 'x' ? 'x.com' : `${page?.platform ?? 'youtube'}.com`),
+      items,
+      downloads,
+      busyId: item.active ? item.id : currentBusyId(items, downloads),
+      message: item.active ? 'Download em andamento' : 'Download restaurado',
     };
   }
 
   if (event.type === 'YOUTUBE_JOB_UPDATED') {
     if (!event.snapshot) return state;
-    const existing = state.items.find((entry) => entry.kind === 'youtube' && entry.jobId === event.snapshot.jobId)
-      ?? state.items.find((entry) => entry.id === `youtube:${event.snapshot.videoId}`);
-    const item = youtubeView(event.snapshot, existing);
-    const items = existing
-      ? state.items.map((entry) => entry === existing ? item : entry)
-      : [...state.items, item];
+    const page = canonicalMediaPage(event.snapshot.url);
+    const itemId = `${page?.platform ?? 'youtube'}:${event.snapshot.videoId}`;
+    const matches = (entry) => (
+      ['youtube', 'remote-media'].includes(entry.kind) && entry.jobId === event.snapshot.jobId
+    ) || entry.id === itemId;
+    const existingItem = state.items.find(matches);
+    const existingDownload = (state.downloads ?? []).find(matches);
+    const item = youtubeView(event.snapshot, existingItem ?? existingDownload);
+    const items = existingItem
+      ? state.items.map((entry) => entry === existingItem ? item : entry)
+      : state.items;
+    const downloads = existingItem
+      ? (state.downloads ?? []).filter((entry) => !matches(entry))
+      : [...(state.downloads ?? []).filter((entry) => !matches(entry)), item];
     return {
       ...state,
-      status: 'results', target: state.target || 'youtube.com', items,
-      busyId: item.active ? item.id : currentBusyId(items),
-      message: state.message || '1 vídeo encontrado',
+      status: 'results', target: state.target || 'downloads', items, downloads,
+      busyId: item.active ? item.id : currentBusyId(items, downloads),
+      message: item.active ? 'Download em andamento' : state.message || 'Download atualizado',
     };
   }
 
   if (event.type === 'YOUTUBE_START_CANCELLED') {
-    const items = updateItem(state.items, event.id, () => ({
+    const next = updateStateItem(state, event.id, () => ({
       phase: 'ready',
       active: false,
       statusLabel: '',
       error: null,
     }));
     return {
-      ...state,
-      items,
-      busyId: currentBusyId(items),
+      ...next,
+      busyId: currentBusyId(next.items, next.downloads),
       message: 'Download cancelado',
+    };
+  }
+
+  if (event.type === 'REVEAL_FAILED') {
+    const message = userMessageForError('REVEAL_FAILED');
+    return {
+      ...updateStateItem(state, event.id, () => ({ statusLabel: message, revealError: true })),
+      message,
     };
   }
 
   if (event.type === 'FAILED') {
     const errorMessage = userMessageForError(event.code);
     if (event.id) {
-      const items = updateItem(state.items, event.id, () => ({
+      const next = updateStateItem(state, event.id, () => ({
         phase: 'error',
+        active: false,
         statusLabel: errorMessage,
         error: { code: event.code, details: event.details ?? {} },
         ...(DESTINATION_ERRORS.has(event.code) ? { action: 'open-download-settings' } : {}),
       }));
       return {
-        ...state,
-        items,
-        busyId: currentBusyId(items),
+        ...next,
+        busyId: currentBusyId(next.items, next.downloads),
         pendingPermission: state.pendingPermission?.id === event.id ? null : state.pendingPermission,
         message: errorMessage,
       };
     }
     return {
       ...state,
-      status: state.items.length ? 'results' : 'error',
+      status: state.items.length || (state.downloads ?? []).length ? 'results' : 'error',
       busyId: null,
       message: errorMessage,
     };

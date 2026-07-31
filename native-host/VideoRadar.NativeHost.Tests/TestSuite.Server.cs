@@ -23,6 +23,7 @@ internal static partial class TestSuite
         NativeHostServerCancelsAndAwaitsTheJobAtEof().GetAwaiter().GetResult();
         NativeHostServerRejectsInvalidPayloadsWithoutStopping().GetAwaiter().GetResult();
         NativeHostServerMapsKnownFailuresWithoutLeakingDetails().GetAwaiter().GetResult();
+        NativeHostServerPreservesSafeMediaDownloadFailures().GetAwaiter().GetResult();
         NativeHostServerChoosesAndCancelsDownloadFolder().GetAwaiter().GetResult();
         NativeHostServerPropagatesCancellationFromFolderPicker().GetAwaiter().GetResult();
         NativeHostServerMapsFolderPickerFailuresWithoutStopping().GetAwaiter().GetResult();
@@ -30,7 +31,7 @@ internal static partial class TestSuite
         NativeHostServerRejectsInvalidFallbackFolders();
         NativeHostServerMovesDownloadedFilesAndMapsFailuresSafely().GetAwaiter().GetResult();
         NativeHostServerRevealsDownloadedFilesAndMapsFailuresSafely().GetAwaiter().GetResult();
-        UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts().GetAwaiter().GetResult();
+        UpdatePolicyNeverMutatesPinnedTools().GetAwaiter().GetResult();
         ProgramPingDiagnosticIsPureAndMachineReadable();
     }
 
@@ -384,6 +385,31 @@ internal static partial class TestSuite
         True(download.GetProperty("message").GetString()!.Contains("baixar", StringComparison.OrdinalIgnoreCase), "Download error was not user-facing PT-BR.");
     }
 
+    private static async Task NativeHostServerPreservesSafeMediaDownloadFailures()
+    {
+        using var input = new ControlledInputStream(FrameCommands(
+            Command("startDownload", "r-instagram", "{\"url\":\"https://www.instagram.com/reel/Chunk8-jurw/\",\"height\":960,\"destinationFolder\":null}")));
+        using var output = new SignallingOutputStream();
+        var service = new FakeYouTubeService();
+        service.StartHandler = (_, _, _, _, _, _) =>
+            throw new MediaDownloadException("MEDIA_ACCESS_DENIED", "Não foi possível acessar o arquivo de vídeo.");
+
+        var run = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
+        await output.WaitForMessageAsync("jobFailed", "r-instagram").WaitAsync(TimeSpan.FromSeconds(5));
+        input.Complete();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var failure = Message(ReadFrames(output), "jobFailed", "r-instagram");
+        Equal("MEDIA_ACCESS_DENIED", failure.GetProperty("code").GetString());
+        True(failure.GetProperty("message").GetString()!.Contains("arquivo", StringComparison.OrdinalIgnoreCase), "Safe media failure was not preserved.");
+    }
+
     private static async Task NativeHostServerChoosesAndCancelsDownloadFolder()
     {
         using var input = new MemoryStream(FrameCommands(
@@ -648,52 +674,15 @@ internal static partial class TestSuite
         _ = Message(messages, "ready", "r-after-reveal");
     }
 
-    private static async Task UpdatePolicyChecksAtMostDailyAndRecordsFailedAttempts()
+    private static async Task UpdatePolicyNeverMutatesPinnedTools()
     {
-        var root = Path.Combine(Path.GetTempPath(), "video-radar-update-tests", Guid.NewGuid().ToString("N"));
-        var statePath = Path.Combine(root, "state", "yt-dlp-update.json");
-        var tools = Path.Combine(root, "tools");
-        var now = new DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero);
-        Directory.CreateDirectory(tools);
-        try
-        {
-            True(UpdatePolicy.ShouldCheck(null, now), "Missing update timestamp was not due.");
-            True(!UpdatePolicy.ShouldCheck(now, now.AddHours(23).AddMinutes(59)), "23:59 update timestamp was due.");
-            True(UpdatePolicy.ShouldCheck(now, now.AddHours(24)), "24-hour update timestamp was not due.");
-            True(!UpdatePolicy.ShouldCheck(now, now.AddMinutes(-1)), "Clock rollback caused an update.");
+        var runner = new UpdateProcessRunner(
+            _ => throw new InvalidOperationException("The pinned-tool policy invoked a process."));
+        var policy = new UpdatePolicy(@"C:\VideoRadar\host\tools", runner);
 
-            var failedRunner = new UpdateProcessRunner(_ => throw new InvalidOperationException("offline"));
-            await new UpdatePolicy(tools, statePath, failedRunner, () => now).CheckAsync(CancellationToken.None);
-            Equal(1, failedRunner.Calls.Count);
-            Equal(Path.Combine(tools, "yt-dlp.exe"), failedRunner.Calls[0].Executable);
-            Equal("--ignore-config", failedRunner.Calls[0].Arguments[0]);
-            Equal("-U", failedRunner.Calls[0].Arguments[1]);
-            True(failedRunner.Calls[0].OnOutput is null, "Updater unexpectedly installed an output callback.");
+        await policy.CheckAsync(CancellationToken.None);
 
-            using (var state = JsonDocument.Parse(await File.ReadAllTextAsync(statePath)))
-                Equal(now, state.RootElement.GetProperty("lastCheckUtc").GetDateTimeOffset());
-
-            var earlyRunner = new UpdateProcessRunner(_ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty)));
-            await new UpdatePolicy(tools, statePath, earlyRunner, () => now.AddHours(23).AddMinutes(59)).CheckAsync(CancellationToken.None);
-            Equal(0, earlyRunner.Calls.Count);
-
-            var dueRunner = new UpdateProcessRunner(_ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(1, string.Empty, "network error")));
-            await new UpdatePolicy(tools, statePath, dueRunner, () => now.AddHours(24)).CheckAsync(CancellationToken.None);
-            Equal(1, dueRunner.Calls.Count);
-
-            var backwardsRunner = new UpdateProcessRunner(_ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty)));
-            await new UpdatePolicy(tools, statePath, backwardsRunner, () => now).CheckAsync(CancellationToken.None);
-            Equal(0, backwardsRunner.Calls.Count);
-
-            await File.WriteAllTextAsync(statePath, "{ corrupt");
-            var corruptRunner = new UpdateProcessRunner(_ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, string.Empty, string.Empty)));
-            await new UpdatePolicy(tools, statePath, corruptRunner, () => now).CheckAsync(CancellationToken.None);
-            Equal(1, corruptRunner.Calls.Count);
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
+        Equal(0, runner.Calls.Count);
     }
 
     private static void ProgramPingDiagnosticIsPureAndMachineReadable()

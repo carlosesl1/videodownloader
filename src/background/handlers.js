@@ -4,11 +4,19 @@ import {
   readDownloadPreferences,
 } from '../shared/download-preferences.js';
 import { HOST_COMMANDS } from '../youtube/protocol.js';
+import {
+  HLS_INDEX_MIGRATION,
+  HLS_INSPECTION_INDEX,
+  HLS_INSPECTION_PREFIX,
+  HLS_OPERATION_INDEX,
+  HLS_OPERATION_PREFIX,
+  stringIndex,
+} from '../shared/persistence-keys.js';
 
-const OPERATION_PREFIX = 'hlsOperation:';
+const OPERATION_PREFIX = HLS_OPERATION_PREFIX;
 const DEDUPE_PREFIX = 'hlsDedupe:';
 const TRACKING_PREFIX = 'hlsDownloadBlob:';
-const INSPECTION_PREFIX = 'hlsInspection:';
+const INSPECTION_PREFIX = HLS_INSPECTION_PREFIX;
 const ACTIVE_STATES = new Set(['starting', 'assembling', 'assembled', 'downloading']);
 const ASSEMBLY_STATES = new Set(['starting', 'assembling', 'assembled']);
 const PERMISSION_STATES = new Set(['starting', 'assembling']);
@@ -186,10 +194,25 @@ export function createBackgroundHandlers({
   relocation,
   createOperationId = defaultOperationId,
   createInspectionId = defaultOperationId,
-  scheduleRetry = (callback) => setTimeout(() => Promise.resolve(callback()).catch(() => {}), 1_000),
+  now = Date.now,
+  progressPersistIntervalMs = 1_000,
+  scheduleMaintenance = () => {},
 } = {}) {
   let queue = Promise.resolve();
-  const scheduledCleanup = new Set();
+  let indexesReady;
+
+  if (typeof now !== 'function' || !Number.isSafeInteger(progressPersistIntervalMs)
+    || progressPersistIntervalMs < 0 || typeof scheduleMaintenance !== 'function') {
+    throw new TypeError('Dependências inválidas do processamento HLS.');
+  }
+
+  function requestMaintenance() {
+    try {
+      scheduleMaintenance();
+    } catch {
+      // A próxima inicialização ou transição durável também reconciliará o estado.
+    }
+  }
 
   function serialized(operation) {
     const task = queue.then(operation, operation);
@@ -256,18 +279,145 @@ export function createBackgroundHandlers({
     return safelyRead(result, key);
   }
 
-  async function allRecords() {
-    const entries = await storageSession.get(null);
+  function validIndex(value) {
+    return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.length > 0);
+  }
+
+  function scanIndex(entries, prefix, property) {
     return Object.entries(entries ?? {})
-      .filter(([key, value]) => key.startsWith(OPERATION_PREFIX) && isObject(value))
-      .map(([, value]) => value);
+      .filter(([key, value]) => (
+        key.startsWith(prefix)
+        && isObject(value)
+        && typeof value[property] === 'string'
+        && key === `${prefix}${value[property]}`
+      ))
+      .map(([, value]) => value[property]);
+  }
+
+  async function ensureIndexes() {
+    if (!indexesReady) {
+      indexesReady = (async () => {
+        const stored = await storageSession.get([
+          HLS_OPERATION_INDEX,
+          HLS_INSPECTION_INDEX,
+          HLS_INDEX_MIGRATION,
+        ]);
+        const operationIndex = safelyRead(stored, HLS_OPERATION_INDEX);
+        const inspectionIndex = safelyRead(stored, HLS_INSPECTION_INDEX);
+        if (
+          safelyRead(stored, HLS_INDEX_MIGRATION) === 1
+          && validIndex(operationIndex)
+          && validIndex(inspectionIndex)
+        ) return;
+
+        const entries = await storageSession.get(null);
+        await storageSession.set({
+          [HLS_OPERATION_INDEX]: scanIndex(entries, OPERATION_PREFIX, 'operationId'),
+          [HLS_INSPECTION_INDEX]: scanIndex(entries, INSPECTION_PREFIX, 'inspectionId'),
+          [HLS_INDEX_MIGRATION]: 1,
+        });
+      })().catch((error) => {
+        indexesReady = undefined;
+        throw error;
+      });
+    }
+    await indexesReady;
+  }
+
+  async function indexedValues(indexKey, prefix, property) {
+    await ensureIndexes();
+    const indexResult = await storageSession.get(indexKey);
+    const indexed = stringIndex(safelyRead(indexResult, indexKey));
+    if (indexed.length === 0) return [];
+    const keys = indexed.map((id) => `${prefix}${id}`);
+    const entries = await storageSession.get(keys);
+    const values = [];
+    const repaired = [];
+    for (const id of indexed) {
+      const value = safelyRead(entries, `${prefix}${id}`);
+      if (!isObject(value) || value[property] !== id) continue;
+      repaired.push(id);
+      values.push(value);
+    }
+    if (repaired.length !== indexed.length) {
+      await storageSession.set({ [indexKey]: repaired });
+    }
+    return values;
+  }
+
+  async function persistIndexed(indexKey, id, entryKey, value) {
+    await ensureIndexes();
+    const stored = await storageSession.get(indexKey);
+    const indexed = stringIndex(safelyRead(stored, indexKey));
+    if (!indexed.includes(id)) indexed.push(id);
+    await storageSession.set({ [entryKey]: value, [indexKey]: indexed });
+    return value;
+  }
+
+  async function removeIndexed(indexKey, id, entryKey) {
+    await ensureIndexes();
+    const stored = await storageSession.get(indexKey);
+    const indexed = stringIndex(safelyRead(stored, indexKey)).filter((entry) => entry !== id);
+    await storageSession.remove(entryKey);
+    await storageSession.set({ [indexKey]: indexed });
+  }
+
+  function touchRecord(record) {
+    const updatedAt = now();
+    if (!Number.isSafeInteger(updatedAt) || updatedAt < 0) {
+      throw new BackgroundError('BACKGROUND_CLOCK', 'O relógio do sistema é inválido.');
+    }
+    return { ...record, updatedAt };
+  }
+
+  async function persistRecord(record, { touch = true, entries = {} } = {}) {
+    await ensureIndexes();
+    const value = touch ? touchRecord(record) : record;
+    const stored = await storageSession.get(HLS_OPERATION_INDEX);
+    const indexed = stringIndex(safelyRead(stored, HLS_OPERATION_INDEX));
+    if (!indexed.includes(value.operationId)) indexed.push(value.operationId);
+    await storageSession.set({
+      [operationKey(value.operationId)]: value,
+      [HLS_OPERATION_INDEX]: indexed,
+      ...entries,
+    });
+    return value;
+  }
+
+  async function persistLease(lease) {
+    return persistIndexed(
+      HLS_INSPECTION_INDEX,
+      lease.inspectionId,
+      inspectionKey(lease.inspectionId),
+      lease,
+    );
+  }
+
+  async function allRecords() {
+    return indexedValues(HLS_OPERATION_INDEX, OPERATION_PREFIX, 'operationId');
   }
 
   async function allInspectionLeases() {
-    const entries = await storageSession.get(null);
-    return Object.entries(entries ?? {})
-      .filter(([key, value]) => key.startsWith(INSPECTION_PREFIX) && isObject(value))
-      .map(([, value]) => value);
+    return indexedValues(HLS_INSPECTION_INDEX, INSPECTION_PREFIX, 'inspectionId');
+  }
+
+  async function pruneTerminalRecords() {
+    const records = await allRecords();
+    const terminal = records
+      .filter((record) => TERMINAL_STATES.has(record.state) && !record.cleanupPending)
+      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+    const keep = new Set([
+      ...terminal.filter((record) => record.state === 'failed').slice(0, 20),
+      ...terminal.filter((record) => record.state !== 'failed').slice(0, 20),
+    ].map((record) => record.operationId));
+    const expired = terminal.filter((record) => !keep.has(record.operationId));
+    if (expired.length === 0) return;
+    const expiredIds = new Set(expired.map((record) => record.operationId));
+    const indexed = records
+      .map((record) => record.operationId)
+      .filter((operationId) => !expiredIds.has(operationId));
+    await storageSession.remove(expired.map((record) => operationKey(record.operationId)));
+    await storageSession.set({ [HLS_OPERATION_INDEX]: indexed });
   }
 
   async function permissionsContain(patterns) {
@@ -308,7 +458,8 @@ export function createBackgroundHandlers({
 
   async function cleanupInspectionLease(lease) {
     await removeUnusedPermissions(lease.permissionPatterns ?? []);
-    await storageSession.remove(inspectionKey(lease.inspectionId));
+    await removeIndexed(HLS_INSPECTION_INDEX, lease.inspectionId, inspectionKey(lease.inspectionId));
+    requestMaintenance();
   }
 
   async function inspectHls(message) {
@@ -321,12 +472,10 @@ export function createBackgroundHandlers({
           'A permissão temporária expirou antes do processamento HLS.',
         );
       }
-      await storageSession.set({
-        [inspectionKey(inspectionId)]: {
-          inspectionId,
-          permissionPatterns: patterns,
-          state: 'active',
-        },
+      await persistLease({
+        inspectionId,
+        permissionPatterns: patterns,
+        state: 'active',
       });
     });
 
@@ -343,10 +492,7 @@ export function createBackgroundHandlers({
 
     try {
       await serialized(async () => {
-        const key = inspectionKey(inspectionId);
-        await storageSession.set({
-          [key]: { inspectionId, permissionPatterns: patterns, state: 'releasing' },
-        });
+        await persistLease({ inspectionId, permissionPatterns: patterns, state: 'releasing' });
         await armInspectionCleanup(inspectionId);
         await cleanupInspectionLease({ inspectionId, permissionPatterns: patterns, state: 'releasing' });
       });
@@ -373,9 +519,7 @@ export function createBackgroundHandlers({
       || value.state !== 'assembling'
       || Object.keys(value).some((key) => key !== 'operationId' && key !== 'state')
     ) throw malformedOffscreenResponse();
-    const assembling = { ...record, state: 'assembling' };
-    await storageSession.set({ [operationKey(record.operationId)]: assembling });
-    return assembling;
+    return persistRecord({ ...record, state: 'assembling' });
   }
 
   async function startHls(message) {
@@ -411,7 +555,7 @@ export function createBackgroundHandlers({
         );
       }
       const operationId = createOperationId();
-      const record = {
+      let record = {
         operationId,
         dedupeKey,
         url: canonicalUrl,
@@ -427,9 +571,8 @@ export function createBackgroundHandlers({
           percent: 0,
         },
       };
-      await storageSession.set({
-        [operationKey(operationId)]: record,
-        [dedupeKeyName]: operationId,
+      record = await persistRecord(record, {
+        entries: { [dedupeKeyName]: operationId },
       });
       const assembling = await sendStartAndMark(record);
       return { operationId, state: assembling.state };
@@ -449,18 +592,8 @@ export function createBackgroundHandlers({
     ));
   }
 
-  function scheduleCleanupRetry(operationId) {
-    if (scheduledCleanup.has(operationId)) return;
-    scheduledCleanup.add(operationId);
-    scheduleRetry(() => {
-      scheduledCleanup.delete(operationId);
-      return serialized(async () => {
-        const record = await getRecord(operationId);
-        if (isObject(record) && TERMINAL_STATES.has(record.state) && record.cleanupPending) {
-          await beginTerminalCleanup(record);
-        }
-      });
-    });
+  function scheduleCleanupRetry() {
+    requestMaintenance();
   }
 
   async function requestBlobRelease(record) {
@@ -488,8 +621,10 @@ export function createBackgroundHandlers({
     delete finalized.blobUrl;
     delete finalized.size;
     delete finalized.downloadId;
-    await storageSession.set({ [operationKey(record.operationId)]: finalized });
-    return finalized;
+    const persisted = await persistRecord(finalized);
+    await pruneTerminalRecords();
+    requestMaintenance();
+    return persisted;
   }
 
   async function beginTerminalCleanup(record) {
@@ -505,17 +640,14 @@ export function createBackgroundHandlers({
   }
 
   async function markTerminal(record, state) {
-    const terminal = { ...record, state, cleanupPending: true };
-    await storageSession.set({ [operationKey(record.operationId)]: terminal });
+    const terminal = await persistRecord({ ...record, state, cleanupPending: true });
     await beginTerminalCleanup(terminal);
   }
 
   async function releaseAssemblyPermissions(record) {
     if (record.permissionsReleased) return record;
     await removeUnusedPermissions(record.permissionPatterns ?? []);
-    const updated = { ...record, permissionsReleased: true };
-    await storageSession.set({ [operationKey(record.operationId)]: updated });
-    return updated;
+    return persistRecord({ ...record, permissionsReleased: true });
   }
 
   async function persistDownloadMapping(record, download) {
@@ -524,15 +656,14 @@ export function createBackgroundHandlers({
       operationId: record.operationId,
       blobUrl: record.blobUrl,
     };
-    await storageSession.set({
-      [operationKey(record.operationId)]: mapped,
-      [trackingKey(download.id)]: tracked,
+    const persisted = await persistRecord(mapped, {
+      entries: { [trackingKey(download.id)]: tracked },
     });
     const terminalState = download.state;
     if (terminalState === 'complete' || terminalState === 'interrupted') {
-      await markTerminal(mapped, terminalState);
+      await markTerminal(persisted, terminalState);
     }
-    return mapped;
+    return persisted;
   }
 
   async function handoffAssembled(record) {
@@ -621,7 +752,7 @@ export function createBackgroundHandlers({
             percent: 100,
           },
         };
-        await storageSession.set({ [operationKey(operationId)]: record });
+        record = await persistRecord(record);
       }
       record = await releaseAssemblyPermissions(record);
       await handoffAssembled(record);
@@ -651,19 +782,27 @@ export function createBackgroundHandlers({
         return { acknowledged: true };
       }
       const percent = Math.min(100, Math.floor((completedSegments / totalSegments) * 100));
-      await storageSession.set({
-        [operationKey(operationId)]: {
-          ...record,
-          state: 'assembling',
-          progress: {
-            completedSegments,
-            totalSegments,
-            bytesReceived,
-            estimatedTotalBytes,
-            percent,
-          },
+      const updated = touchRecord({
+        ...record,
+        state: 'assembling',
+        progress: {
+          completedSegments,
+          totalSegments,
+          bytesReceived,
+          estimatedTotalBytes,
+          percent,
         },
       });
+      if (
+        record.state === 'assembling'
+        && Number.isSafeInteger(record.progressUpdatedAt)
+        && updated.updatedAt - record.progressUpdatedAt < progressPersistIntervalMs
+        && percent < 100
+      ) return { acknowledged: true };
+      await persistRecord({
+        ...updated,
+        progressUpdatedAt: updated.updatedAt,
+      }, { touch: false });
       return { acknowledged: true };
     });
   }
@@ -700,10 +839,8 @@ export function createBackgroundHandlers({
           ACTIVE_STATES.has(candidate.state) && candidate.blobUrl === item.url
         ));
         if (!record) return;
-        const mapped = { ...record, downloadId: delta.id };
-        await storageSession.set({
-          [operationKey(record.operationId)]: mapped,
-          [key]: { operationId: record.operationId, blobUrl: record.blobUrl },
+        const mapped = await persistRecord({ ...record, downloadId: delta.id }, {
+          entries: { [key]: { operationId: record.operationId, blobUrl: record.blobUrl } },
         });
         await markTerminal(mapped, state);
         return;
@@ -731,9 +868,8 @@ export function createBackgroundHandlers({
 
   async function reconcileLocked() {
     for (const lease of await allInspectionLeases()) {
-      const key = inspectionKey(lease.inspectionId);
       const releasing = { ...lease, state: 'releasing' };
-      await storageSession.set({ [key]: releasing });
+      await persistLease(releasing);
       await armInspectionCleanup(releasing.inspectionId);
       await cleanupInspectionLease(releasing);
     }
@@ -750,11 +886,19 @@ export function createBackgroundHandlers({
     }
   }
 
+  async function hasPendingOffscreenWork() {
+    const [records, leases] = await Promise.all([allRecords(), allInspectionLeases()]);
+    return leases.length > 0 || records.some((record) => (
+      ACTIVE_STATES.has(record.state) || record.cleanupPending === true
+    ));
+  }
+
   const ready = serialized(reconcileLocked);
 
   return {
     ready,
     whenIdle,
+    hasPendingOffscreenWork,
     reconcile: () => serialized(reconcileLocked),
     handleDownloadChanged,
     async handle(raw) {

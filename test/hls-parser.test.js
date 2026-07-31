@@ -315,3 +315,84 @@ for (const [name, playlist, expectedCode] of [
     );
   });
 }
+
+test('enforces manifest byte, line byte, and line count boundaries', () => {
+  const playlist = [
+    '#EXTM3U',
+    '# bounded comment',
+    '#EXTINF:4.0,',
+    'segment.ts',
+    '#EXT-X-ENDLIST',
+  ].join('\n');
+  const manifestBytes = Buffer.byteLength(playlist);
+  const longestLineBytes = Math.max(...playlist.split('\n').map((line) => Buffer.byteLength(line)));
+  const options = {
+    maxManifestBytes: manifestBytes,
+    maxLineBytes: longestLineBytes,
+    maxLines: 5,
+  };
+
+  assert.equal(
+    parseHlsPlaylist(playlist, 'https://cdn.test/playlist.m3u8', options).segments.length,
+    1,
+  );
+  for (const limits of [
+    { ...options, maxManifestBytes: manifestBytes - 1 },
+    { ...options, maxLineBytes: longestLineBytes - 1 },
+    { ...options, maxLines: 4 },
+  ]) {
+    assert.throws(
+      () => parseHlsPlaylist(playlist, 'https://cdn.test/playlist.m3u8', limits),
+      (error) => error instanceof HlsError && error.code === 'HLS_MANIFEST_TOO_LARGE',
+    );
+  }
+});
+
+test('limits master variants before retaining an excessive catalog', () => {
+  const playlist = [
+    '#EXTM3U',
+    '#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360',
+    '360.m3u8',
+    '#EXT-X-STREAM-INF:BANDWIDTH=2000,RESOLUTION=1280x720',
+    '720.m3u8',
+  ].join('\n');
+
+  assert.throws(
+    () => parseHlsPlaylist(playlist, 'https://cdn.test/master.m3u8', { maxVariants: 1 }),
+    (error) => error instanceof HlsError
+      && error.code === 'HLS_VARIANT_LIMIT'
+      && error.details.maxVariants === 1,
+  );
+});
+
+test('limits media segment count and total duration at their boundaries', () => {
+  const playlist = mediaPlaylistForLimits([
+    ['4.0', 'one.ts'],
+    ['4.0', 'two.ts'],
+  ]);
+
+  assert.equal(parseHlsPlaylist(playlist, 'https://cdn.test/media.m3u8', {
+    maxSegments: 2,
+    maxDurationSeconds: 8,
+  }).segments.length, 2);
+  assert.throws(
+    () => parseHlsPlaylist(playlist, 'https://cdn.test/media.m3u8', { maxSegments: 1 }),
+    (error) => error instanceof HlsError
+      && error.code === 'HLS_SEGMENT_LIMIT'
+      && error.details.maxSegments === 1,
+  );
+  assert.throws(
+    () => parseHlsPlaylist(playlist, 'https://cdn.test/media.m3u8', { maxDurationSeconds: 7 }),
+    (error) => error instanceof HlsError
+      && error.code === 'HLS_DURATION_LIMIT'
+      && error.details.maxDurationSeconds === 7,
+  );
+});
+
+function mediaPlaylistForLimits(segments) {
+  return [
+    '#EXTM3U',
+    ...segments.flatMap(([duration, uri]) => [`#EXTINF:${duration},`, uri]),
+    '#EXT-X-ENDLIST',
+  ].join('\n');
+}

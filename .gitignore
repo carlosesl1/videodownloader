@@ -4,3 +4,6 @@
 dist/
 native-host/**/bin/
 native-host/**/obj/
+.tools/inno-*/
+.tools/v1-release/
+dist/release/

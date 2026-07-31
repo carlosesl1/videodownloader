@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
+using System.Text;
 using VideoRadar.NativeHost.Files;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Processes;
 
 namespace VideoRadar.NativeHost.YouTube;
@@ -7,69 +9,99 @@ namespace VideoRadar.NativeHost.YouTube;
 public sealed partial class YouTubeService : IYouTubeService
 {
     private const int MaximumCachedCatalogs = 16;
-    private const string MetadataLookupError = "Unable to retrieve YouTube video metadata.";
-    private const string DownloadError = "Unable to download the YouTube video.";
+    private const int MaximumCachedMetadataBytes = 4 * 1024 * 1024;
+    private static readonly TimeSpan SocialCatalogLifetime = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan YouTubeCatalogLifetime = TimeSpan.FromMinutes(30);
+    private const string MetadataLookupError = "Unable to retrieve media metadata.";
     private const string InvalidOutputError = "The downloaded file was not reported safely.";
     private readonly string tools;
     private readonly IProcessRunner processRunner;
     private readonly IDownloadPathsFactory downloadPathsFactory;
+    private readonly TimeProvider timeProvider;
     private readonly object stateLock = new();
-    private readonly Dictionary<string, Lazy<Task<FormatCatalog>>> catalogCache =
-        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CatalogLookup> catalogCache = new(StringComparer.Ordinal);
     private readonly Queue<string> catalogOrder = new();
+    private int cachedMetadataBytes;
     private ActiveJob? activeJob;
     private JobSnapshot? snapshot;
 
     public YouTubeService(string tools, IProcessRunner processRunner)
-        : this(tools, processRunner, CreateDefaultFactory())
+        : this(tools, processRunner, CreateDefaultFactory(), TimeProvider.System)
     {
     }
 
     public YouTubeService(string tools, IProcessRunner processRunner, IDownloadPaths downloadPaths)
-        : this(tools, processRunner, new DownloadPathsFactory(downloadPaths.Home, downloadPaths.TempRoot))
+        : this(tools, processRunner, new DownloadPathsFactory(downloadPaths.Home, downloadPaths.TempRoot), TimeProvider.System)
     {
         ArgumentNullException.ThrowIfNull(downloadPaths);
     }
 
     public YouTubeService(string tools, IProcessRunner processRunner, IDownloadPathsFactory downloadPathsFactory)
+        : this(tools, processRunner, downloadPathsFactory, TimeProvider.System)
+    {
+    }
+
+    public YouTubeService(
+        string tools,
+        IProcessRunner processRunner,
+        IDownloadPathsFactory downloadPathsFactory,
+        TimeProvider timeProvider)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(tools);
         ArgumentNullException.ThrowIfNull(processRunner);
         ArgumentNullException.ThrowIfNull(downloadPathsFactory);
+        ArgumentNullException.ThrowIfNull(timeProvider);
         this.tools = tools;
         this.processRunner = processRunner;
         this.downloadPathsFactory = downloadPathsFactory;
+        this.timeProvider = timeProvider;
     }
 
-    public Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
+    public async Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
     {
-        if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
-            throw new InvalidDataException("Invalid YouTube URL.");
+        return (await GetCatalogAsync(url, cancellationToken)).Catalog;
+    }
 
-        Lazy<Task<FormatCatalog>> lookup;
+    private async Task<CachedCatalog> GetCatalogAsync(string url, CancellationToken cancellationToken)
+    {
+        if (!MediaPage.TryCanonicalize(url, out var page))
+            throw new InvalidDataException("Invalid media URL.");
+        var canonicalUrl = page!.CanonicalUrl;
+
+        CatalogLookup lookup;
         lock (stateLock)
         {
-            if (!catalogCache.TryGetValue(canonicalUrl, out lookup!))
+            if (catalogCache.TryGetValue(canonicalUrl, out lookup!) && IsExpired(lookup))
             {
-                lookup = new Lazy<Task<FormatCatalog>>(
-                    () => LoadCatalogAsync(canonicalUrl, cancellationToken),
-                    LazyThreadSafetyMode.ExecutionAndPublication);
+                RemoveCatalogLocked(canonicalUrl, lookup);
+                lookup = null!;
+            }
+            if (lookup is null)
+            {
+                lookup = new CatalogLookup(
+                    page.Platform,
+                    new Lazy<Task<CachedCatalog>>(
+                        () => LoadCatalogAsync(canonicalUrl, page.Platform, CancellationToken.None),
+                        LazyThreadSafetyMode.ExecutionAndPublication));
                 catalogCache.Add(canonicalUrl, lookup);
                 catalogOrder.Enqueue(canonicalUrl);
-                while (catalogCache.Count > MaximumCachedCatalogs)
-                {
-                    var oldest = catalogOrder.Dequeue();
-                    if (!string.Equals(oldest, canonicalUrl, StringComparison.Ordinal))
-                        catalogCache.Remove(oldest);
-                }
+                TrimCatalogsLocked(canonicalUrl);
             }
         }
 
-        return ObserveCatalogAsync(canonicalUrl, lookup);
+        return await ObserveCatalogAsync(canonicalUrl, lookup, cancellationToken);
     }
 
-    private async Task<FormatCatalog> LoadCatalogAsync(
+    private bool IsExpired(CatalogLookup lookup)
+    {
+        if (!lookup.Task.IsValueCreated || !lookup.Task.Value.IsCompletedSuccessfully) return false;
+        var lifetime = lookup.Platform == "youtube" ? YouTubeCatalogLifetime : SocialCatalogLifetime;
+        return timeProvider.GetUtcNow() - lookup.Task.Value.Result.CreatedAt >= lifetime;
+    }
+
+    private async Task<CachedCatalog> LoadCatalogAsync(
         string canonicalUrl,
+        string platform,
         CancellationToken cancellationToken)
     {
         var result = await processRunner.RunAsync(
@@ -79,33 +111,83 @@ public sealed partial class YouTubeService : IYouTubeService
             cancellationToken);
 
         if (result.ExitCode != 0) throw new InvalidOperationException(MetadataLookupError);
-        return FormatCatalog.Parse(result.StandardOutput);
+        var catalog = FormatCatalog.Parse(result.StandardOutput);
+        return new CachedCatalog(
+            catalog with { Platform = platform },
+            result.StandardOutput,
+            timeProvider.GetUtcNow(),
+            Encoding.UTF8.GetByteCount(result.StandardOutput));
     }
 
-    private async Task<FormatCatalog> ObserveCatalogAsync(
+    private async Task<CachedCatalog> ObserveCatalogAsync(
         string canonicalUrl,
-        Lazy<Task<FormatCatalog>> lookup)
+        CatalogLookup lookup,
+        CancellationToken cancellationToken)
     {
+        CachedCatalog cached;
         try
         {
-            return await lookup.Value;
+            cached = await lookup.Task.Value.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
-            lock (stateLock)
-            {
-                if (catalogCache.TryGetValue(canonicalUrl, out var current)
-                    && ReferenceEquals(current, lookup))
-                {
-                    catalogCache.Remove(canonicalUrl);
-                    var retained = catalogOrder
-                        .Where(url => !string.Equals(url, canonicalUrl, StringComparison.Ordinal))
-                        .ToArray();
-                    catalogOrder.Clear();
-                    foreach (var url in retained) catalogOrder.Enqueue(url);
-                }
-            }
+            lock (stateLock) RemoveCatalogLocked(canonicalUrl, lookup);
             throw;
+        }
+
+        lock (stateLock)
+        {
+            if (catalogCache.TryGetValue(canonicalUrl, out var current)
+                && ReferenceEquals(current, lookup)
+                && lookup.MetadataBytes == 0)
+            {
+                lookup.MetadataBytes = cached.MetadataBytes;
+                cachedMetadataBytes += cached.MetadataBytes;
+                TrimCatalogsLocked(canonicalUrl);
+            }
+        }
+        return cached;
+    }
+
+    private void InvalidateCatalog(string canonicalUrl)
+    {
+        lock (stateLock)
+        {
+            if (catalogCache.TryGetValue(canonicalUrl, out var lookup))
+                RemoveCatalogLocked(canonicalUrl, lookup);
+        }
+    }
+
+    private void RemoveCatalogLocked(string canonicalUrl, CatalogLookup lookup)
+    {
+        if (!catalogCache.TryGetValue(canonicalUrl, out var current) || !ReferenceEquals(current, lookup)) return;
+        catalogCache.Remove(canonicalUrl);
+        cachedMetadataBytes -= lookup.MetadataBytes;
+        var retained = catalogOrder
+            .Where(url => !string.Equals(url, canonicalUrl, StringComparison.Ordinal))
+            .ToArray();
+        catalogOrder.Clear();
+        foreach (var url in retained) catalogOrder.Enqueue(url);
+    }
+
+    private void TrimCatalogsLocked(string newestUrl)
+    {
+        while ((catalogCache.Count > MaximumCachedCatalogs || cachedMetadataBytes > MaximumCachedMetadataBytes)
+            && catalogOrder.Count > 0)
+        {
+            var oldest = catalogOrder.Dequeue();
+            if (!catalogCache.TryGetValue(oldest, out var lookup)) continue;
+            if (string.Equals(oldest, newestUrl, StringComparison.Ordinal) && catalogCache.Count > 1)
+            {
+                catalogOrder.Enqueue(oldest);
+                continue;
+            }
+            catalogCache.Remove(oldest);
+            cachedMetadataBytes -= lookup.MetadataBytes;
         }
     }
 
@@ -118,8 +200,9 @@ public sealed partial class YouTubeService : IYouTubeService
         CancellationToken cancellationToken)
     {
         ValidateJobId(jobId);
-        if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
-            throw new InvalidDataException("Invalid YouTube URL.");
+        if (!MediaPage.TryCanonicalize(url, out var page))
+            throw new InvalidDataException("Invalid media URL.");
+        var canonicalUrl = page!.CanonicalUrl;
         if (height is < 144 or > 4320) throw new ArgumentOutOfRangeException(nameof(height));
         ArgumentNullException.ThrowIfNull(onProgress);
         cancellationToken.ThrowIfCancellationRequested();
@@ -143,12 +226,9 @@ public sealed partial class YouTubeService : IYouTubeService
         var tempCreated = false;
         try
         {
-            var catalog = await ListFormatsAsync(canonicalUrl, linkedCancellation.Token);
-            if (!catalog.Qualities.Any(quality => quality.Height == height))
-            {
-                SetTerminal(job, "failed", "invalid_selection");
-                throw new InvalidDataException("Selected quality is unavailable.");
-            }
+            var cachedCatalog = await GetCatalogAsync(canonicalUrl, linkedCancellation.Token);
+            var catalog = cachedCatalog.Catalog;
+            EnsureQualityAvailable(job, catalog, height, "invalid_selection");
 
             SetMetadata(job, catalog);
             paths = downloadPathsFactory.Create(destinationFolder);
@@ -156,17 +236,52 @@ public sealed partial class YouTubeService : IYouTubeService
             var temp = paths.CreateJobTemp(jobId);
             tempCreated = true;
 
-            var result = await processRunner.RunAsync(
-                Path.Combine(tools, "yt-dlp.exe"),
-                YtDlpArguments.Download(tools, paths.Home, temp, reservedStem, canonicalUrl, height),
-                line => HandleOutputAsync(job, paths, line, onProgress),
-                linkedCancellation.Token);
-
-            linkedCancellation.Token.ThrowIfCancellationRequested();
-            if (result.ExitCode != 0)
+            for (var attempt = 0; ; attempt++)
             {
-                SetTerminal(job, "failed", "download_failed");
-                throw new InvalidOperationException(DownloadError);
+                string? infoJsonPath = null;
+                if (page.Platform == "instagram")
+                {
+                    infoJsonPath = Path.Combine(temp, "media.info.json");
+                    await File.WriteAllTextAsync(
+                        infoJsonPath,
+                        cachedCatalog.MetadataJson,
+                        new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                        linkedCancellation.Token);
+                }
+
+                var result = await processRunner.RunAsync(
+                    Path.Combine(tools, "yt-dlp.exe"),
+                    YtDlpArguments.Download(
+                        tools,
+                        paths.Home,
+                        temp,
+                        reservedStem,
+                        canonicalUrl,
+                        height,
+                        infoJsonPath),
+                    line => HandleOutputAsync(job, paths, line, onProgress),
+                    linkedCancellation.Token);
+
+                linkedCancellation.Token.ThrowIfCancellationRequested();
+                if (result.ExitCode == 0) break;
+
+                var failure = ClassifyDownloadFailure(result.StandardError);
+                if (page.Platform == "instagram"
+                    && attempt == 0
+                    && failure.Code == "MEDIA_ACCESS_DENIED")
+                {
+                    InvalidateCatalog(canonicalUrl);
+                    paths.DeleteJobTemp(jobId);
+                    temp = paths.CreateJobTemp(jobId);
+                    cachedCatalog = await GetCatalogAsync(canonicalUrl, linkedCancellation.Token);
+                    catalog = cachedCatalog.Catalog;
+                    EnsureQualityAvailable(job, catalog, height, "FORMAT_UNAVAILABLE");
+                    SetMetadata(job, catalog);
+                    continue;
+                }
+
+                SetTerminal(job, "failed", failure.Code);
+                throw failure;
             }
 
             string? finalPath;
@@ -240,6 +355,24 @@ public sealed partial class YouTubeService : IYouTubeService
         lock (stateLock) return snapshot;
     }
 
+    private void EnsureQualityAvailable(
+        ActiveJob job,
+        FormatCatalog catalog,
+        int height,
+        string errorCode)
+    {
+        if (catalog.Qualities.Any(quality => quality.Height == height)) return;
+        SetTerminal(job, "failed", errorCode);
+        if (errorCode == "FORMAT_UNAVAILABLE")
+        {
+            throw new MediaDownloadException(
+                errorCode,
+                "A qualidade escolhida não está mais disponível.");
+        }
+
+        throw new InvalidDataException("Selected quality is unavailable.");
+    }
+
     private async Task HandleOutputAsync(ActiveJob job, IDownloadPaths paths, string line, Func<JobProgress, Task> onProgress)
     {
         if (!ProgressParser.TryParse(line, out var parsed) || parsed is null) return;
@@ -297,6 +430,10 @@ public sealed partial class YouTubeService : IYouTubeService
         lock (stateLock)
         {
             if (!ReferenceEquals(activeJob, job)) return;
+            job.ProgressRank = 0;
+            job.ProgressStage = null;
+            job.ProgressPercent = null;
+            job.FinalPath = null;
             snapshot = new JobSnapshot(job.JobId, catalog.VideoId, catalog.Title, job.Height, "preparing", null, null, null);
         }
     }
@@ -329,7 +466,7 @@ public sealed partial class YouTubeService : IYouTubeService
         {
             if (!ReferenceEquals(activeJob, job) || job.Terminal) return;
             var current = snapshot!;
-            snapshot = current with { Stage = "failed", ErrorCode = "download_failed" };
+            snapshot = current with { Stage = "failed", ErrorCode = "MEDIA_DOWNLOAD_FAILED" };
             job.Terminal = true;
         }
     }
@@ -345,6 +482,25 @@ public sealed partial class YouTubeService : IYouTubeService
             // Cleanup is best-effort and must not replace the operation result or cancellation.
         }
     }
+
+    private static MediaDownloadException ClassifyDownloadFailure(string standardError)
+    {
+        var diagnostic = standardError ?? string.Empty;
+        if (ContainsAny(diagnostic, "login required", "sign in", "registered users", "follow this account"))
+            return new MediaDownloadException("LOGIN_REQUIRED", "A plataforma exige login para acessar este vídeo.");
+        if (ContainsAny(diagnostic, "http error 429", "too many requests", "rate limit", "rate-limit"))
+            return new MediaDownloadException("RATE_LIMITED", "A plataforma limitou temporariamente as tentativas.");
+        if (ContainsAny(diagnostic, "requested format is not available", "requested format not available"))
+            return new MediaDownloadException("FORMAT_UNAVAILABLE", "A qualidade escolhida não está mais disponível.");
+        if (ContainsAny(diagnostic, "http error 403", "forbidden"))
+            return new MediaDownloadException("MEDIA_ACCESS_DENIED", "O servidor da plataforma recusou o arquivo de vídeo.");
+        if (ContainsAny(diagnostic, "there is no video", "only images", "does not contain a video"))
+            return new MediaDownloadException("NO_VIDEO", "Esta publicação não contém um vídeo compatível.");
+        return new MediaDownloadException("MEDIA_DOWNLOAD_FAILED", "Não foi possível baixar o arquivo de vídeo.");
+    }
+
+    private static bool ContainsAny(string value, params string[] fragments) =>
+        fragments.Any(fragment => value.Contains(fragment, StringComparison.OrdinalIgnoreCase));
 
     private static void ValidateJobId(string jobId)
     {
@@ -372,4 +528,17 @@ public sealed partial class YouTubeService : IYouTubeService
         public string? FinalPath { get; set; }
         public bool Terminal { get; set; }
     }
+
+    private sealed class CatalogLookup(string platform, Lazy<Task<CachedCatalog>> task)
+    {
+        public string Platform { get; } = platform;
+        public Lazy<Task<CachedCatalog>> Task { get; } = task;
+        public int MetadataBytes { get; set; }
+    }
+
+    private sealed record CachedCatalog(
+        FormatCatalog Catalog,
+        string MetadataJson,
+        DateTimeOffset CreatedAt,
+        int MetadataBytes);
 }

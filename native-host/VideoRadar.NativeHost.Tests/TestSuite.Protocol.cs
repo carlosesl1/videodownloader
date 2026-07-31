@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text.Json;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.YouTube;
 
@@ -152,6 +153,64 @@ internal static partial class TestSuite
         True(!YouTubeUrl.TryCanonicalize("https://evil.test/watch?v=jNQXAC9IVRw", out _), "foreign host accepted");
         True(!YouTubeUrl.TryCanonicalize("https://youtube.com/playlist?list=x", out _), "playlist accepted");
         YouTubeUrlRejectsUnsafeOrInvalidUrls();
+    }
+
+    private static void MediaPageTests()
+    {
+        (string Input, string Platform, string Canonical, string MediaId)[] accepted =
+        [
+            (
+                "https://m.youtube.com/shorts/jNQXAC9IVRw?feature=share",
+                "youtube",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                "jNQXAC9IVRw"),
+            (
+                "https://www.tiktok.com/@video.radar/video/7488298911734435077?is_from_webapp=1",
+                "tiktok",
+                "https://www.tiktok.com/@video.radar/video/7488298911734435077",
+                "7488298911734435077"),
+            (
+                "https://vm.tiktok.com/ZM123abcD/",
+                "tiktok",
+                "https://vm.tiktok.com/ZM123abcD/",
+                "short:ZM123abcD"),
+            (
+                "https://www.instagram.com/reels/C8x_example/?igsh=abc",
+                "instagram",
+                "https://www.instagram.com/reel/C8x_example/",
+                "C8x_example"),
+            (
+                "https://twitter.com/VideoRadar/status/1907123456789012345/video/1",
+                "x",
+                "https://x.com/VideoRadar/status/1907123456789012345",
+                "1907123456789012345")
+        ];
+
+        foreach (var sample in accepted)
+        {
+            True(MediaPage.TryCanonicalize(sample.Input, out var page), $"Valid media URL rejected: {sample.Input}");
+            Equal(sample.Platform, page!.Platform);
+            Equal(sample.Canonical, page.CanonicalUrl);
+            Equal(sample.MediaId, page.MediaId);
+        }
+
+        foreach (var rejected in new[]
+        {
+            "http://x.com/user/status/1907123456789012345",
+            "https://user@x.com/user/status/1907123456789012345",
+            "https://x.com:444/user/status/1907123456789012345",
+            "https://x.com.evil.test/user/status/1907123456789012345",
+            "https://tiktok.com/extra/../@user/video/7488298911734435077",
+            "https://instagram.com/%2e/reel/C8x_example/",
+            "https://www.tiktok.com/@video.radar",
+            "https://www.instagram.com/stories/video.radar/123/",
+            "https://x.com/i/spaces/abc",
+            "https://example.com/video/123"
+        })
+        {
+            True(!MediaPage.TryCanonicalize(rejected, out var page), $"Invalid media URL accepted: {rejected}");
+            True(page is null, "Rejected URL returned a media page.");
+        }
     }
 
     private static void YouTubeUrlRejectsUnsafeOrInvalidUrls()

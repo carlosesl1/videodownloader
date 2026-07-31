@@ -6,7 +6,7 @@
 
 Video Radar is an open-source, on-demand video detector and downloader for
 Chromium-based browsers. It finds direct media (`.mp4`, `.webm`, `.mov`), HLS
-playlists (`.m3u8`) and public YouTube formats, while requesting access only
+playlists (`.m3u8`) and public YouTube, TikTok, Instagram and X videos, while requesting access only
 when the user explicitly clicks **Buscar vídeos** ("Search videos").
 
 > Use Video Radar only with media you own, public-domain/openly licensed media,
@@ -23,13 +23,13 @@ when the user explicitly clicks **Buscar vídeos** ("Search videos").
 - **Hybrid detection:** combines `<video>`/`<source>` elements with
   `PerformanceResourceTiming`.
 - **Direct and HLS media:** downloads direct files and assembles compatible HLS
-  MPEG-TS segments with up to eight concurrent requests.
-- **Quality selection:** exposes HLS variants and public YouTube formats when
+  MPEG-TS segments with up to eight concurrent requests and a 256 MiB safety cap.
+- **Quality selection:** exposes HLS variants and public social-video formats when
   available.
 - **Durable discovery:** an in-progress scan, its results, inspected HLS
   variants and the selected quality are restored when the popup reopens.
-- **Durable progress:** closing and reopening the popup does not lose an active
-  job's status.
+- **Clear recovery:** current-page results stay separate from active and recent
+  downloads, whose status survives popup and service-worker restarts.
 - **Unified destinations:** use a default Windows folder or ask where each
   download should be saved.
 - **Privacy by design:** no telemetry, analytics, accounts, cookies or browser
@@ -42,7 +42,7 @@ when the user explicitly clicks **Buscar vídeos** ("Search videos").
 | --- | --- |
 | Manifest V3 extension | User interface, on-demand page scanning and browser downloads |
 | Offscreen document | HLS fetching and MPEG-TS assembly |
-| Windows native host | Folder picker, durable YouTube jobs and final file delivery |
+| Windows native host | Folder picker, durable social-video jobs and final file delivery |
 | Pinned tools | `yt-dlp`, Deno and FFmpeg artifacts verified by SHA-256 during packaging |
 
 The native host communicates through Chromium Native Messaging over `stdio`.
@@ -53,11 +53,29 @@ to the project maintainer.
 
 - Windows 10 or Windows 11, x64
 - Chrome, Edge, Brave or Vivaldi based on Chromium 116+
-- PowerShell
-- Internet access while packaging the native helper and while downloading
-  authorized media
+- Internet access while downloading authorized media
 
-## Install from source
+## Install the V1 release
+
+1. Open [GitHub Releases](https://github.com/carlosesl1/videodownloader/releases)
+   and download `VideoRadar-Setup-1.0.0-Windows-x64.exe`.
+2. Run the installer. It installs only for the current Windows user, does not
+   request administrator access and does not require PowerShell, .NET or npm.
+3. Follow the local guide opened at the end: enable Developer mode, choose
+   **Load unpacked** (**Carregar sem compactação**) and select the already-open
+   `%LOCALAPPDATA%\VideoRadar\Extension` folder.
+4. Confirm the extension ID is `cakpfifpfmbdcilimpedanglnopnmckg`, pin Video
+   Radar and click **Buscar vídeos**.
+
+The browser step stays manual because Video Radar is not published in a browser
+store and does not apply enterprise policies. An unsigned V1 installer may show
+a Windows SmartScreen warning; compare its SHA-256 with `SHA256SUMS.txt` on the
+same release.
+
+## Build from source
+
+Maintainers need PowerShell, Node.js 22 and internet access while packaging the
+native helper.
 
 1. Clone the repository and enter its root directory.
 2. Build the distributable native helper:
@@ -90,14 +108,18 @@ copy located inside `dist\video-radar-helper`.
    to save each download").
 
 Direct files use the browser download manager. Compatible HLS streams are
-assembled as `.ts`. Public YouTube jobs use the native helper and preserve
-their status while the popup is closed. Use **Cancelar** to stop an active job.
-Automatic direct/HLS delivery temporarily uses
-`Downloads\Video Radar\.staging`.
+assembled as `.ts`, with a 256 MiB in-memory safety limit. Public YouTube,
+TikTok, Instagram and X jobs use the native helper and preserve their status
+while the popup or extension service worker is inactive. Current-page findings
+and recent downloads are shown separately. Public metadata is cached in memory
+for up to 30 minutes for YouTube and 5 minutes for the other social platforms;
+expired Instagram media metadata may be refreshed and retried once. Use
+**Cancelar** to stop an active job. Automatic direct/HLS delivery temporarily
+uses `Downloads\Video Radar\.staging`.
 
-To uninstall completely, remove the extension from each browser and delete the
-current-user Native Messaging registrations plus `%LOCALAPPDATA%\VideoRadar`.
-The exact PowerShell commands are in the
+To uninstall completely, remove **Video Radar** in Windows Apps & Features and
+then remove the unpacked extension from each browser. Finished videos are never
+deleted. The developer-package cleanup commands remain in the
 [Portuguese documentation](docs/README.pt-BR.md#desinstalação).
 
 ## Development
@@ -111,7 +133,8 @@ npm run check:all
 
 `check:all` validates the extension, runs the JavaScript tests and runs the
 native-host test executable. Packaging is separate because it may download
-pinned third-party artifacts.
+pinned third-party artifacts. See [docs/RELEASING.md](docs/RELEASING.md) for
+the installer, checksums, signing and stable-tag workflow.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
 [PRIVACY.md](PRIVACY.md) before contributing or reporting a problem.
@@ -120,11 +143,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
 
 - No DRM, private, authenticated, age-restricted or live-content bypass.
 - No cookies, credentials, `netrc` or browser-profile access.
-- No bulk playlist downloading; individual YouTube Shorts are supported.
+- No bulk playlist downloading; individual YouTube Shorts and public social-video posts are supported.
 - HLS support currently targets MPEG-TS output; incompatible fragmented MP4
   playlists are rejected safely.
-- YouTube behavior depends on public formats supported by `yt-dlp` and may
-  change when the service changes.
+- Social-platform behavior depends on public formats supported by `yt-dlp` and
+  may temporarily require a new Video Radar installer when a platform changes.
 
 ## License
 

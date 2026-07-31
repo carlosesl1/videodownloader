@@ -10,9 +10,12 @@ import { HOST_COMMANDS } from '../src/youtube/protocol.js';
 
 function memoryLocal(initial = {}) {
   const values = structuredClone(initial);
+  const calls = { get: [], set: [], remove: [] };
   return {
     values,
+    calls,
     async get(keys) {
+      calls.get.push(structuredClone(keys));
       if (keys === null) return structuredClone(values);
       const requested = Array.isArray(keys) ? keys : [keys];
       return Object.fromEntries(
@@ -20,8 +23,12 @@ function memoryLocal(initial = {}) {
           .map((key) => [key, structuredClone(values[key])]),
       );
     },
-    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async set(entries) {
+      calls.set.push(structuredClone(entries));
+      Object.assign(values, structuredClone(entries));
+    },
     async remove(keys) {
+      calls.remove.push(structuredClone(keys));
       for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
     },
   };
@@ -96,6 +103,8 @@ test('persiste por downloadId, move ao concluir e guarda caminho final', async (
   }));
   assert.equal(Object.hasOwn(storageLocal.values, `${RELOCATION_PREFIX}42`), false);
   assert.equal(Object.hasOwn(storageLocal.values, `${DELIVERY_RESULT_PREFIX}42`), true);
+  assert.deepEqual(storageLocal.values.downloadRelocationIndex, []);
+  assert.deepEqual(storageLocal.values.downloadDeliveryResultIndex, [42]);
   assert.deepEqual(nativeClient.requests, [{
     type: HOST_COMMANDS.MOVE_DOWNLOADED_FILE,
     payload: {
@@ -140,6 +149,39 @@ test('retoma download completo após reinício e serializa observações concorr
 
   assert.equal(calls, 1);
   assert.equal((await coordinator.get(42)).status, 'complete');
+});
+
+test('migra registros legados uma vez e repara índices de relocações ausentes', async () => {
+  const storageLocal = memoryLocal({
+    [`${RELOCATION_PREFIX}42`]: activeRecord(),
+    [`${DELIVERY_RESULT_PREFIX}7`]: activeRecord({
+      downloadId: 7,
+      operationId: 'op_7',
+      status: 'complete',
+      finalPath: String.raw`D:\Vídeos\antigo.mp4`,
+    }),
+  });
+  const downloads = fakeDownloads([]);
+  const nativeClient = fakeNative(() => { throw new Error('não deve mover'); });
+
+  await createDownloadRelocationCoordinator({
+    storageLocal, downloads, nativeClient, now: () => 20,
+  }).reconcile();
+  assert.deepEqual(storageLocal.values.downloadRelocationIndex, [42]);
+  assert.deepEqual(storageLocal.values.downloadDeliveryResultIndex, [7]);
+  assert.equal(storageLocal.values.downloadRelocationIndexMigration, 1);
+  const scansAfterMigration = storageLocal.calls.get.filter((keys) => keys === null).length;
+
+  await createDownloadRelocationCoordinator({
+    storageLocal, downloads, nativeClient, now: () => 20,
+  }).reconcile();
+  assert.equal(storageLocal.calls.get.filter((keys) => keys === null).length, scansAfterMigration);
+
+  storageLocal.values.downloadRelocationIndex = [999, 42];
+  await createDownloadRelocationCoordinator({
+    storageLocal, downloads, nativeClient, now: () => 20,
+  }).reconcile();
+  assert.deepEqual(storageLocal.values.downloadRelocationIndex, [42]);
 });
 
 test('falha mantém caminho recuperável e permite nova tentativa', async () => {

@@ -8,19 +8,27 @@ import {
   sanitizeYouTubeCatalog,
   youtubeFormatsMessage,
 } from '../detection/discovery-protocol.js';
-import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
+import { canonicalMediaPage } from '../media/page-url.js';
 
 export { DISCOVERY_ACTIONS };
 
 const SAFE_ERROR = /^[A-Z0-9_]{1,64}$/;
+const ACTIONABLE_MEDIA_ERRORS = new Set([
+  'LOGIN_REQUIRED',
+  'RATE_LIMITED',
+  'PRIVATE_CONTENT',
+  'NO_VIDEO',
+  'UNSUPPORTED_POST',
+  'EXTRACTOR_CHANGED',
+]);
 
 function storageKey(tabId) {
   return `${DISCOVERY_PREFIX}${tabId}`;
 }
 
 function pageIdentity(rawUrl) {
-  const youtubeUrl = canonicalYouTubePageUrl(rawUrl);
-  if (youtubeUrl) return youtubeUrl;
+  const mediaPage = canonicalMediaPage(rawUrl);
+  if (mediaPage) return mediaPage.canonicalUrl;
   if (typeof rawUrl !== 'string') throw new Error('URL inválida');
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('URL inválida');
@@ -28,8 +36,8 @@ function pageIdentity(rawUrl) {
   return parsed.href;
 }
 
-function targetFor(pageUrl, youtubeUrl) {
-  if (youtubeUrl) return 'youtube.com';
+function targetFor(pageUrl, mediaPage) {
+  if (mediaPage) return mediaPage.platform === 'x' ? 'x.com' : `${mediaPage.platform}.com`;
   return new URL(pageUrl).host || 'aba atual';
 }
 
@@ -85,13 +93,15 @@ export function createDiscoveryCoordinator({
   async function currentTab(tabId) {
     const tab = await tabs.get(tabId);
     if (!tab || tab.id !== tabId) throw new Error('Aba inválida');
-    const youtubeUrl = canonicalYouTubePageUrl(tab.url);
+    const mediaPage = canonicalMediaPage(tab.url);
     const pageUrl = pageIdentity(tab.url);
     return {
       pageUrl,
-      youtubeUrl,
-      target: targetFor(pageUrl, youtubeUrl),
-      kind: youtubeUrl ? 'youtube' : 'page',
+      mediaPage,
+      target: targetFor(pageUrl, mediaPage),
+      kind: mediaPage
+        ? (mediaPage.platform === 'youtube' ? 'youtube' : 'remote-media')
+        : 'page',
     };
   }
 
@@ -111,7 +121,7 @@ export function createDiscoveryCoordinator({
       pageUrl: page.pageUrl,
       target: page.target,
       kind: page.kind,
-      mediaUrl: page.youtubeUrl,
+      mediaUrl: page.mediaPage?.canonicalUrl ?? null,
       view: { selections: [], inspections: [] },
     };
     await persist({
@@ -123,19 +133,46 @@ export function createDiscoveryCoordinator({
     });
 
     try {
-      const result = page.youtubeUrl
-        ? sanitizeYouTubeCatalog(await youtube.handle(youtubeFormatsMessage(page.youtubeUrl)))
-        : sanitizePageScanResult((await scripting.executeScript({
+      let resultBase = base;
+      let result;
+      if (page.mediaPage) {
+        result = sanitizeYouTubeCatalog(
+          await youtube.handle(youtubeFormatsMessage(page.mediaPage.canonicalUrl)),
+        );
+      } else {
+        const rawScan = (await scripting.executeScript({
             target: { tabId },
             func: scanPage,
-          }))?.[0]?.result);
+          }))?.[0]?.result;
+        const focusedPage = canonicalMediaPage(rawScan?.focusedPageUrl);
+        if (focusedPage) {
+          try {
+            result = sanitizeYouTubeCatalog(
+              await youtube.handle(youtubeFormatsMessage(focusedPage.canonicalUrl)),
+            );
+            resultBase = {
+              ...base,
+              target: targetFor(focusedPage.canonicalUrl, focusedPage),
+              kind: focusedPage.platform === 'youtube' ? 'youtube' : 'remote-media',
+              mediaUrl: focusedPage.canonicalUrl,
+            };
+          } catch (error) {
+            if (ACTIONABLE_MEDIA_ERRORS.has(errorCode(error))) throw error;
+            const fallback = sanitizePageScanResult(rawScan);
+            if (fallback.candidates.length === 0) throw error;
+            result = fallback;
+          }
+        } else {
+          result = sanitizePageScanResult(rawScan);
+        }
+      }
 
       if (!await stillOnPage(tabId, page.pageUrl)) {
         await storageSession.remove(storageKey(tabId));
         return null;
       }
       return persist({
-        ...base,
+        ...resultBase,
         status: 'results',
         result,
         errorCode: null,

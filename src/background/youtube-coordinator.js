@@ -10,7 +10,7 @@ import {
   readDownloadPreferences,
 } from '../shared/download-preferences.js';
 import { assertJobSnapshot } from '../youtube/job-view.js';
-import { canonicalYouTubePageUrl } from '../youtube/page-url.js';
+import { canonicalMediaPage } from '../media/page-url.js';
 
 const STORAGE_KEY = 'youtubeJob';
 const ACTIVE_STAGES = new Set(['preparing', 'video', 'audio', 'merge', 'finalize']);
@@ -54,6 +54,7 @@ function copyFormat(format) {
 
 function copyCatalog(catalog) {
   return {
+    ...(catalog.platform ? { platform: catalog.platform } : {}),
     videoId: catalog.videoId,
     title: catalog.title,
     durationSeconds: catalog.durationSeconds,
@@ -78,7 +79,9 @@ export function sanitizeYouTubeJobSnapshot(value) {
   const core = assertJobSnapshot({
     jobId, videoId, title, height, stage, percent, path, errorCode: error,
   });
-  if (!videoId || !title || canonicalYouTubePageUrl(url) !== url || !url.endsWith(`v=${videoId}`)) invalid();
+  const page = canonicalMediaPage(url);
+  if (!videoId || !title || !page || page.canonicalUrl !== url
+    || (page.platform === 'youtube' && page.mediaId !== videoId)) invalid();
   if (!(percent === null || (Number.isSafeInteger(percent) && percent >= 0 && percent <= 100))) invalid();
   if (![downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds].every(nullableNonnegativeInteger)) invalid();
   if (!(error === null || SAFE_ERROR.test(error))) invalid();
@@ -119,16 +122,16 @@ function assertExtensionMessage(message) {
     || !Object.values(YOUTUBE_ACTIONS).includes(message.action)) invalid();
   if (message.action === YOUTUBE_ACTIONS.LIST_FORMATS) {
     assertPayload(message.payload, ['url']);
-    const url = canonicalYouTubePageUrl(message.payload.url);
-    if (!url) invalid();
-    return { action: message.action, url };
+    const page = canonicalMediaPage(message.payload.url);
+    if (!page) invalid();
+    return { action: message.action, url: page.canonicalUrl };
   }
   if (message.action === YOUTUBE_ACTIONS.START_DOWNLOAD) {
     assertPayload(message.payload, ['url', 'height']);
-    const url = canonicalYouTubePageUrl(message.payload.url);
+    const page = canonicalMediaPage(message.payload.url);
     const { height } = message.payload;
-    if (!url || !Number.isSafeInteger(height) || height < 144 || height > 4320) invalid();
-    return { action: message.action, url, height };
+    if (!page || !Number.isSafeInteger(height) || height < 144 || height > 4320) invalid();
+    return { action: message.action, url: page.canonicalUrl, height };
   }
   if (message.action === YOUTUBE_ACTIONS.CANCEL_DOWNLOAD) {
     assertPayload(message.payload, ['jobId']);
@@ -222,7 +225,9 @@ export function createYouTubeCoordinator({ nativeClient, storageLocal, notificat
 
   async function requestCatalog(url) {
     const event = assertFormatsResult(await nativeClient.request(HOST_COMMANDS.LIST_FORMATS, { url }));
-    if (!url.endsWith(`v=${event.videoId}`)) invalid();
+    const page = canonicalMediaPage(url);
+    if (!page || (event.platform && event.platform !== page.platform)
+      || (page.platform === 'youtube' && page.mediaId !== event.videoId)) invalid();
     const catalog = copyCatalog(event);
     catalogs.set(url, catalog);
     return copyCatalog(catalog);

@@ -4,9 +4,16 @@ import {
   assertHostEvent,
 } from '../youtube/protocol.js';
 import { normalizeWindowsFolder } from '../shared/download-preferences.js';
+import {
+  DELIVERY_RESULT_INDEX,
+  DELIVERY_RESULT_PREFIX,
+  RELOCATION_INDEX,
+  RELOCATION_INDEX_MIGRATION,
+  RELOCATION_PREFIX,
+  downloadIdIndex,
+} from '../shared/persistence-keys.js';
 
-export const RELOCATION_PREFIX = 'downloadRelocation:';
-export const DELIVERY_RESULT_PREFIX = 'downloadDeliveryResult:';
+export { DELIVERY_RESULT_PREFIX, RELOCATION_PREFIX };
 
 const ACTIVE_STATUSES = new Set(['downloading', 'moving', 'moveFailed']);
 const MEDIA_KINDS = new Set(['direct', 'hls']);
@@ -69,6 +76,89 @@ export function createDownloadRelocationCoordinator({
   }
 
   const inFlight = new Map();
+  let indexQueue = Promise.resolve();
+  let indexesReady;
+
+  function serializedIndex(operation) {
+    const work = indexQueue.then(operation, operation);
+    indexQueue = work.catch(() => {});
+    return work;
+  }
+
+  function validIndex(value) {
+    return Array.isArray(value) && value.every(validDownloadId);
+  }
+
+  function scanIndex(entries, prefix) {
+    return Object.entries(entries ?? {})
+      .filter(([name, record]) => (
+        name.startsWith(prefix)
+        && validDownloadId(record?.downloadId)
+        && name === `${prefix}${record.downloadId}`
+      ))
+      .map(([, record]) => record.downloadId);
+  }
+
+  async function ensureIndexes() {
+    if (!indexesReady) {
+      indexesReady = (async () => {
+        const stored = await storageLocal.get([
+          RELOCATION_INDEX,
+          DELIVERY_RESULT_INDEX,
+          RELOCATION_INDEX_MIGRATION,
+        ]);
+        if (
+          stored?.[RELOCATION_INDEX_MIGRATION] === 1
+          && validIndex(stored?.[RELOCATION_INDEX])
+          && validIndex(stored?.[DELIVERY_RESULT_INDEX])
+        ) return;
+        const entries = await storageLocal.get(null);
+        await storageLocal.set({
+          [RELOCATION_INDEX]: scanIndex(entries, RELOCATION_PREFIX),
+          [DELIVERY_RESULT_INDEX]: scanIndex(entries, DELIVERY_RESULT_PREFIX),
+          [RELOCATION_INDEX_MIGRATION]: 1,
+        });
+      })().catch((error) => {
+        indexesReady = undefined;
+        throw error;
+      });
+    }
+    await indexesReady;
+  }
+
+  async function indexedRecords(indexName, prefix) {
+    await ensureIndexes();
+    const stored = await storageLocal.get(indexName);
+    const indexed = downloadIdIndex(stored?.[indexName]);
+    if (indexed.length === 0) return [];
+    const entries = await storageLocal.get(indexed.map((downloadId) => `${prefix}${downloadId}`));
+    const records = [];
+    const repaired = [];
+    for (const downloadId of indexed) {
+      const record = entries?.[`${prefix}${downloadId}`];
+      if (!record || record.downloadId !== downloadId) continue;
+      repaired.push(downloadId);
+      records.push(record);
+    }
+    if (repaired.length !== indexed.length) {
+      await storageLocal.set({ [indexName]: repaired });
+    }
+    return records;
+  }
+
+  async function put(record) {
+    return serializedIndex(async () => {
+      await ensureIndexes();
+      const stored = await storageLocal.get(RELOCATION_INDEX);
+      const indexed = downloadIdIndex(stored?.[RELOCATION_INDEX]);
+      if (!indexed.includes(record.downloadId)) indexed.push(record.downloadId);
+      await storageLocal.set({
+        [key(record.downloadId)]: record,
+        [RELOCATION_INDEX]: indexed,
+      });
+      return record;
+    });
+  }
 
   async function get(downloadId) {
     if (!validDownloadId(downloadId)) return null;
@@ -78,11 +168,6 @@ export function createDownloadRelocationCoordinator({
     const completedKey = resultKey(downloadId);
     const completed = await storageLocal.get(completedKey);
     return completed?.[completedKey] ?? null;
-  }
-
-  async function put(record) {
-    await storageLocal.set({ [key(record.downloadId)]: record });
-    return record;
   }
 
   async function track(record) {
@@ -98,12 +183,37 @@ export function createDownloadRelocationCoordinator({
   }
 
   async function pruneResults() {
-    const all = await storageLocal.get(null);
-    const results = Object.entries(all ?? {})
-      .filter(([name]) => name.startsWith(DELIVERY_RESULT_PREFIX))
-      .sort(([, left], [, right]) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0));
-    const expired = results.slice(50).map(([name]) => name);
-    if (expired.length > 0) await storageLocal.remove(expired);
+    await serializedIndex(async () => {
+      const results = (await indexedRecords(DELIVERY_RESULT_INDEX, DELIVERY_RESULT_PREFIX))
+        .sort((left, right) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0));
+      const expired = results.slice(50);
+      if (expired.length === 0) return;
+      const expiredIds = new Set(expired.map((record) => record.downloadId));
+      await storageLocal.remove(expired.map((record) => resultKey(record.downloadId)));
+      await storageLocal.set({
+        [DELIVERY_RESULT_INDEX]: results
+          .map((record) => record.downloadId)
+          .filter((downloadId) => !expiredIds.has(downloadId)),
+      });
+    });
+  }
+
+  async function pruneFailures() {
+    await serializedIndex(async () => {
+      const records = await indexedRecords(RELOCATION_INDEX, RELOCATION_PREFIX);
+      const failures = records
+        .filter((record) => record.status === 'moveFailed')
+        .sort((left, right) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0));
+      const expired = failures.slice(20);
+      if (expired.length === 0) return;
+      const expiredIds = new Set(expired.map((record) => record.downloadId));
+      await storageLocal.remove(expired.map((record) => key(record.downloadId)));
+      await storageLocal.set({
+        [RELOCATION_INDEX]: records
+          .map((record) => record.downloadId)
+          .filter((downloadId) => !expiredIds.has(downloadId)),
+      });
+    });
   }
 
   async function deliverOnce(downloadId) {
@@ -145,8 +255,20 @@ export function createDownloadRelocationCoordinator({
         errorCode: null,
         updatedAt: timestamp(now),
       };
-      await storageLocal.set({ [resultKey(downloadId)]: completed });
-      await storageLocal.remove(key(downloadId));
+      await serializedIndex(async () => {
+        await ensureIndexes();
+        const stored = await storageLocal.get([RELOCATION_INDEX, DELIVERY_RESULT_INDEX]);
+        const active = downloadIdIndex(stored?.[RELOCATION_INDEX])
+          .filter((entry) => entry !== downloadId);
+        const completedIds = downloadIdIndex(stored?.[DELIVERY_RESULT_INDEX]);
+        if (!completedIds.includes(downloadId)) completedIds.push(downloadId);
+        await storageLocal.set({
+          [resultKey(downloadId)]: completed,
+          [RELOCATION_INDEX]: active,
+          [DELIVERY_RESULT_INDEX]: completedIds,
+        });
+        await storageLocal.remove(key(downloadId));
+      });
       await pruneResults();
     } catch {
       await put({
@@ -156,6 +278,7 @@ export function createDownloadRelocationCoordinator({
         errorCode: 'DESTINATION_MOVE_FAILED',
         updatedAt: timestamp(now),
       });
+      await pruneFailures();
     }
   }
 
@@ -176,11 +299,10 @@ export function createDownloadRelocationCoordinator({
   }
 
   async function reconcile() {
-    const all = await storageLocal.get(null);
-    const pending = Object.entries(all ?? {})
-      .filter(([name, record]) => name.startsWith(RELOCATION_PREFIX)
-        && record && ACTIVE_STATUSES.has(record.status))
-      .map(([, record]) => record.downloadId)
+    const records = await serializedIndex(() => indexedRecords(RELOCATION_INDEX, RELOCATION_PREFIX));
+    const pending = records
+      .filter((record) => ACTIVE_STATUSES.has(record.status))
+      .map((record) => record.downloadId)
       .filter(validDownloadId);
     await Promise.all(pending.map(deliver));
   }

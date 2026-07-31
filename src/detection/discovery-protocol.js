@@ -10,7 +10,7 @@ export const DISCOVERY_ACTIONS = Object.freeze({
 export const DISCOVERY_PREFIX = 'discovery:';
 
 const STATUSES = new Set(['scanning', 'results', 'error']);
-const KINDS = new Set(['page', 'youtube']);
+const KINDS = new Set(['page', 'youtube', 'remote-media']);
 const SAFE_CODE = /^[A-Z0-9_]{1,64}$/;
 const SNAPSHOT_FIELDS = [
   'schemaVersion', 'tabId', 'pageUrl', 'target', 'status', 'kind',
@@ -95,6 +95,7 @@ export function sanitizeYouTubeCatalog(value) {
     ...value,
   });
   return {
+    ...(parsed.platform ? { platform: parsed.platform } : {}),
     videoId: parsed.videoId,
     title: parsed.title,
     durationSeconds: parsed.durationSeconds,
@@ -196,7 +197,7 @@ export function sanitizeDiscoverySnapshot(value) {
     if (value.result !== null || value.errorCode !== null) throw new Error('Estado de descoberta inválido');
   } else if (value.status === 'results') {
     if (value.errorCode !== null) throw new Error('Estado de descoberta inválido');
-    result = value.kind === 'youtube'
+    result = value.kind === 'youtube' || value.kind === 'remote-media'
       ? sanitizeYouTubeCatalog(value.result)
       : sanitizePageScanResult(value.result);
   } else {
@@ -206,7 +207,7 @@ export function sanitizeDiscoverySnapshot(value) {
     errorCode = value.errorCode;
   }
 
-  if ((value.kind === 'youtube') !== (mediaUrl !== null)) {
+  if ((value.kind !== 'page') !== (mediaUrl !== null)) {
     throw new Error('Estado de descoberta inválido');
   }
 

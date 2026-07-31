@@ -3,6 +3,7 @@ import test from 'node:test';
 
 const PAGE_URL = 'https://escola.test/aula/42';
 const YOUTUBE_URL = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+const TIKTOK_URL = 'https://www.tiktok.com/@video.radar/video/7488298911734435077';
 const STORAGE_KEY = 'discovery:7';
 
 function clone(value) {
@@ -124,6 +125,208 @@ test('coalesces an in-flight scan and persists YouTube formats for popup reopen'
   assert.equal(left.mediaUrl, YOUTUBE_URL);
   assert.equal(left.result.qualities[0].height, 720);
   assert.equal(youtubeCalls.length, 1);
+});
+
+test('routes a TikTok video page to the native media catalog without DOM scanning', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const calls = [];
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: `${TIKTOK_URL}?is_from_webapp=1` }; } },
+    scripting: { async executeScript() { throw new Error('Page scan must not run'); } },
+    storageSession,
+    youtube: {
+      async handle(request) {
+        calls.push(clone(request));
+        return {
+          platform: 'tiktok',
+          videoId: '7488298911734435077',
+          title: 'Public TikTok',
+          durationSeconds: 12,
+          qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+        };
+      },
+    },
+    now: () => 250,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.kind, 'remote-media');
+  assert.equal(snapshot.target, 'tiktok.com');
+  assert.equal(snapshot.mediaUrl, TIKTOK_URL);
+  assert.equal(snapshot.result.platform, 'tiktok');
+  assert.equal(snapshot.result.videoId, '7488298911734435077');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.url, TIKTOK_URL);
+});
+
+test('turns the visible TikTok feed card into the matching native video', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const calls = [];
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: 'https://www.tiktok.com/foryou?lang=pt-BR' }; } },
+    scripting: {
+      async executeScript() {
+        return [{ result: {
+          pageTitle: 'TikTok - Make Your Day',
+          focusedPageUrl: `${TIKTOK_URL}?is_from_webapp=1`,
+          candidates: [],
+        } }];
+      },
+    },
+    storageSession,
+    youtube: {
+      async handle(request) {
+        calls.push(clone(request));
+        return {
+          platform: 'tiktok',
+          videoId: '7488298911734435077',
+          title: 'TikTok correto do cartão visível',
+          durationSeconds: 12,
+          qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+        };
+      },
+    },
+    now: () => 265,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.kind, 'remote-media');
+  assert.equal(snapshot.target, 'tiktok.com');
+  assert.equal(snapshot.mediaUrl, TIKTOK_URL);
+  assert.equal(snapshot.result.videoId, '7488298911734435077');
+  assert.equal(snapshot.result.title, 'TikTok correto do cartão visível');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.url, TIKTOK_URL);
+});
+
+test('turns the most visible Instagram feed video into one native post result', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const reelUrl = 'https://www.instagram.com/reel/C8x_example/';
+  const calls = [];
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: 'https://www.instagram.com/' }; } },
+    scripting: {
+      async executeScript() {
+        return [{ result: {
+          pageTitle: 'Instagram',
+          focusedPageUrl: `${reelUrl}?igsh=feed`,
+          candidates: Array.from({ length: 200 }, (_, index) => ({
+            url: `https://cdn.test/history-${index}.mp4`,
+            kind: 'direct',
+            source: 'performance',
+          })),
+        } }];
+      },
+    },
+    storageSession,
+    youtube: {
+      async handle(request) {
+        calls.push(clone(request));
+        return {
+          platform: 'instagram',
+          videoId: 'C8x_example',
+          title: 'Reel em destaque',
+          durationSeconds: 15,
+          qualities: [{ height: 1080, label: '1080p', container: 'mp4', combined: true }],
+        };
+      },
+    },
+    now: () => 275,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.kind, 'remote-media');
+  assert.equal(snapshot.mediaUrl, reelUrl);
+  assert.equal(snapshot.result.title, 'Reel em destaque');
+  assert.equal(snapshot.result.qualities.length, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.url, reelUrl);
+});
+
+test('preserves actionable social lookup failures instead of hiding them behind DOM results', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: 'https://www.tiktok.com/foryou' }; } },
+    scripting: {
+      async executeScript() {
+        return [{ result: {
+          pageTitle: 'TikTok',
+          focusedPageUrl: TIKTOK_URL,
+          candidates: [{ url: 'https://cdn.test/fallback.mp4', kind: 'direct', source: 'dom-current' }],
+        } }];
+      },
+    },
+    storageSession,
+    youtube: {
+      async handle() {
+        throw Object.assign(new Error('login details must stay private'), { code: 'LOGIN_REQUIRED' });
+      },
+    },
+    now: () => 280,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.status, 'error');
+  assert.equal(snapshot.errorCode, 'LOGIN_REQUIRED');
+  assert.equal(snapshot.result, null);
+  assert.equal(JSON.stringify(snapshot).includes('login details'), false);
+});
+
+test('uses a valid local candidate when a focused social lookup fails generically', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: 'https://www.tiktok.com/foryou' }; } },
+    scripting: {
+      async executeScript() {
+        return [{ result: {
+          pageTitle: 'TikTok',
+          focusedPageUrl: TIKTOK_URL,
+          candidates: [{ url: 'https://cdn.test/fallback.mp4', kind: 'direct', source: 'dom-current' }],
+        } }];
+      },
+    },
+    storageSession,
+    youtube: { async handle() { throw new Error('native helper unavailable'); } },
+    now: () => 285,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.status, 'results');
+  assert.equal(snapshot.kind, 'page');
+  assert.equal(snapshot.mediaUrl, null);
+  assert.equal(snapshot.result.candidates[0].url, 'https://cdn.test/fallback.mp4');
+});
+
+test('does not report empty DOM fallback as a successful social lookup', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const coordinator = createDiscoveryCoordinator({
+    tabs: { async get() { return { id: 7, url: 'https://www.tiktok.com/foryou' }; } },
+    scripting: {
+      async executeScript() {
+        return [{ result: { pageTitle: 'TikTok', focusedPageUrl: TIKTOK_URL, candidates: [] } }];
+      },
+    },
+    storageSession,
+    youtube: { async handle() { throw new Error('native helper unavailable'); } },
+    now: () => 290,
+  });
+
+  const snapshot = await coordinator.handle(message(DISCOVERY_ACTIONS.START));
+
+  assert.equal(snapshot.status, 'error');
+  assert.equal(snapshot.errorCode, 'SCAN_FAILED');
+  assert.equal(snapshot.result, null);
 });
 
 test('does not restore a discovery after the tab navigates', async () => {

@@ -20,15 +20,18 @@ function appendHeader(root, state) {
     node('h1', '', 'Vídeo Radar'),
   );
 
-  const signature = node('div', 'target-signature');
-  const count = node('strong', 'target-signature__count', String(state.items.length).padStart(2, '0'));
-  const label = node('span', 'target-signature__label', state.items.length === 1 ? 'vídeo' : 'vídeos');
-  signature.setAttribute(
-    'aria-label',
-    `${state.items.length} ${state.items.length === 1 ? 'vídeo encontrado' : 'vídeos encontrados'}`,
-  );
-  signature.append(count, label);
-  header.append(identity, signature);
+  header.append(identity);
+  if (state.items.length > 0) {
+    const signature = node('div', 'target-signature');
+    const count = node('strong', 'target-signature__count', String(state.items.length).padStart(2, '0'));
+    const label = node('span', 'target-signature__label', state.items.length === 1 ? 'vídeo' : 'vídeos');
+    signature.setAttribute(
+      'aria-label',
+      `${state.items.length} ${state.items.length === 1 ? 'vídeo encontrado' : 'vídeos encontrados'}`,
+    );
+    signature.append(count, label);
+    header.append(signature);
+  }
   root.append(header);
 }
 
@@ -49,14 +52,29 @@ function appendIdle(surface) {
   appendScanAction(surface, 'Buscar vídeos nesta página');
 }
 
-function appendScanning(surface, state) {
-  const youtube = state.target === 'youtube.com';
+function appendRestoring(surface) {
   const panel = node('section', 'state-panel state-panel--scanning');
-  panel.setAttribute('role', 'status');
   panel.append(
-    node('span', 'state-kicker', youtube ? 'YOUTUBE DETECTADO' : 'VARREDURA HÍBRIDA'),
-    node('h2', '', youtube ? 'Vídeo do YouTube encontrado' : 'Analisando a página…'),
-    node('p', '', youtube ? state.message : 'Verificando players e recursos já carregados.'),
+    node('span', 'state-kicker', 'RETOMANDO ESTADO'),
+    node('h2', '', 'Restaurando downloads…'),
+    node('p', '', 'Aguarde enquanto as operações em andamento são recuperadas.'),
+  );
+  surface.append(panel);
+}
+
+function appendScanning(surface, state) {
+  const platformNames = {
+    'youtube.com': 'YouTube',
+    'tiktok.com': 'TikTok',
+    'instagram.com': 'Instagram',
+    'x.com': 'X',
+  };
+  const platform = platformNames[state.target];
+  const panel = node('section', 'state-panel state-panel--scanning');
+  panel.append(
+    node('span', 'state-kicker', platform ? `${platform.toUpperCase()} DETECTADO` : 'VARREDURA HÍBRIDA'),
+    node('h2', '', platform ? `Consultando vídeo do ${platform}` : 'Analisando a página…'),
+    node('p', '', platform ? state.message : 'Verificando players e recursos já carregados.'),
   );
   surface.append(panel);
 }
@@ -77,14 +95,15 @@ function actionLabel(item, blockedByHls) {
   if (item.phase === 'preparing') return 'Preparando…';
   if (blockedByHls) return 'Aguarde';
   if (item.phase === 'permission') return 'Aguardando autorização';
+  if (item.phase === 'sent') return 'Em andamento';
   if (item.kind === 'hls' && !item.inspected) return 'Ver qualidades';
-  if (item.phase === 'sent' || item.phase === 'complete' || item.phase === 'error') return 'Baixar novamente';
+  if (item.phase === 'complete' || item.phase === 'error') return 'Baixar novamente';
   return 'Baixar';
 }
 
 function appendQualityControl(row, item) {
   const variants = item.variants ?? [];
-  const inspected = item.kind === 'youtube' || item.inspected;
+  const inspected = item.kind === 'youtube' || item.kind === 'remote-media' || item.inspected;
   if (!inspected || variants.length <= 1) {
     const quality = inspected
       ? variants[0]?.label || 'Qualidade única'
@@ -98,7 +117,7 @@ function appendQualityControl(row, item) {
   const select = node('select', 'quality__select');
   select.dataset.quality = item.id;
   select.setAttribute('aria-label', `Qualidade de ${item.filename}`);
-  select.disabled = Boolean(item.kind === 'youtube' && item.active);
+  select.disabled = Boolean(item.active || ['permission', 'preparing', 'sent'].includes(item.phase));
   variants.forEach((variant, index) => {
     const option = node('option', '', variant.label || `Opção ${index + 1}`);
     option.value = String(index);
@@ -119,8 +138,8 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   const metadata = node(
     'span',
     'media-row__metadata',
-    item.kind === 'youtube'
-      ? `YOUTUBE  /  SAÍDA .${String(item.predictedFormat || item.variants?.[item.selectedIndex]?.container || 'mp4').toUpperCase()}`
+    item.kind === 'youtube' || item.kind === 'remote-media'
+      ? `${String(item.platform || 'youtube').toUpperCase()}  /  SAÍDA .${String(item.predictedFormat || item.variants?.[item.selectedIndex]?.container || 'mp4').toUpperCase()}`
       : item.kind === 'hls' ? 'HLS  /  SAÍDA .TS' : `${String(item.format || 'VÍDEO').toUpperCase()}  /  DIRETO`,
   );
   heading.append(name, metadata);
@@ -133,7 +152,7 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
     && item.inspected
     && hlsBusy
     && item.phase !== 'preparing';
-  const activeYoutube = item.kind === 'youtube' && item.active;
+  const activeYoutube = ['youtube', 'remote-media'].includes(item.kind) && item.active;
   if (item.action === 'open-download-settings') {
     row.append(button('Configurar downloads', 'button button--download', 'settings'));
   } else if (activeYoutube) {
@@ -144,7 +163,7 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   } else {
     const action = button(actionLabel(item, blockedByHls), 'button button--download');
     action.dataset[needsInspection ? 'inspect' : 'download'] = item.id;
-    action.disabled = item.phase === 'preparing' || item.phase === 'permission' || blockedByHls;
+    action.disabled = ['preparing', 'permission', 'sent'].includes(item.phase) || blockedByHls;
     row.append(action);
   }
 
@@ -168,13 +187,9 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   }
 
   if (activeYoutube) {
-    const stage = node('p', 'media-row__stage', item.statusLabel || 'Em andamento…');
-    stage.setAttribute('role', 'status');
-    row.append(stage);
+    row.append(node('p', 'media-row__stage', item.statusLabel || 'Em andamento…'));
   } else if (item.statusLabel) {
-    const status = node('p', `media-row__status media-row__status--${item.phase || 'ready'}`, item.statusLabel);
-    status.setAttribute('role', 'status');
-    row.append(status);
+    row.append(node('p', `media-row__status media-row__status--${item.phase || 'ready'}`, item.statusLabel));
   }
 
   const visiblePath = item.finalPath ?? item.stagingPath ?? item.path;
@@ -189,6 +204,8 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   }
 
   if (pendingPermission?.id === item.id) {
+    const origins = (pendingPermission.origins ?? []).join(', ');
+    if (origins) row.append(node('p', 'media-row__permission-origins', `Servidores solicitados: ${origins}`));
     const authorize = button(
       'Autorizar servidor de mídia',
       'button button--authorize',
@@ -202,28 +219,55 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
 }
 
 function appendResults(surface, state) {
-  const summary = node('div', 'results-heading');
-  const summaryCopy = node('div');
-  summaryCopy.append(
-    node('span', 'state-kicker', state.target ? `ALVO  /  ${state.target}` : 'MÍDIAS DISPONÍVEIS'),
-    node('h2', '', state.items.length === 1 ? '1 vídeo encontrado' : `${state.items.length} vídeos encontrados`),
-  );
-  summary.append(summaryCopy, button('Buscar novamente', 'button button--quiet', 'scan'));
-  surface.append(summary);
+  const downloads = state.downloads ?? [];
+  const allItems = [...state.items, ...downloads];
+  const hlsBusy = allItems.some((item) => item.kind === 'hls' && item.phase === 'preparing');
 
-  const list = node('ul', 'media-list');
-  const hlsBusy = state.items.some((item) => item.kind === 'hls' && item.phase === 'preparing');
-  state.items.forEach((item) => appendMediaItem(list, item, state.pendingPermission, hlsBusy));
-  surface.append(list);
+  if (state.items.length > 0) {
+    const summary = node('div', 'results-heading');
+    const summaryCopy = node('div');
+    summaryCopy.append(
+      node('span', 'state-kicker', state.target ? `ALVO  /  ${state.target}` : 'MÍDIAS DISPONÍVEIS'),
+      node('h2', '', state.items.length === 1 ? '1 vídeo encontrado' : `${state.items.length} vídeos encontrados`),
+    );
+    summary.append(summaryCopy, button('Buscar novamente', 'button button--quiet', 'scan'));
+    surface.append(summary);
+
+    const list = node('ul', 'media-list');
+    state.items.forEach((item) => appendMediaItem(list, item, state.pendingPermission, hlsBusy));
+    surface.append(list);
+  } else {
+    const summary = node('div', 'results-heading');
+    const summaryCopy = node('div');
+    summaryCopy.append(
+      node('span', 'state-kicker', 'BUSCA SOB DEMANDA'),
+      node('h2', '', 'Nenhuma busca nesta página'),
+    );
+    summary.append(summaryCopy, button('Buscar vídeos', 'button button--quiet', 'scan'));
+    surface.append(summary);
+  }
+
+  if (downloads.length > 0) {
+    const heading = node('div', 'downloads-heading');
+    heading.append(
+      node('span', 'state-kicker', 'OPERAÇÕES RECENTES'),
+      node('h2', '', downloads.length === 1 ? '1 download' : `${downloads.length} downloads`),
+    );
+    surface.append(heading);
+    const list = node('ul', 'media-list media-list--downloads');
+    downloads.forEach((item) => appendMediaItem(list, item, state.pendingPermission, hlsBusy));
+    surface.append(list);
+  }
 }
 
 export function renderPopup(root, state) {
   root.replaceChildren();
-  root.setAttribute('aria-busy', String(state.status === 'scanning'));
+  root.setAttribute('aria-busy', String(state.status === 'scanning' || state.status === 'restoring'));
   appendHeader(root, state);
 
   const surface = node('main', 'surface');
-  if (state.status === 'idle') appendIdle(surface);
+  if (state.status === 'restoring') appendRestoring(surface);
+  else if (state.status === 'idle') appendIdle(surface);
   else if (state.status === 'scanning') appendScanning(surface, state);
   else if (state.status === 'results') appendResults(surface, state);
   else appendNoResults(surface, state);

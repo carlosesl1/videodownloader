@@ -16,7 +16,7 @@ test('manifest declares the Video Radar MV3 extension contract', async () => {
   assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ['activeTab', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage'],
+    ['activeTab', 'alarms', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage'],
   );
 
   assert.deepEqual(manifest.icons, { 128: 'assets/icon-128.png' });
