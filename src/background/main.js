@@ -9,11 +9,16 @@ import { createYouTubeCoordinator } from './youtube-coordinator.js';
 import { createDownloadRelocationCoordinator } from './download-relocation.js';
 import { createDiscoveryCoordinator } from './discovery-coordinator.js';
 
+export const MAINTENANCE_ALARM = 'videoRadarMaintenance';
+
 export function createOffscreenSender({
   offscreen = globalThis.chrome.offscreen,
   runtime = globalThis.chrome.runtime,
+  scheduleMaintenance = () => {},
 } = {}) {
   let creatingDocument;
+  let closingDocument;
+  let activeSends = 0;
 
   async function ensureDocument() {
     if (!creatingDocument) {
@@ -37,13 +42,46 @@ export function createOffscreenSender({
     await creatingDocument;
   }
 
-  return async function sendOffscreen(message) {
-    await ensureDocument();
-    return runtime.sendMessage(message);
+  async function sendOffscreen(message) {
+    if (closingDocument) await closingDocument;
+    activeSends += 1;
+    try {
+      await ensureDocument();
+      return await runtime.sendMessage(message);
+    } finally {
+      activeSends -= 1;
+      scheduleMaintenance();
+    }
+  }
+
+  sendOffscreen.closeIfIdle = async () => {
+    if (closingDocument) return closingDocument;
+    if (activeSends > 0 || creatingDocument || typeof offscreen?.closeDocument !== 'function') {
+      return false;
+    }
+    closingDocument = (async () => {
+      const documentUrl = runtime.getURL('offscreen.html');
+      const contexts = await runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT'],
+        documentUrls: [documentUrl],
+      });
+      if (contexts.length === 0 || activeSends > 0) return false;
+      await offscreen.closeDocument();
+      return true;
+    })().finally(() => {
+      closingDocument = undefined;
+    });
+    return closingDocument;
   };
+
+  return sendOffscreen;
 }
 
-const sendOffscreen = createOffscreenSender();
+function scheduleMaintenance() {
+  globalThis.chrome.alarms.create(MAINTENANCE_ALARM, { delayInMinutes: 1 });
+}
+
+const sendOffscreen = createOffscreenSender({ scheduleMaintenance });
 let youtubeCoordinator;
 const nativeClient = createNativePortClient({
   connectNative: (name) => globalThis.chrome.runtime.connectNative(name),
@@ -65,6 +103,8 @@ const hlsHandlers = createBackgroundHandlers({
   sendOffscreen,
   nativeClient,
   relocation,
+  now: () => Date.now(),
+  scheduleMaintenance,
 });
 youtubeCoordinator = createYouTubeCoordinator({
   nativeClient,
@@ -86,11 +126,29 @@ const router = createBackgroundRouter({
 });
 const handleTerminalDownload = createTerminalDownloadHandler(hlsHandlers);
 
-router.ready.catch(() => {
-  // Durable records remain available for the next wake-up/reconciliation pass.
-});
-relocation.reconcile().catch(() => {
-  // Pending deliveries remain durable for the next worker wake-up.
+async function closeOffscreenIfIdle() {
+  if (!(await hlsHandlers.hasPendingOffscreenWork())) {
+    await sendOffscreen.closeIfIdle();
+  }
+}
+
+async function runMaintenance() {
+  await Promise.all([hlsHandlers.reconcile(), relocation.reconcile()]);
+  await closeOffscreenIfIdle();
+}
+
+Promise.all([router.ready, relocation.reconcile()])
+  .then(closeOffscreenIfIdle)
+  .catch(() => {
+    // Durable records remain available for the next alarm or worker wake-up.
+    scheduleMaintenance();
+  });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== MAINTENANCE_ALARM) return;
+  runMaintenance().catch(() => {
+    scheduleMaintenance();
+  });
 });
 
 chrome.runtime.onMessage.addListener(createBackgroundMessageListener(router));

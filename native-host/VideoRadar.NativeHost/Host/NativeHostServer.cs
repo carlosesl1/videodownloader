@@ -1,5 +1,6 @@
 using System.Text.Json;
 using VideoRadar.NativeHost.Files;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
 using VideoRadar.NativeHost.Windows;
@@ -148,8 +149,9 @@ public sealed class NativeHostServer(
     {
         RequireExactProperties(command.Payload, "url");
         var url = RequiredString(command.Payload, "url");
-        if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
-            throw new CommandFailureException("INVALID_URL", "URL do YouTube inválida.");
+        if (!MediaPage.TryCanonicalize(url, out var page))
+            throw new CommandFailureException("INVALID_URL", "URL de mídia inválida.");
+        var canonicalUrl = page!.CanonicalUrl;
 
         FormatCatalog catalog;
         using var metadataCancellation =
@@ -191,6 +193,7 @@ public sealed class NativeHostServer(
         {
             type = "formats",
             requestId = command.RequestId,
+            platform = catalog.Platform,
             videoId = catalog.VideoId,
             title = catalog.Title,
             durationSeconds = catalog.DurationSeconds,
@@ -287,8 +290,9 @@ public sealed class NativeHostServer(
     {
         RequireExactProperties(command.Payload, "url", "height", "destinationFolder");
         var url = RequiredString(command.Payload, "url");
-        if (!YouTubeUrl.TryCanonicalize(url, out var canonicalUrl))
-            throw new CommandFailureException("INVALID_URL", "URL do YouTube inválida.");
+        if (!MediaPage.TryCanonicalize(url, out var page))
+            throw new CommandFailureException("INVALID_URL", "URL de mídia inválida.");
+        var canonicalUrl = page!.CanonicalUrl;
         if (!command.Payload.TryGetProperty("height", out var heightValue)
             || heightValue.ValueKind != JsonValueKind.Number
             || !heightValue.TryGetInt32(out var height)
@@ -664,6 +668,9 @@ public sealed class NativeHostServer(
 
     private static (string Code, string Message) ClassifyDownloadFailure(Exception exception)
     {
+        if (exception is MediaDownloadException mediaFailure)
+            return (mediaFailure.Code, mediaFailure.Message);
+
         if (exception is InvalidOperationException
             && exception.Message.Contains("metadata", StringComparison.OrdinalIgnoreCase))
         {

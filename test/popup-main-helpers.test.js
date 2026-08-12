@@ -129,6 +129,24 @@ test('unwraps only a valid pure YouTube catalog and durable job snapshot', () =>
   assert.throws(() => unwrapYouTubeJob({ ok: true, value: { ...snapshot, url: 'https://evil.test' } }), (error) => error.code === 'INVALID_RESPONSE');
 });
 
+test('unwraps a TikTok catalog and builds a remote-media item', () => {
+  const catalog = unwrapYouTubeFormats({ ok: true, value: {
+    platform: 'tiktok',
+    videoId: '7488298911734435077',
+    title: 'Public TikTok',
+    durationSeconds: 12,
+    qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+  } });
+  const item = youtubeItem(
+    catalog,
+    'https://www.tiktok.com/@video.radar/video/7488298911734435077',
+  );
+
+  assert.equal(item.kind, 'remote-media');
+  assert.equal(item.platform, 'tiktok');
+  assert.equal(item.id, 'tiktok:7488298911734435077');
+});
+
 test('boots one YouTube recovery request and one shared storage listener', async () => {
   class Element {
     constructor() { this.dataset = {}; this.children = []; }
@@ -360,6 +378,7 @@ test('reopening the popup restores an active HLS operation from session storage'
         storage: {
           session: {
             get: async () => ({
+              hlsOperationIndex: ['op-reopen'],
               'hlsOperation:op-reopen': {
                 operationId: 'op-reopen',
                 url: 'https://cdn.test/720.m3u8',
@@ -421,6 +440,8 @@ test('reopening the popup restores a completed relocated download from local sto
         storage: {
           local: {
             get: async () => ({
+              downloadRelocationIndex: [],
+              downloadDeliveryResultIndex: [42],
               'downloadDeliveryResult:42': {
                 downloadId: 42,
                 operationId: 'direct-42',

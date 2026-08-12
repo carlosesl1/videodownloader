@@ -1,3 +1,5 @@
+using VideoRadar.NativeHost.Media;
+
 namespace VideoRadar.NativeHost.YouTube;
 
 public static class YtDlpArguments
@@ -10,12 +12,23 @@ public static class YtDlpArguments
         "--dump-single-json", "--skip-download", "--no-warnings", canonicalUrl
     ];
 
-    public static IReadOnlyList<string> Download(string tools, string home, string temp, string reservedStem, string canonicalUrl, int height)
+    public static IReadOnlyList<string> Download(
+        string tools,
+        string home,
+        string temp,
+        string reservedStem,
+        string canonicalUrl,
+        int height,
+        string? infoJsonPath = null)
     {
         if (height is < 144 or > 4320) throw new ArgumentOutOfRangeException(nameof(height));
-        var selector = $"b[height={height}][ext=mp4]/bv*[height<={height}][ext=mp4]+ba[ext=m4a]/b[height<={height}]/bv*[height<={height}]+ba";
-        return
-        [
+        if (!MediaPage.TryCanonicalize(canonicalUrl, out var page))
+            throw new ArgumentException("Invalid media URL.", nameof(canonicalUrl));
+        if (infoJsonPath is not null && !Path.IsPathFullyQualified(infoJsonPath))
+            throw new ArgumentException("Invalid metadata path.", nameof(infoJsonPath));
+        var selector = MediaFormatPolicy.Selector(page!.Platform, height);
+        var arguments = new List<string>
+        {
             "--ignore-config", "--no-playlist", "--no-plugin-dirs", "--no-remote-components",
             "--js-runtimes", $"deno:{Path.Combine(tools, "deno.exe")}",
             "--ffmpeg-location", tools,
@@ -27,7 +40,16 @@ public static class YtDlpArguments
             "--progress-template", "download:VR_PROGRESS:{\"progress\":%(progress)j,\"vcodec\":%(info.vcodec)j,\"acodec\":%(info.acodec)j}",
             "--progress-template", "postprocess:VR_POSTPROCESS:%(progress)j",
             "--print", "after_move:VR_FILE:%(filepath)j",
-            canonicalUrl,
-        ];
+        };
+        if (infoJsonPath is null)
+        {
+            arguments.Add(canonicalUrl);
+        }
+        else
+        {
+            arguments.Add("--load-info-json");
+            arguments.Add(infoJsonPath);
+        }
+        return arguments;
     }
 }

@@ -28,7 +28,7 @@ test('production preflight contract has the exact Chrome and helper boundaries',
   const root = new URL('../', import.meta.url);
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   const expectedPermissions = [
-    'activeTab', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage',
+    'activeTab', 'alarms', 'downloads', 'nativeMessaging', 'notifications', 'offscreen', 'scripting', 'storage',
   ];
   assert.deepEqual([...manifest.permissions].sort(), expectedPermissions);
   assert.ok(!manifest.host_permissions?.length);

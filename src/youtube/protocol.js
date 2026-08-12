@@ -33,7 +33,8 @@ export const HOST_EVENTS = Object.freeze({
 });
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const MEDIA_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const PLATFORMS = new Set(['youtube', 'tiktok', 'instagram', 'x']);
 const SAFE_CODE = /^[A-Z0-9_]{1,64}$/;
 const STAGES = new Set(['preparing', 'video', 'audio', 'merge', 'finalize', 'complete', 'cancelled', 'failed', 'interrupted']);
 const ALLOWED_HOST_EVENTS = new Set(Object.values(HOST_EVENTS));
@@ -111,13 +112,23 @@ function assertQuality(value, previousHeight, heights) {
 }
 
 function assertFormats(event) {
-  if (!VIDEO_ID.test(event.videoId) || !text(event.title, 512) || !(event.durationSeconds === null || (typeof event.durationSeconds === 'number' && Number.isFinite(event.durationSeconds) && event.durationSeconds >= 0))
+  const hasPlatform = Object.hasOwn(event, 'platform');
+  if ((hasPlatform && !PLATFORMS.has(event.platform))
+    || !MEDIA_ID.test(event.videoId) || !text(event.title, 512) || !(event.durationSeconds === null || (typeof event.durationSeconds === 'number' && Number.isFinite(event.durationSeconds) && event.durationSeconds >= 0))
     || !Array.isArray(event.qualities) || event.qualities.length > 32) invalid();
   const heights = new Set(); let previous = Infinity;
   const qualities = event.qualities.map((quality) => {
     const parsed = assertQuality(quality, previous, heights); previous = parsed.height; return parsed;
   });
-  return { type: HOST_EVENTS.FORMATS, requestId: event.requestId, videoId: event.videoId, title: event.title, durationSeconds: event.durationSeconds, qualities };
+  return {
+    type: HOST_EVENTS.FORMATS,
+    requestId: event.requestId,
+    ...(hasPlatform ? { platform: event.platform } : {}),
+    videoId: event.videoId,
+    title: event.title,
+    durationSeconds: event.durationSeconds,
+    qualities,
+  };
 }
 
 /** Validates host messages and returns a safe public event; internal host `download` becomes `video`. */
@@ -179,5 +190,11 @@ export function assertFormatsResult(event) {
   const result = assertHostEvent(event);
   if (result.type !== HOST_EVENTS.FORMATS) invalid();
   const { videoId, title, durationSeconds, qualities } = result;
-  return { videoId, title, durationSeconds, qualities };
+  return {
+    ...(result.platform ? { platform: result.platform } : {}),
+    videoId,
+    title,
+    durationSeconds,
+    qualities,
+  };
 }

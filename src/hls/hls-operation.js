@@ -1,6 +1,10 @@
-import { HlsError, parseHlsPlaylist } from './parse-playlist.js';
+import {
+  DEFAULT_HLS_PLAYLIST_LIMITS,
+  HlsError,
+  parseHlsPlaylist,
+} from './parse-playlist.js';
 
-const DEFAULT_MAX_BYTES = 1024 ** 3;
+const DEFAULT_MAX_BYTES = 256 * 1024 ** 2;
 const DEFAULT_CONCURRENCY = 8;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_CONCURRENCY = 8;
@@ -93,75 +97,148 @@ function validatePositiveSafeInteger(value, name, maximum = Number.MAX_SAFE_INTE
   }
 }
 
-async function awaitWithAbort(operation, signal, url, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+function manifestTooLarge(maxManifestBytes) {
+  return new HlsError(
+    'HLS_MANIFEST_TOO_LARGE',
+    'A playlist HLS excede o limite de tamanho permitido.',
+    { maxManifestBytes },
+  );
+}
+
+function declaredContentLength(response) {
+  const raw = response?.headers?.get?.('content-length');
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+async function requestResource(url, fetchImpl, signal, timeoutMs, consume) {
   if (signal?.aborted) throw cancellationError(url);
 
-  let onAbort;
-  const aborted = new Promise((resolve, reject) => {
-    onAbort = () => reject(cancellationError(url));
-    signal?.addEventListener('abort', onAbort, { once: true });
+  const requestController = new AbortController();
+  let interruption;
+  let rejectInterruption;
+  const interrupted = new Promise((_, reject) => {
+    rejectInterruption = reject;
   });
-  let timeoutId;
-  const timedOut = new Promise((resolve, reject) => {
-    timeoutId = setTimeout(() => reject(timeoutError(url, timeoutMs)), timeoutMs);
-  });
+  const interrupt = (error) => {
+    if (interruption) return;
+    interruption = error;
+    requestController.abort();
+    rejectInterruption(error);
+  };
+  const onAbort = () => interrupt(cancellationError(url));
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const timeoutId = setTimeout(
+    () => interrupt(timeoutError(url, timeoutMs)),
+    timeoutMs,
+  );
+
+  const operation = (async () => {
+    try {
+      const response = await fetchImpl(url, {
+        credentials: 'include',
+        signal: requestController.signal,
+      });
+      if (!response?.ok) throw networkError(url, response?.status);
+      return await consume(response, requestController.signal);
+    } catch (error) {
+      if (error instanceof HlsError) throw error;
+      if (interruption) throw interruption;
+      throw networkError(url);
+    }
+  })();
 
   try {
-    const result = await Promise.race([operation, aborted, timedOut]);
-    if (signal?.aborted) throw cancellationError(url);
-    return result;
+    return await Promise.race([operation, interrupted]);
+  } catch (error) {
+    if (!requestController.signal.aborted) requestController.abort();
+    throw error;
   } finally {
     clearTimeout(timeoutId);
     signal?.removeEventListener('abort', onAbort);
   }
 }
 
-async function fetchOk(url, fetchImpl, signal, timeoutMs) {
-  const options = { credentials: 'include' };
-  if (signal !== undefined) options.signal = signal;
-
-  let response;
+async function cancelReader(reader) {
   try {
-    response = await awaitWithAbort(fetchImpl(url, options), signal, url, timeoutMs);
-  } catch (error) {
-    if (error instanceof HlsError) throw error;
-    throw networkError(url);
-  }
-
-  if (!response?.ok) throw networkError(url, response?.status);
-  return response;
-}
-
-async function readText(response, url, signal, timeoutMs) {
-  try {
-    return await awaitWithAbort(response.text(), signal, url, timeoutMs);
-  } catch (error) {
-    if (error instanceof HlsError) throw error;
-    throw networkError(url);
+    await reader.cancel();
+  } catch {
+    // Cancellation is best-effort; the public operation error is preserved.
   }
 }
 
-async function readBytes(response, url, signal, timeoutMs) {
+async function readReader(reader, signal, url) {
+  if (signal.aborted) throw cancellationError(url);
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(cancellationError(url));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
   try {
-    return await awaitWithAbort(response.arrayBuffer(), signal, url, timeoutMs);
+    return await Promise.race([reader.read(), aborted]);
   } catch (error) {
     if (error instanceof HlsError) throw error;
     throw networkError(url);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
   }
 }
 
-async function readStreamChunk(reader, url, signal, timeoutMs) {
+async function readPlaylistResponse(response, url, requestSignal, playlistLimits) {
+  const { maxManifestBytes } = playlistLimits;
+  const declaredBytes = declaredContentLength(response);
+  if (declaredBytes !== null && declaredBytes > maxManifestBytes) {
+    throw manifestTooLarge(maxManifestBytes);
+  }
+
+  const getReader = response.body?.getReader;
+  if (typeof getReader !== 'function') {
+    const text = await response.text();
+    return parseHlsPlaylist(text, url, playlistLimits);
+  }
+
+  const reader = getReader.call(response.body);
+  const decoder = new TextDecoder();
+  let text = '';
+  let bytes = 0;
+  const onAbort = () => { cancelReader(reader); };
+  requestSignal.addEventListener('abort', onAbort, { once: true });
   try {
-    return await awaitWithAbort(reader.read(), signal, url, timeoutMs);
+    while (true) {
+      const { done, value } = await readReader(reader, requestSignal, url);
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw networkError(url);
+      bytes += value.byteLength;
+      if (bytes > maxManifestBytes) {
+        await cancelReader(reader);
+        throw manifestTooLarge(maxManifestBytes);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return parseHlsPlaylist(text, url, playlistLimits);
   } catch (error) {
-    if (error instanceof HlsError) throw error;
-    throw networkError(url);
+    text = '';
+    throw error;
+  } finally {
+    requestSignal.removeEventListener('abort', onAbort);
   }
 }
 
-async function fetchPlaylist(url, fetchImpl, signal, timeoutMs) {
-  const response = await fetchOk(url, fetchImpl, signal, timeoutMs);
-  return parseHlsPlaylist(await readText(response, url, signal, timeoutMs), url);
+async function fetchPlaylist(url, fetchImpl, signal, timeoutMs, playlistLimits) {
+  return requestResource(
+    url,
+    fetchImpl,
+    signal,
+    timeoutMs,
+    (response, requestSignal) => readPlaylistResponse(
+      response,
+      url,
+      requestSignal,
+      playlistLimits,
+    ),
+  );
 }
 
 export async function inspectHls(url, {
@@ -172,7 +249,13 @@ export async function inspectHls(url, {
   validateUrl(url);
   validateFetch(fetchImpl);
   validatePositiveSafeInteger(requestTimeoutMs, 'requestTimeoutMs');
-  const playlist = await fetchPlaylist(url, fetchImpl, signal, requestTimeoutMs);
+  const playlist = await fetchPlaylist(
+    url,
+    fetchImpl,
+    signal,
+    requestTimeoutMs,
+    DEFAULT_HLS_PLAYLIST_LIMITS,
+  );
   if (playlist.kind === 'master') return playlist;
 
   return {
@@ -209,6 +292,7 @@ export async function assembleHls(url, {
 
   let stopped = false;
   let fatalError;
+  let parts;
   const controller = new AbortController();
 
   const stop = (error) => {
@@ -229,7 +313,13 @@ export async function assembleHls(url, {
 
   try {
     assertRunning();
-    const playlist = await fetchPlaylist(url, fetchImpl, controller.signal, requestTimeoutMs);
+    const playlist = await fetchPlaylist(
+      url,
+      fetchImpl,
+      controller.signal,
+      requestTimeoutMs,
+      DEFAULT_HLS_PLAYLIST_LIMITS,
+    );
     assertRunning();
     if (playlist.kind === 'master') {
       throw new HlsError(
@@ -256,7 +346,7 @@ export async function assembleHls(url, {
       );
     }
 
-    const parts = new Array(playlist.segments.length);
+    parts = new Array(playlist.segments.length);
     let nextIndex = 0;
     let total = 0;
     let completedSegments = 0;
@@ -289,35 +379,40 @@ export async function assembleHls(url, {
       'O vídeo HLS excede o limite de tamanho permitido.',
       { maxBytes },
     );
-    const reserve = (chunk, segmentChunks) => {
-      assertRunning();
+    const rejectTooLarge = () => {
+      const error = tooLargeError();
+      stop(error);
+      throw error;
+    };
+    const reserve = (chunk, segmentChunks, segmentUrl) => {
+      assertRunning(segmentUrl);
       if (!(chunk instanceof Uint8Array) && !(chunk instanceof ArrayBuffer)) {
-        throw networkError(url);
+        throw networkError(segmentUrl);
       }
-      if (total + chunk.byteLength > maxBytes) {
-        const error = tooLargeError();
-        if (!fatalError) fatalError = error;
-        stop(error);
-        throw error;
-      }
+      if (total + chunk.byteLength > maxBytes) rejectTooLarge();
       total += chunk.byteLength;
       segmentChunks.push(chunk);
     };
 
-    const readSegment = async (response, segmentUrl) => {
+    const readSegment = async (response, segmentUrl, requestSignal) => {
+      const declaredBytes = declaredContentLength(response);
+      if (declaredBytes !== null && declaredBytes > maxBytes - total) rejectTooLarge();
+
       const getReader = response.body?.getReader;
       if (typeof getReader !== 'function') {
-        const bytes = await readBytes(response, segmentUrl, controller.signal, requestTimeoutMs);
+        const bytes = await response.arrayBuffer();
         assertRunning(segmentUrl);
         const segmentChunks = [];
-        reserve(bytes, segmentChunks);
-        return segmentChunks;
+        reserve(bytes, segmentChunks, segmentUrl);
+        const part = new Blob(segmentChunks, { type: 'video/mp2t' });
+        segmentChunks.length = 0;
+        return part;
       }
 
       const reader = getReader.call(response.body);
       const segmentChunks = [];
       let readerCancelled = false;
-      const cancelReader = () => {
+      const cancelSegmentReader = () => {
         if (readerCancelled) return;
         readerCancelled = true;
         try {
@@ -326,33 +421,32 @@ export async function assembleHls(url, {
           // Cancellation is best-effort; the public operation error is preserved.
         }
       };
+      requestSignal.addEventListener('abort', cancelSegmentReader, { once: true });
 
       try {
         while (true) {
           assertRunning(segmentUrl);
-          const { done, value } = await readStreamChunk(
-            reader,
-            segmentUrl,
-            controller.signal,
-            requestTimeoutMs,
-          );
+          const { done, value } = await readReader(reader, requestSignal, segmentUrl);
           assertRunning(segmentUrl);
-          if (done) return segmentChunks;
+          if (done) {
+            const part = new Blob(segmentChunks, { type: 'video/mp2t' });
+            segmentChunks.length = 0;
+            return part;
+          }
           if (!(value instanceof Uint8Array)) throw networkError(segmentUrl);
-
           if (total + value.byteLength > maxBytes) {
-            const error = tooLargeError();
-            if (!fatalError) fatalError = error;
-            cancelReader();
-            stop(error);
-            throw error;
+            cancelSegmentReader();
+            rejectTooLarge();
           }
           total += value.byteLength;
           segmentChunks.push(value);
         }
       } catch (error) {
-        if (stopped || controller.signal.aborted) cancelReader();
+        segmentChunks.length = 0;
+        if (stopped || requestSignal.aborted) cancelSegmentReader();
         throw error;
+      } finally {
+        requestSignal.removeEventListener('abort', cancelSegmentReader);
       }
     };
 
@@ -364,17 +458,20 @@ export async function assembleHls(url, {
 
         const segment = playlist.segments[index];
         try {
-          const response = await fetchOk(
+          const part = await requestResource(
             segment.url,
             fetchImpl,
             controller.signal,
             requestTimeoutMs,
+            (response, requestSignal) => readSegment(
+              response,
+              segment.url,
+              requestSignal,
+            ),
           );
           assertRunning(segment.url);
-          const chunks = await readSegment(response, segment.url);
-          parts[index] = chunks;
-          assertRunning(segment.url);
-          completedBytes += chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+          parts[index] = part;
+          completedBytes += part.size;
           completedSegments += 1;
           notifyProgress();
         } catch (error) {
@@ -392,11 +489,10 @@ export async function assembleHls(url, {
     }
     if (fatalError) throw fatalError;
     assertRunning();
-    const orderedChunks = parts.flat();
-    assertRunning();
-    const blob = new Blob(orderedChunks, { type: 'video/mp2t' });
+    const blob = new Blob(parts, { type: 'video/mp2t' });
     return { blob, size: total };
   } finally {
+    parts?.fill(undefined);
     signal?.removeEventListener?.('abort', relayAbort);
   }
 }

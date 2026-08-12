@@ -2,7 +2,7 @@
   "name": "video-radar-extension",
   "version": "1.0.0",
   "private": true,
-  "description": "On-demand Chromium extension for authorized direct, HLS and public YouTube video downloads.",
+  "description": "On-demand Chromium extension for authorized direct, HLS and public social-video downloads.",
   "license": "MIT",
   "author": "Carlos (carlosesl1)",
   "repository": {
@@ -25,6 +25,8 @@
     "test": "node --test test/*.test.js",
     "check": "node scripts/validate-extension.mjs && node --test test/*.test.js",
     "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dotnet.ps1 run --project native-host/VideoRadar.NativeHost.Tests",
-    "check:all": "npm run check && npm run test:native"
+    "check:all": "npm run check && npm run test:native",
+    "check:release": "node scripts/validate-release.mjs",
+    "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-v1-release.ps1"
   }
 }

@@ -6,7 +6,7 @@ const LABELS = Object.freeze({
 });
 const ACTIVE = new Set(['preparing', 'video', 'audio', 'merge', 'finalize']);
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const MEDIA_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function invalid() { throw new Error(INVALID); }
 function plainObject(value) {
@@ -24,7 +24,7 @@ export function assertJobSnapshot(snapshot) {
   if (!plainObject(snapshot)) invalid();
   const { jobId, videoId, title, height, percent, path, errorCode } = snapshot;
   const stage = snapshot.stage === 'download' ? 'video' : snapshot.stage;
-  if (!SAFE_ID.test(jobId) || !boundedString(videoId, 11, true) || (videoId && !VIDEO_ID.test(videoId))
+  if (!SAFE_ID.test(jobId) || !boundedString(videoId, 128, true) || (videoId && !MEDIA_ID.test(videoId))
     || !boundedString(title, 512, true) || !Number.isSafeInteger(height) || height < 144 || height > 4320
     || !STAGES.has(stage) || !(percent === null || (Number.isFinite(percent) && typeof percent === 'number'))
     || !nullableString(path, 1024) || !nullableString(errorCode, 64)) invalid();

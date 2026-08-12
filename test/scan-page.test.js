@@ -176,3 +176,192 @@ test('uses a matching source MIME for extensionless current video without sizing
     globalThis.location = originalLocation;
   }
 });
+
+test('on an Instagram feed keeps only the most visible video and identifies its post', () => {
+  const originalDocument = globalThis.document;
+  const originalPerformance = globalThis.performance;
+  const originalLocation = globalThis.location;
+  const originalInnerWidth = globalThis.innerWidth;
+  const originalInnerHeight = globalThis.innerHeight;
+
+  function instagramVideo(url, rect, postUrl, label) {
+    const article = {
+      innerText: `${label}\nCurtidas e comentários`,
+      querySelector(selector) {
+        return selector.includes('a[href') ? { href: postUrl } : null;
+      },
+    };
+    return {
+      currentSrc: url,
+      src: '',
+      videoWidth: 1080,
+      videoHeight: 1920,
+      title: '',
+      getAttribute() { return null; },
+      querySelectorAll() { return []; },
+      getBoundingClientRect() { return rect; },
+      closest(selector) {
+        if (selector === 'article') return article;
+        if (selector === 'a[href]') return null;
+        return null;
+      },
+    };
+  }
+
+  const focused = instagramVideo(
+    'https://scontent.cdninstagram.com/focused.mp4?token=1',
+    { left: 200, top: 100, right: 800, bottom: 800, width: 600, height: 700 },
+    'https://www.instagram.com/reel/C8x_example/?igsh=feed',
+    'Vídeo em destaque',
+  );
+  const partial = instagramVideo(
+    'https://scontent.cdninstagram.com/partial.mp4?token=2',
+    { left: 200, top: 850, right: 800, bottom: 1200, width: 600, height: 350 },
+    'https://www.instagram.com/reel/C8x_partial/',
+    'Próximo vídeo',
+  );
+  const hidden = instagramVideo(
+    'https://scontent.cdninstagram.com/hidden.mp4?token=3',
+    { left: 200, top: 1300, right: 800, bottom: 1800, width: 600, height: 500 },
+    'https://www.instagram.com/reel/C8x_hidden/',
+    'Vídeo fora da tela',
+  );
+
+  globalThis.document = {
+    title: 'Instagram',
+    documentElement: { clientWidth: 1000, clientHeight: 900 },
+    querySelectorAll(selector) {
+      return selector === 'video' ? [partial, hidden, focused] : [];
+    },
+  };
+  globalThis.performance = {
+    getEntriesByType() {
+      return Array.from({ length: 200 }, (_, index) => ({
+        name: `https://scontent.cdninstagram.com/history-${index}.mp4`,
+        initiatorType: 'video',
+      }));
+    },
+  };
+  globalThis.location = { href: 'https://www.instagram.com/' };
+  globalThis.innerWidth = 1000;
+  globalThis.innerHeight = 900;
+
+  try {
+    const result = scanPage();
+
+    assert.equal(result.focusedPageUrl, 'https://www.instagram.com/reel/C8x_example/?igsh=feed');
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].url, 'https://scontent.cdninstagram.com/focused.mp4?token=1');
+    assert.equal(result.candidates[0].label, 'Vídeo em destaque');
+    assert.equal(result.candidates[0].source, 'dom-current');
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.performance = originalPerformance;
+    globalThis.location = originalLocation;
+    globalThis.innerWidth = originalInnerWidth;
+    globalThis.innerHeight = originalInnerHeight;
+  }
+});
+
+test('on a TikTok feed resolves the visible card instead of a stale playback URL', () => {
+  const originalDocument = globalThis.document;
+  const originalPerformance = globalThis.performance;
+  const originalLocation = globalThis.location;
+  const originalInnerWidth = globalThis.innerWidth;
+  const originalInnerHeight = globalThis.innerHeight;
+
+  function tiktokVideo(url, rect, postUrl, label, paused = true) {
+    const anchor = {
+      href: postUrl,
+      getAttribute(name) {
+        return name === 'href' ? postUrl : null;
+      },
+    };
+    const card = {
+      innerText: `${label}\nCurtidas e comentários`,
+      parentElement: null,
+      querySelectorAll(selector) {
+        return selector === 'a[href]' ? [anchor] : [];
+      },
+      querySelector() {
+        return null;
+      },
+    };
+    return {
+      currentSrc: url,
+      src: '',
+      type: 'video/mp4',
+      paused,
+      ended: false,
+      videoWidth: 1080,
+      videoHeight: 1920,
+      title: '',
+      parentElement: card,
+      getAttribute(name) {
+        return name === 'type' ? 'video/mp4' : null;
+      },
+      querySelectorAll() { return []; },
+      getBoundingClientRect() { return rect; },
+      closest() { return null; },
+    };
+  }
+
+  const stale = tiktokVideo(
+    'https://v16-webapp-prime.tiktok.com/playback?video_id=1111111111111111111',
+    { left: 240, top: -780, right: 760, bottom: -80 },
+    'https://www.tiktok.com/@stale/video/1111111111111111111',
+    'Vídeo anterior',
+  );
+  const focused = tiktokVideo(
+    'https://v16-webapp-prime.tiktok.com/playback?video_id=7488298911734435077',
+    { left: 240, top: 80, right: 760, bottom: 820 },
+    '/@video.radar/video/7488298911734435077?is_from_webapp=1',
+    'Vídeo atual',
+    false,
+  );
+  const next = tiktokVideo(
+    'https://v16-webapp-prime.tiktok.com/playback?video_id=2222222222222222222',
+    { left: 240, top: 920, right: 760, bottom: 1660 },
+    'https://www.tiktok.com/@next/video/2222222222222222222',
+    'Próximo vídeo',
+  );
+
+  globalThis.document = {
+    title: 'TikTok - Make Your Day',
+    body: {},
+    documentElement: { clientWidth: 1000, clientHeight: 900 },
+    querySelectorAll(selector) {
+      return selector === 'video' ? [stale, next, focused] : [];
+    },
+  };
+  globalThis.performance = {
+    getEntriesByType() {
+      return Array.from({ length: 50 }, (_, index) => ({
+        name: `https://v16-webapp-prime.tiktok.com/playback?history=${index}`,
+        initiatorType: 'video/mp4',
+      }));
+    },
+  };
+  globalThis.location = {
+    href: 'https://www.tiktok.com/foryou?lang=pt-BR',
+    hostname: 'www.tiktok.com',
+  };
+  globalThis.innerWidth = 1000;
+  globalThis.innerHeight = 900;
+
+  try {
+    const result = scanPage();
+
+    assert.equal(
+      result.focusedPageUrl,
+      'https://www.tiktok.com/@video.radar/video/7488298911734435077',
+    );
+    assert.deepEqual(result.candidates, []);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.performance = originalPerformance;
+    globalThis.location = originalLocation;
+    globalThis.innerWidth = originalInnerWidth;
+    globalThis.innerHeight = originalInnerHeight;
+  }
+});

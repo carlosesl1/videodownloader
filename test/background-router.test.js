@@ -108,6 +108,10 @@ test('main compõe o router sem abrir a porta nativa até uma ação YouTube', a
     qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
   };
   globalThis.chrome = {
+    alarms: {
+      create() {},
+      onAlarm: { addListener() {} },
+    },
     tabs: {
       async get(tabId) {
         return { id: tabId, url: 'https://example.test/video' };

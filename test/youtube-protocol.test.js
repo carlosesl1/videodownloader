@@ -29,6 +29,30 @@ test('canonicaliza somente URLs YouTube equivalentes ao host nativo', () => {
   ]) assert.equal(canonicalYouTubePageUrl(input), `https://www.youtube.com/watch?v=${videoId}`);
 });
 
+test('preserva plataforma allowlisted em catálogos sociais', () => {
+  const event = {
+    type: 'formats',
+    requestId: 'r-social',
+    platform: 'tiktok',
+    videoId: '7488298911734435077',
+    title: 'Public TikTok',
+    durationSeconds: 12,
+    qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+  };
+
+  assert.deepEqual(assertFormatsResult(event), {
+    platform: 'tiktok',
+    videoId: event.videoId,
+    title: event.title,
+    durationSeconds: 12,
+    qualities: event.qualities,
+  });
+  assert.throws(
+    () => assertHostEvent({ ...event, platform: 'evil' }),
+    /Mensagem inválida/,
+  );
+});
+
 test('rejeita URLs YouTube com autoridade, caminho ou query ambíguos', () => {
   for (const input of [
     `http://youtube.com/watch?v=${videoId}`, `https://user@youtube.com/watch?v=${videoId}`,

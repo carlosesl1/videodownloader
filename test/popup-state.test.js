@@ -83,6 +83,14 @@ test('maps supported failures to actionable Portuguese copy', () => {
   assert.match(userMessageForError('HLS_FMP4'), /segmentos fMP4/);
   assert.match(userMessageForError('PERMISSION_DENIED'), /Autorize/);
   assert.match(userMessageForError('SCAN_FAILED'), /Recarregue a página/);
+  assert.match(userMessageForError('LOGIN_REQUIRED'), /login/i);
+  assert.match(userMessageForError('RATE_LIMITED'), /temporariamente/i);
+  assert.match(userMessageForError('FORMAT_UNAVAILABLE'), /qualidade/i);
+  assert.match(userMessageForError('MEDIA_ACCESS_DENIED'), /servidor|plataforma/i);
+  assert.match(userMessageForError('MEDIA_DOWNLOAD_FAILED'), /vídeo/i);
+  assert.match(userMessageForError('DESTINATION_HELPER_UNAVAILABLE'), /auxiliar/i);
+  assert.match(userMessageForError('REVEAL_FAILED'), /Explorer/i);
+  assert.doesNotMatch(userMessageForError('YOUTUBE_DOWNLOAD'), /YouTube/i);
 });
 
 test('stores inspected HLS variants and a permission retry', () => {
@@ -147,7 +155,7 @@ test('moves an asynchronous HLS operation from queued to downloading and complet
   });
   assert.equal(downloading.busyId, null);
   assert.equal(downloading.items[0].phase, 'sent');
-  assert.equal(downloading.items[0].statusLabel, 'Download enviado ao Chrome');
+  assert.equal(downloading.items[0].statusLabel, 'Download em andamento');
 
   const complete = reduceState(downloading, {
     type: 'HLS_OPERATION_UPDATED',
@@ -193,7 +201,7 @@ test('reconciles a persisted HLS operation by canonical media URL', () => {
 });
 
 test('restores a persisted HLS operation without requiring a new page scan', () => {
-  const state = reduceState(initialState, {
+  const restored = reduceState(initialState, {
     type: 'HLS_OPERATION_RESTORED',
     record: {
       operationId: 'op-reopen',
@@ -209,15 +217,17 @@ test('restores a persisted HLS operation without requiring a new page scan', () 
       },
     },
   });
+  const state = reduceState(restored, { type: 'RESTORE_COMPLETED' });
 
   assert.equal(state.status, 'results');
-  assert.equal(state.target, 'download em andamento');
-  assert.equal(state.items.length, 1);
-  assert.equal(state.items[0].operationId, 'op-reopen');
-  assert.equal(state.items[0].phase, 'preparing');
-  assert.equal(state.items[0].progress, 25);
+  assert.equal(state.target, 'downloads');
+  assert.equal(state.items.length, 0);
+  assert.equal(state.downloads.length, 1);
+  assert.equal(state.downloads[0].operationId, 'op-reopen');
+  assert.equal(state.downloads[0].phase, 'preparing');
+  assert.equal(state.downloads[0].progress, 25);
   assert.equal(
-    state.items[0].statusLabel,
+    state.downloads[0].statusLabel,
     'Baixando segmentos… 25% · 15/60 · 5 MB de ~20 MB',
   );
 });
@@ -241,7 +251,8 @@ test('reconciliation replaces the temporary restored HLS card instead of duplica
       progress: { percent: 5, completedSegments: 5, totalSegments: 100 },
     },
   });
-  assert.equal(raced.items.length, 3);
+  assert.equal(raced.items.length, 2);
+  assert.equal(raced.downloads.length, 1);
 
   const reconciled = reduceState(raced, {
     type: 'HLS_OPERATION_RECONCILED',
@@ -257,6 +268,7 @@ test('reconciliation replaces the temporary restored HLS card instead of duplica
   });
 
   assert.equal(reconciled.items.length, 2);
+  assert.equal(reconciled.downloads.length, 0);
   assert.equal(reconciled.items.filter((item) => item.operationId === 'op-race').length, 1);
   assert.equal(reconciled.items.find((item) => item.operationId === 'op-race').id, 'hls-scanned');
 });
@@ -265,7 +277,7 @@ test('direct download confirmation is stored on only the selected item', () => {
   const base = { ...initialState, status: 'results', items: [directItem, hlsItem] };
   const sent = reduceState(base, { type: 'DIRECT_SENT', id: directItem.id, selectedIndex: 0 });
   assert.equal(sent.items[0].phase, 'sent');
-  assert.equal(sent.items[0].statusLabel, 'Download enviado ao Chrome');
+  assert.equal(sent.items[0].statusLabel, 'Download iniciado');
   assert.equal(sent.items[1].phase, undefined);
 });
 
@@ -310,18 +322,20 @@ test('stores a YouTube catalog with descending variants and keeps its selected f
 });
 
 test('restores and updates persisted YouTube jobs without inventing unknown progress', () => {
-  const restored = reduceState(initialState, { type: 'YOUTUBE_JOB_RESTORED', snapshot: youtubeSnapshot });
+  const restoring = reduceState(initialState, { type: 'YOUTUBE_JOB_RESTORED', snapshot: youtubeSnapshot });
+  const restored = reduceState(restoring, { type: 'RESTORE_COMPLETED' });
   assert.equal(restored.status, 'results');
-  assert.equal(restored.items[0].progress, null);
-  assert.equal(restored.items[0].active, true);
+  assert.equal(restored.items.length, 0);
+  assert.equal(restored.downloads[0].progress, null);
+  assert.equal(restored.downloads[0].active, true);
 
   const completed = reduceState(restored, {
     type: 'YOUTUBE_JOB_UPDATED',
     snapshot: { ...youtubeSnapshot, stage: 'complete', percent: 100, path: 'C:/Downloads/zoo.mp4', updatedAt: 2 },
   });
-  assert.equal(completed.items[0].active, false);
-  assert.equal(completed.items[0].path, 'C:/Downloads/zoo.mp4');
-  assert.equal(completed.items[0].statusLabel, 'Concluído');
+  assert.equal(completed.downloads[0].active, false);
+  assert.equal(completed.downloads[0].path, 'C:/Downloads/zoo.mp4');
+  assert.equal(completed.downloads[0].statusLabel, 'Concluído');
 });
 
 test('reconciles a completed relocation with its existing download card without duplication', () => {
@@ -368,11 +382,12 @@ test('restores a failed relocation with its preserved path and settings action',
     },
   });
 
-  assert.equal(state.items.length, 1);
-  assert.equal(state.items[0].phase, 'error');
-  assert.equal(state.items[0].stagingPath, 'C:\\Downloads\\Video Radar\\aula.ts');
-  assert.equal(state.items[0].action, 'open-download-settings');
-  assert.match(state.items[0].statusLabel, /Arquivo preservado/);
+  assert.equal(state.items.length, 0);
+  assert.equal(state.downloads.length, 1);
+  assert.equal(state.downloads[0].phase, 'error');
+  assert.equal(state.downloads[0].stagingPath, 'C:\\Downloads\\Video Radar\\aula.ts');
+  assert.equal(state.downloads[0].action, 'open-download-settings');
+  assert.match(state.downloads[0].statusLabel, /Arquivo preservado/);
 });
 
 test('a cancelled YouTube folder prompt returns the ready card without an error', () => {
@@ -392,4 +407,43 @@ test('a cancelled YouTube folder prompt returns the ready card without an error'
   assert.equal(state.items[0].statusLabel, '');
   assert.equal(state.busyId, null);
   assert.equal(state.message, 'Download cancelado');
+});
+
+test('marks a social download pending immediately and blocks quality changes', () => {
+  const item = {
+    id: 'tiktok:42', kind: 'remote-media', phase: 'ready', active: false,
+    filename: 'video-720p.mp4', selectedIndex: 0,
+    variants: [
+      { height: 720, label: '720p', container: 'mp4', filename: 'video-720p.mp4' },
+      { height: 480, label: '480p', container: 'mp4', filename: 'video-480p.mp4' },
+    ],
+  };
+  const pending = reduceState(
+    { ...initialState, status: 'results', items: [item] },
+    { type: 'MEDIA_DOWNLOAD_STARTED', id: item.id, selectedIndex: 0, kind: item.kind },
+  );
+  const unchanged = reduceState(pending, {
+    type: 'QUALITY_SELECTED', id: item.id, selectedIndex: 1,
+  });
+
+  assert.equal(pending.items[0].phase, 'preparing');
+  assert.equal(pending.items[0].statusLabel, 'Iniciando download…');
+  assert.equal(unchanged.items[0].selectedIndex, 0);
+});
+
+test('keeps a completed download revealable when Explorer fails', () => {
+  const item = {
+    ...directItem,
+    phase: 'complete',
+    finalPath: 'D:\\Vídeos\\aula.mp4',
+    statusLabel: 'Download concluído',
+  };
+  const failed = reduceState(
+    { ...initialState, status: 'results', items: [item] },
+    { type: 'REVEAL_FAILED', id: item.id },
+  );
+
+  assert.equal(failed.items[0].phase, 'complete');
+  assert.equal(failed.items[0].finalPath, item.finalPath);
+  assert.match(failed.items[0].statusLabel, /Explorer/);
 });

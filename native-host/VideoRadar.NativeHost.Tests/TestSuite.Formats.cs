@@ -1,3 +1,4 @@
+using VideoRadar.NativeHost.Files;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.YouTube;
 
@@ -10,10 +11,20 @@ internal static partial class TestSuite
         FormatCatalogReducesFixtureToDistinctQualities();
         FormatCatalogRejectsUnavailableOrIncompleteMetadata();
         FormatCatalogRejectsMissingPositiveHeights();
-        FormatCatalogFallsBackToWebmWithoutMp4AndM4a();
+        FormatCatalogRequiresAudioForSeparateYouTubeVideo();
+        FormatCatalogAcceptsSeparateInstagramVideoWithM4aAudio();
+        FormatCatalogAcceptsPublicSocialMetadataWithoutAvailability();
+        FormatCatalogFiltersSocialQualitiesToCombinedFormats();
+        FormatCatalogRejectsExplicitlyRestrictedSocialMetadata();
         MetadataArgumentsAreHardenedAndCanonical();
+        DownloadArgumentsUsePlatformSpecificSelectors();
+        DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio();
         YouTubeServiceCanonicalizesBeforeCallingRunner();
+        YouTubeServiceAcceptsAllowlistedSocialPages();
         YouTubeServiceCachesSuccessfulCatalogsAndRetriesFailures();
+        YouTubeServiceExpiresCatalogsByPlatform();
+        YouTubeServiceBoundsCatalogCacheByCountAndBytes();
+        YouTubeServiceCancellationDoesNotCancelSharedLookup();
         YouTubeServiceDoesNotRunForInvalidUrl();
         YouTubeServiceDoesNotLeakYtDlpStandardError();
     }
@@ -60,21 +71,83 @@ internal static partial class TestSuite
         Throws<InvalidDataException>(() => FormatCatalog.Parse(json));
     }
 
-    private static void FormatCatalogFallsBackToWebmWithoutMp4AndM4a()
+    private static void FormatCatalogRequiresAudioForSeparateYouTubeVideo()
     {
         const string json = """
             {"id":"jNQXAC9IVRw","title":"A","is_live":false,"availability":"public","formats":[
-              {"height":1080,"vcodec":"avc1","acodec":"none","ext":"mp4"},
               {"height":1080,"vcodec":"avc1","acodec":"none","ext":"mp4"},
               {"height":null,"vcodec":"none","acodec":"opus","ext":"webm"}
             ]}
             """;
 
-        var catalog = FormatCatalog.Parse(json);
+        Throws<InvalidDataException>(() => FormatCatalog.Parse(json));
+    }
 
+    private static void FormatCatalogAcceptsSeparateInstagramVideoWithM4aAudio()
+    {
+        const string instagram = """
+            {"id":"DbdpUhpg1bx","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"height":null,"vcodec":"none","acodec":"mp4a.40.5","ext":"m4a"},
+              {"height":1920,"vcodec":"vp09.00.40.08","acodec":"none","ext":"mp4"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(instagram);
+
+        Equal("instagram", catalog.Platform);
         Equal(1, catalog.Qualities.Count);
-        Equal("WebM", catalog.Qualities[0].Container);
-        True(!catalog.Qualities[0].Combined, "Separate streams should not be marked combined.");
+        Equal(1920, catalog.Qualities[0].Height);
+        Equal("MP4", catalog.Qualities[0].Container);
+        True(!catalog.Qualities[0].Combined, "Separate Instagram streams must remain marked for merging.");
+    }
+
+    private static void FormatCatalogAcceptsPublicSocialMetadataWithoutAvailability()
+    {
+        const string instagram = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","is_live":false,"formats":[
+              {"height":720,"vcodec":"avc1.64001f","acodec":"mp4a.40.2","ext":"mp4"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(instagram);
+
+        Equal("instagram", catalog.Platform);
+        Equal("C8x_example", catalog.VideoId);
+        Equal(1, catalog.Qualities.Count);
+        Equal("MP4", catalog.Qualities[0].Container);
+    }
+
+    private static void FormatCatalogFiltersSocialQualitiesToCombinedFormats()
+    {
+        const string tiktok = """
+            {"id":"social-id","title":"Public TikTok","extractor_key":"TikTok","formats":[
+              {"height":1080,"vcodec":"h264","acodec":"none","ext":"mp4"},
+              {"height":720,"vcodec":"h264","acodec":"aac","ext":"mp4"},
+              {"height":480,"vcodec":"vp9","acodec":"opus","ext":"webm"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(tiktok);
+
+        Equal(2, catalog.Qualities.Count);
+        Equal(720, catalog.Qualities[0].Height);
+        Equal("MP4", catalog.Qualities[0].Container);
+        True(catalog.Qualities[0].Combined, "Social qualities must be combined streams.");
+        Equal(480, catalog.Qualities[1].Height);
+        Equal("WebM", catalog.Qualities[1].Container);
+    }
+
+    private static void FormatCatalogRejectsExplicitlyRestrictedSocialMetadata()
+    {
+        foreach (var availability in new[] { "private", "subscriber_only", "premium_only", "needs_auth" })
+        {
+            var json = $$"""
+                {"id":"social-id","title":"Restricted","extractor_key":"TikTok","availability":"{{availability}}","formats":[
+                  {"height":720,"vcodec":"h264","acodec":"aac","ext":"mp4"}
+                ]}
+                """;
+            Throws<InvalidDataException>(() => FormatCatalog.Parse(json));
+        }
     }
 
     private static void MetadataArgumentsAreHardenedAndCanonical()
@@ -97,6 +170,40 @@ internal static partial class TestSuite
         Equal(canonical, arguments[^1]);
     }
 
+    private static void DownloadArgumentsUsePlatformSpecificSelectors()
+    {
+        var tiktok = YtDlpArguments.Download(
+            "tools",
+            "home",
+            "temp",
+            "stem",
+            "https://www.tiktok.com/@video.radar/video/7488298911734435077",
+            720);
+        var selector = tiktok[tiktok.ToList().IndexOf("--format") + 1];
+
+        True(selector.Contains("vcodec!*=h265", StringComparison.Ordinal), "TikTok selector did not avoid H.265.");
+        True(selector.Contains("ext=mp4", StringComparison.Ordinal), "TikTok selector did not prefer MP4.");
+        True(!selector.Contains("height<=", StringComparison.Ordinal), "Social selector must not silently download a lower quality.");
+        True(selector.Split('/').All(option => option.Contains("height=720", StringComparison.Ordinal)), "Every social fallback must preserve the selected height.");
+    }
+
+    private static void DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio()
+    {
+        var arguments = YtDlpArguments.Download(
+            "tools",
+            "home",
+            "temp",
+            "stem",
+            "https://www.instagram.com/reel/DbdpUhpg1bx/",
+            1920);
+
+        var selector = arguments[arguments.ToList().IndexOf("--format") + 1];
+
+        Equal(
+            "b[height=1920][ext=mp4]/bv[height=1920][ext=mp4]+ba[ext=m4a]/b[height=1920]",
+            selector);
+    }
+
     private static void YouTubeServiceCanonicalizesBeforeCallingRunner()
     {
         var runner = new FakeProcessRunner(new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
@@ -108,6 +215,28 @@ internal static partial class TestSuite
         Equal("jNQXAC9IVRw", catalog.VideoId);
         Equal(Path.Combine(tools, "yt-dlp.exe"), runner.Executable);
         Equal("https://www.youtube.com/watch?v=jNQXAC9IVRw", runner.Arguments[^1]);
+    }
+
+    private static void YouTubeServiceAcceptsAllowlistedSocialPages()
+    {
+        const string instagram = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"height":720,"vcodec":"avc1.64001f","acodec":"mp4a.40.2","ext":"mp4"}
+            ]}
+            """;
+        var runner = new FakeProcessRunner(new VideoRadar.NativeHost.Processes.ProcessResult(0, instagram, string.Empty));
+        var service = new YouTubeService("tools", runner);
+
+        var catalog = service.ListFormatsAsync(
+            "https://instagram.com/reels/C8x_example/?igsh=abc",
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal("instagram", catalog.Platform);
+        Equal("https://www.instagram.com/reel/C8x_example/", runner.Arguments[^1]);
+        Throws<InvalidDataException>(() => service.ListFormatsAsync(
+            "https://www.instagram.com/video.radar/",
+            CancellationToken.None).GetAwaiter().GetResult());
+        Equal(1, runner.CallCount);
     }
 
     private static void YouTubeServiceDoesNotRunForInvalidUrl()
@@ -150,6 +279,121 @@ internal static partial class TestSuite
         Equal(2, retryRunner.CallCount);
     }
 
+    private static void YouTubeServiceExpiresCatalogsByPlatform()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var time = new ManualTimeProvider(new DateTimeOffset(2026, 7, 29, 0, 0, 0, TimeSpan.Zero));
+        var youtubeRunner = new FakeProcessRunner(
+            new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
+        var youtube = new YouTubeService(
+            "tools",
+            youtubeRunner,
+            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            time);
+
+        youtube.ListFormatsAsync("https://youtu.be/jNQXAC9IVRw", CancellationToken.None).GetAwaiter().GetResult();
+        time.Advance(TimeSpan.FromMinutes(29));
+        youtube.ListFormatsAsync("https://youtu.be/jNQXAC9IVRw", CancellationToken.None).GetAwaiter().GetResult();
+        Equal(1, youtubeRunner.CallCount);
+        time.Advance(TimeSpan.FromMinutes(1));
+        youtube.ListFormatsAsync("https://youtu.be/jNQXAC9IVRw", CancellationToken.None).GetAwaiter().GetResult();
+        Equal(2, youtubeRunner.CallCount);
+
+        const string instagramMetadata = """
+            {"id":"C8x_example","title":"Public Reel","extractor_key":"Instagram","formats":[
+              {"height":720,"vcodec":"avc1.64001f","acodec":"mp4a.40.2","ext":"mp4"}
+            ]}
+            """;
+        var instagramRunner = new FakeProcessRunner(
+            new VideoRadar.NativeHost.Processes.ProcessResult(0, instagramMetadata, string.Empty));
+        var instagram = new YouTubeService(
+            "tools",
+            instagramRunner,
+            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            time);
+
+        instagram.ListFormatsAsync("https://www.instagram.com/reel/C8x_example/", CancellationToken.None).GetAwaiter().GetResult();
+        time.Advance(TimeSpan.FromMinutes(4));
+        instagram.ListFormatsAsync("https://www.instagram.com/reel/C8x_example/", CancellationToken.None).GetAwaiter().GetResult();
+        Equal(1, instagramRunner.CallCount);
+        time.Advance(TimeSpan.FromMinutes(1));
+        instagram.ListFormatsAsync("https://www.instagram.com/reel/C8x_example/", CancellationToken.None).GetAwaiter().GetResult();
+        Equal(2, instagramRunner.CallCount);
+    }
+
+    private static void YouTubeServiceBoundsCatalogCacheByCountAndBytes()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var factory = new DownloadPathsFactory(paths.Home, paths.TempRoot);
+        var countRunner = new FakeProcessRunner(
+            new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
+        var countService = new YouTubeService("tools", countRunner, factory);
+        var urls = Enumerable.Range(0, 17)
+            .Select(index => $"https://youtu.be/id{index:D9}")
+            .ToArray();
+
+        foreach (var url in urls)
+            countService.ListFormatsAsync(url, CancellationToken.None).GetAwaiter().GetResult();
+        countService.ListFormatsAsync(urls[0], CancellationToken.None).GetAwaiter().GetResult();
+        Equal(18, countRunner.CallCount);
+
+        var largeTitle = new string('x', 1_100_000);
+        var largeMetadata = $$"""
+            {"id":"large-video","title":"{{largeTitle}}","formats":[
+              {"height":720,"vcodec":"avc1","acodec":"mp4a","ext":"mp4"}
+            ]}
+            """;
+        var byteRunner = new FakeProcessRunner(
+            new VideoRadar.NativeHost.Processes.ProcessResult(0, largeMetadata, string.Empty));
+        var byteService = new YouTubeService("tools", byteRunner, factory);
+        var byteUrls = Enumerable.Range(0, 4)
+            .Select(index => $"https://youtu.be/byte{index:D7}")
+            .ToArray();
+
+        foreach (var url in byteUrls)
+            byteService.ListFormatsAsync(url, CancellationToken.None).GetAwaiter().GetResult();
+        byteService.ListFormatsAsync(byteUrls[0], CancellationToken.None).GetAwaiter().GetResult();
+        Equal(5, byteRunner.CallCount);
+    }
+
+    private static void YouTubeServiceCancellationDoesNotCancelSharedLookup()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource<VideoRadar.NativeHost.Processes.ProcessResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new ScriptedProcessRunner(call =>
+        {
+            True(!call.CancellationToken.CanBeCanceled, "Shared metadata lookup captured an observer token.");
+            started.TrySetResult();
+            return completed.Task;
+        });
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            TimeProvider.System);
+        using var cancellation = new CancellationTokenSource();
+
+        var cancelledObserver = service.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            cancellation.Token);
+        True(started.Task.Wait(TimeSpan.FromSeconds(5)), "Metadata lookup did not start.");
+        var survivingObserver = service.ListFormatsAsync(
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            CancellationToken.None);
+        cancellation.Cancel();
+
+        Throws<OperationCanceledException>(() => cancelledObserver.GetAwaiter().GetResult());
+        True(!survivingObserver.IsCompleted, "Cancelling one observer completed the shared lookup.");
+        completed.SetResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
+        Equal("jNQXAC9IVRw", survivingObserver.GetAwaiter().GetResult().VideoId);
+        Equal(1, runner.Calls.Count);
+    }
+
     private static void YouTubeServiceDoesNotLeakYtDlpStandardError()
     {
         var runner = new FakeProcessRunner(new VideoRadar.NativeHost.Processes.ProcessResult(1, string.Empty, "secret cookie and raw diagnostics"));
@@ -169,6 +413,15 @@ internal static partial class TestSuite
     }
 
     private static string ReadFixture() => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "youtube-info.json"));
+
+    private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        private DateTimeOffset utcNow = utcNow;
+
+        public override DateTimeOffset GetUtcNow() => utcNow;
+
+        public void Advance(TimeSpan elapsed) => utcNow += elapsed;
+    }
 
     private sealed class FakeProcessRunner : IProcessRunner
     {

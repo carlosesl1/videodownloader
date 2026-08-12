@@ -3,11 +3,18 @@ import test from 'node:test';
 import { HlsError } from '../src/hls/parse-playlist.js';
 import { assembleHls, inspectHls } from '../src/hls/hls-operation.js';
 
-function response(body, { ok = true, status = 200 } = {}) {
+function response(body, { ok = true, status = 200, contentLength } = {}) {
   const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : body;
   return {
     ok,
     status,
+    headers: {
+      get(name) {
+        return name.toLowerCase() === 'content-length' && contentLength !== undefined
+          ? String(contentLength)
+          : null;
+      },
+    },
     async text() {
       return typeof body === 'string' ? body : new TextDecoder().decode(body);
     },
@@ -122,6 +129,37 @@ test('assembleHls preserves playlist order when later segments resolve first', a
   for (const [, options] of calls) assert.equal(options.credentials, 'include');
 });
 
+test('assembleHls composes the final Blob from per-segment Blob parts', async () => {
+  const constructions = [];
+  const OriginalBlob = globalThis.Blob;
+  globalThis.Blob = class TrackingBlob extends OriginalBlob {
+    constructor(parts, options) {
+      constructions.push([...parts]);
+      super(parts, options);
+    }
+  };
+
+  try {
+    const result = await assembleHls('https://cdn.test/media.m3u8', {
+      allowedOrigins: ['https://cdn.test'],
+      concurrency: 2,
+      fetchImpl: async (url) => (
+        url.endsWith('.m3u8')
+          ? response(mediaPlaylist('one.ts', 'two.ts'))
+          : response(url.endsWith('one.ts') ? 'ONE' : 'TWO')
+      ),
+    });
+
+    assert.equal(await result.blob.text(), 'ONETWO');
+  } finally {
+    globalThis.Blob = OriginalBlob;
+  }
+
+  assert.equal(constructions.length, 3);
+  assert.ok(constructions[2].every((part) => part instanceof OriginalBlob));
+  assert.ok(constructions[2].every((part) => !Array.isArray(part)));
+});
+
 test('assembleHls rejects unauthorized segment origins before fetching a segment', async () => {
   const calls = [];
   await assert.rejects(
@@ -162,13 +200,17 @@ test('assembleHls reports monotonic segment and byte progress', async () => {
   ]);
 });
 
-test('assembleHls fails a stalled segment with a safe timeout error', async () => {
+test('assembleHls aborts a stalled request with a safe timeout error', async () => {
+  let segmentSignal;
+  let abortEvents = 0;
   await assert.rejects(
     assembleHls('https://cdn.test/media.m3u8', {
       allowedOrigins: ['https://cdn.test'],
       requestTimeoutMs: 10,
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, options) => {
         if (url.endsWith('.m3u8')) return response(mediaPlaylist('stalled.ts'));
+        segmentSignal = options.signal;
+        segmentSignal.addEventListener('abort', () => { abortEvents += 1; }, { once: true });
         return new Promise(() => {});
       },
     }),
@@ -178,6 +220,8 @@ test('assembleHls fails a stalled segment with a safe timeout error', async () =
       return true;
     },
   );
+  assert.equal(segmentSignal.aborted, true);
+  assert.equal(abortEvents, 1);
 });
 
 test('assembleHls rejects when accumulated bytes exceed maxBytes', async () => {
@@ -194,6 +238,90 @@ test('assembleHls rejects when accumulated bytes exceed maxBytes', async () => {
       assert.equal(error.details.maxBytes, 5);
       return true;
     },
+  );
+});
+
+test('inspectHls rejects an oversized declared manifest before reading its body', async () => {
+  let textCalls = 0;
+  await assert.rejects(
+    inspectHls('https://cdn.test/media.m3u8', {
+      fetchImpl: async () => ({
+        ...response('', { contentLength: (2 * 1024 * 1024) + 1 }),
+        async text() {
+          textCalls += 1;
+          return mediaPlaylist('one.ts');
+        },
+      }),
+    }),
+    (error) => error.code === 'HLS_MANIFEST_TOO_LARGE'
+      && error.details.maxManifestBytes === 2 * 1024 * 1024,
+  );
+  assert.equal(textCalls, 0);
+});
+
+test('inspectHls stops an oversized streaming manifest without Content-Length', async () => {
+  let cancelCalls = 0;
+  let delivered = false;
+  await assert.rejects(
+    inspectHls('https://cdn.test/media.m3u8', {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) return { done: true, value: undefined };
+                delivered = true;
+                return { done: false, value: new Uint8Array((2 * 1024 * 1024) + 1) };
+              },
+              async cancel() {
+                cancelCalls += 1;
+              },
+            };
+          },
+        },
+      }),
+    }),
+    assertHlsError('HLS_MANIFEST_TOO_LARGE'),
+  );
+  assert.equal(cancelCalls, 1);
+});
+
+test('assembleHls rejects an oversized declared segment before reading its body', async () => {
+  let arrayBufferCalls = 0;
+  await assert.rejects(
+    assembleHls('https://cdn.test/media.m3u8', {
+      allowedOrigins: ['https://cdn.test'],
+      maxBytes: 5,
+      fetchImpl: async (url) => {
+        if (url.endsWith('.m3u8')) return response(mediaPlaylist('one.ts'));
+        return {
+          ...response('', { contentLength: 6 }),
+          async arrayBuffer() {
+            arrayBufferCalls += 1;
+            return new Uint8Array(6).buffer;
+          },
+        };
+      },
+    }),
+    assertHlsError('HLS_TOO_LARGE'),
+  );
+  assert.equal(arrayBufferCalls, 0);
+});
+
+test('assembleHls uses a 256 MiB default size ceiling', async () => {
+  await assert.rejects(
+    assembleHls('https://cdn.test/media.m3u8', {
+      allowedOrigins: ['https://cdn.test'],
+      fetchImpl: async (url) => (
+        url.endsWith('.m3u8')
+          ? response(mediaPlaylist('one.ts'))
+          : response('', { contentLength: (256 * 1024 * 1024) + 1 })
+      ),
+    }),
+    (error) => error.code === 'HLS_TOO_LARGE'
+      && error.details.maxBytes === 256 * 1024 * 1024,
   );
 });
 
@@ -237,6 +365,37 @@ test('assembleHls accounts streaming chunks before retention and cancels on size
   assert.equal(arrayBufferCalls, 0);
   assert.equal(cancelCalls, 1);
   assert.equal(blobConstructions, 0);
+});
+
+test('assembleHls cancels a stalled stream reader when its request times out', async () => {
+  let cancelCalls = 0;
+  await assert.rejects(
+    assembleHls('https://cdn.test/media.m3u8', {
+      allowedOrigins: ['https://cdn.test'],
+      requestTimeoutMs: 10,
+      fetchImpl: async (url) => {
+        if (url.endsWith('.m3u8')) return response(mediaPlaylist('one.ts'));
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            getReader() {
+              return {
+                read() {
+                  return new Promise(() => {});
+                },
+                async cancel() {
+                  cancelCalls += 1;
+                },
+              };
+            },
+          },
+        };
+      },
+    }),
+    assertHlsError('HLS_TIMEOUT'),
+  );
+  assert.equal(cancelCalls, 1);
 });
 
 test('assembleHls rejects an external abort during a delayed read that ignores its signal', async () => {

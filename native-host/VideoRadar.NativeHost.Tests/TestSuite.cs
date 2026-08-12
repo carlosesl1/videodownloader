@@ -14,6 +14,7 @@ internal static partial class TestSuite
         DotnetWrapperForwardsInfoArgumentsTest();
         DotnetWrapperForwardsPublishOutputArgumentsTest();
         ProtocolTests();
+        MediaPageTests();
         YouTubeUrlTests();
         FormatCatalogTests();
         DownloadTests();

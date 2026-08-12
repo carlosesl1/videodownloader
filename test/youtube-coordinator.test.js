@@ -164,6 +164,61 @@ test('lista formatos sem persistir e reutiliza o catálogo em memória ao inicia
   assert.equal(Object.isFrozen(env.coordinator), true);
 });
 
+test('lista formatos sociais allowlisted usando o mesmo coordenador persistente', async () => {
+  const url = 'https://www.tiktok.com/@video.radar/video/7488298911734435077';
+  const catalog = {
+    platform: 'tiktok',
+    videoId: '7488298911734435077',
+    title: 'Public TikTok',
+    durationSeconds: 12,
+    qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+  };
+  const env = createEnv({
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) {
+        return { type: 'formats', requestId: 'social-formats', ...catalog };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+  await env.coordinator.ready;
+
+  assert.deepEqual(
+    await env.coordinator.handle(message(YOUTUBE_ACTIONS.LIST_FORMATS, { url })),
+    catalog,
+  );
+  assert.deepEqual(env.requests, [{
+    type: HOST_COMMANDS.LIST_FORMATS,
+    payload: { url },
+  }]);
+});
+
+test('aceita no X um vídeo incorporado cujo ID difere do post allowlisted', async () => {
+  const url = 'https://x.com/Reuters/status/2041474345386783199';
+  const env = createEnv({
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) {
+        return {
+          type: 'formats',
+          requestId: 'x-formats',
+          platform: 'x',
+          videoId: '2041472949631483904',
+          title: 'Reuters video',
+          durationSeconds: 30,
+          qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+        };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+  await env.coordinator.ready;
+
+  const catalog = await env.coordinator.handle(message(YOUTUBE_ACTIONS.LIST_FORMATS, { url }));
+
+  assert.equal(catalog.platform, 'x');
+  assert.equal(catalog.videoId, '2041472949631483904');
+});
+
 test('manda o auxiliar selecionar no Explorer somente um caminho Windows absoluto', async () => {
   const env = createEnv();
   await env.coordinator.ready;

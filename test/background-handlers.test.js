@@ -330,6 +330,73 @@ test('progress updates persist monotonically and a different HLS start waits', a
   assert.equal(env.sent.filter(({ action }) => action === ACTIONS.START_HLS).length, 1);
 });
 
+test('progress persistence is throttled while phase and terminal writes remain durable', async () => {
+  let clock = 0;
+  const env = defaultDependencies({
+    now: () => clock,
+    progressPersistIntervalMs: 1_000,
+  });
+  const handlers = createBackgroundHandlers(env.dependencies);
+  const started = await handlers.handle(downloadMessage());
+
+  await handlers.handle(progressMessage(started.operationId, 1, 100, 10, 1_000));
+  clock = 100;
+  await handlers.handle(progressMessage(started.operationId, 2, 100, 20, 1_000));
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].progress.completedSegments, 1);
+
+  clock = 1_100;
+  await handlers.handle(progressMessage(started.operationId, 3, 100, 30, 1_000));
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].progress.completedSegments, 3);
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].updatedAt, 1_100);
+
+  clock = 1_101;
+  await handlers.handle(failedCompletion(started.operationId));
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].state, 'failed');
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].updatedAt, 1_101);
+});
+
+test('legacy HLS records migrate once to repaired explicit indexes', async () => {
+  const session = memorySession({
+    'hlsOperation:legacy-operation': {
+      operationId: 'legacy-operation',
+      url: 'https://cdn.test/legacy.m3u8',
+      filename: 'legacy.ts',
+      allowedOrigins: ['https://cdn.test'],
+      permissionPatterns: ['https://cdn.test/*'],
+      state: 'assembling',
+      progress: {
+        completedSegments: 0, totalSegments: 1, bytesReceived: 0,
+        estimatedTotalBytes: null, percent: 0,
+      },
+    },
+    'hlsInspection:stale-inspection': {
+      inspectionId: 'stale-inspection',
+      permissionPatterns: ['https://inspect.test/*'],
+      state: 'releasing',
+    },
+  });
+  const env = defaultDependencies({ storageSession: session });
+  env.dependencies.sendOffscreen = async (message) => {
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
+    return { ok: true, value: { operationId: message.payload.operationId, state: 'assembling' } };
+  };
+
+  await createBackgroundHandlers(env.dependencies).ready;
+  assert.deepEqual(session.values.hlsOperationIndex, ['legacy-operation']);
+  assert.deepEqual(session.values.hlsInspectionIndex, []);
+  assert.equal(session.values.hlsIndexMigration, 1);
+  const scansAfterMigration = session.calls.get.filter((keys) => keys === null).length;
+
+  await createBackgroundHandlers(env.dependencies).ready;
+  assert.equal(session.calls.get.filter((keys) => keys === null).length, scansAfterMigration);
+
+  session.values.hlsOperationIndex = ['missing-operation', 'legacy-operation'];
+  await createBackgroundHandlers(env.dependencies).ready;
+  assert.deepEqual(session.values.hlsOperationIndex, ['legacy-operation']);
+});
+
 test('duplicate completion never redownloads when Chrome search no longer returns the mapped item', async () => {
   const env = defaultDependencies();
   env.dependencies.downloads.search = async () => [];
@@ -685,6 +752,10 @@ test('Chrome 116 getContexts skips an existing document and coalesces concurrent
   const creation = deferred();
   let contexts = [{ contextType: 'OFFSCREEN_DOCUMENT' }];
   globalThis.chrome = {
+    alarms: {
+      create() {},
+      onAlarm: { addListener() {} },
+    },
     tabs: {
       async get(tabId) { return { id: tabId, url: 'https://example.test/video' }; },
       onRemoved: { addListener() {} },
@@ -745,6 +816,26 @@ test('Chrome 116 getContexts skips an existing document and coalesces concurrent
     await Promise.all([first, second]);
     assert.equal(runtimeListeners.length, 1);
     assert.equal(downloadListeners.length, 1);
+
+    let isolatedContexts = [{ contextType: 'OFFSCREEN_DOCUMENT' }];
+    let closeCalls = 0;
+    const isolated = main.createOffscreenSender({
+      offscreen: {
+        async createDocument() { isolatedContexts = [{ contextType: 'OFFSCREEN_DOCUMENT' }]; },
+        async closeDocument() { closeCalls += 1; isolatedContexts = []; },
+      },
+      runtime: {
+        getURL(path) { return `chrome-extension://isolated/${path}`; },
+        async getContexts() { return isolatedContexts; },
+        async sendMessage() { return { ok: true }; },
+      },
+    });
+    assert.deepEqual(await Promise.all([
+      isolated.closeIfIdle(),
+      isolated.closeIfIdle(),
+    ]), [true, true]);
+    assert.equal(closeCalls, 1);
+    assert.equal(await isolated.closeIfIdle(), false);
   } finally {
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;

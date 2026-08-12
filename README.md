@@ -1,133 +1,149 @@
 # Video Radar
 
 [![CI](https://github.com/carlosesl1/videodownloader/actions/workflows/ci.yml/badge.svg)](https://github.com/carlosesl1/videodownloader/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#requirements)
+[![Versão](https://img.shields.io/github/v/release/carlosesl1/videodownloader?label=vers%C3%A3o)](https://github.com/carlosesl1/videodownloader/releases/latest)
+[![Licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4.svg)](#compatibilidade)
 
-Video Radar is an open-source, on-demand video detector and downloader for
-Chromium-based browsers. It finds direct media (`.mp4`, `.webm`, `.mov`), HLS
-playlists (`.m3u8`) and public YouTube formats, while requesting access only
-when the user explicitly clicks **Buscar vídeos** ("Search videos").
+Extensão open source para encontrar e baixar vídeos públicos ou autorizados
+diretamente do navegador. O Video Radar reconhece arquivos de vídeo, transmissões
+HLS compatíveis e posts públicos do YouTube, TikTok, Instagram e X.
 
-> Use Video Radar only with media you own, public-domain/openly licensed media,
-> or content you are explicitly authorized to download. The project does not
-> bypass DRM, authentication, private content or access restrictions.
+A busca acontece somente quando você abre a extensão e clica em **Buscar vídeos**.
+Não há monitoramento contínuo, conta, anúncios, telemetria ou servidor do projeto.
 
-[Documentação completa em português](docs/README.pt-BR.md)
+> [!IMPORTANT]
+> Use o Video Radar apenas para mídias que sejam suas, estejam em domínio público,
+> tenham licença aberta ou cuja transferência tenha sido autorizada. O projeto não
+> contorna DRM, login, conteúdo privado nem restrições de acesso.
 
-![Video Radar showing detected direct-video results](docs/verification/assets/popup-resultados-diretos.png)
+![Video Radar exibindo vídeos encontrados](docs/verification/assets/popup-resultados-diretos.png)
 
-## Why Video Radar
+## Instalação fácil no Windows
 
-- **On-demand access:** no continuous page or network monitoring.
-- **Hybrid detection:** combines `<video>`/`<source>` elements with
-  `PerformanceResourceTiming`.
-- **Direct and HLS media:** downloads direct files and assembles compatible HLS
-  MPEG-TS segments with up to eight concurrent requests.
-- **Quality selection:** exposes HLS variants and public YouTube formats when
-  available.
-- **Durable discovery:** an in-progress scan, its results, inspected HLS
-  variants and the selected quality are restored when the popup reopens.
-- **Durable progress:** closing and reopening the popup does not lose an active
-  job's status.
-- **Unified destinations:** use a default Windows folder or ask where each
-  download should be saved.
-- **Privacy by design:** no telemetry, analytics, accounts, cookies or browser
-  profile access.
-- **Chromium coverage:** Chrome, Edge, Brave and Vivaldi.
+O Video Radar não está na Chrome Web Store. A instalação usa um pequeno instalador
+do Windows e uma etapa manual no navegador.
 
-## Architecture
+> [!NOTE]
+> A página da V1 já existe, mas o instalador ainda não está anexado aos arquivos da
+> Release. Enquanto `VideoRadar-Setup-1.0.0-Windows-x64.exe` e
+> `SHA256SUMS.txt` não aparecerem em **Assets**, use apenas a
+> [instalação pelo código-fonte](#instalação-pelo-código-fonte) abaixo.
 
-| Component | Responsibility |
+Quando os arquivos estiverem disponíveis:
+
+1. Abra a [última versão do Video Radar](https://github.com/carlosesl1/videodownloader/releases/latest).
+2. Em **Assets**, baixe `VideoRadar-Setup-1.0.0-Windows-x64.exe` e
+   `SHA256SUMS.txt`.
+3. Confira o SHA-256 e execute o instalador. Ele instala apenas para o seu
+   usuário e não pede permissão de administrador.
+4. Ao final, o instalador abre a pasta da extensão e um guia local.
+5. No Chrome, Edge, Brave ou Vivaldi, abra a página de extensões, ative o
+   **Modo do desenvolvedor** e clique em **Carregar sem compactação**.
+6. Selecione a pasta `%LOCALAPPDATA%\VideoRadar\Extension` que foi aberta pelo
+   instalador e fixe o Video Radar na barra do navegador.
+
+Como a V1 ainda não possui assinatura de código, o Windows SmartScreen pode
+mostrar um aviso. Prossiga somente depois de confirmar que o arquivo veio desta
+página e que seu SHA-256 corresponde ao publicado na mesma Release.
+
+## Como usar
+
+1. Abra uma página que contenha um vídeo público autorizado.
+2. Abra o Video Radar e clique em **Buscar vídeos**.
+3. Escolha a qualidade disponível e clique em **Baixar**.
+4. Em **Configurar downloads**, escolha uma pasta padrão ou ative
+   **Perguntar onde salvar cada download**.
+5. Use **Cancelar** para interromper um download social ainda em andamento.
+
+Arquivos diretos usam o gerenciador de downloads do navegador. HLS compatível
+é reunido em um arquivo `.ts`. YouTube, TikTok, Instagram e X usam o auxiliar
+nativo instalado no Windows. O andamento continua registrado mesmo se o popup
+for fechado. Entregas automáticas de arquivos diretos e HLS usam temporariamente
+`Downloads\Video Radar\.staging` antes de mover o vídeo para a pasta escolhida.
+
+## O que ele oferece
+
+- Busca sob demanda, iniciada somente por você.
+- Detecção de `.mp4`, `.webm`, `.mov` e HLS (`.m3u8`) compatível.
+- Seleção de qualidade quando a página oferece mais de uma opção.
+- Suporte a vídeos e posts públicos individuais do YouTube, TikTok, Instagram e X.
+- Escolha de uma pasta padrão ou do destino de cada download.
+- Recuperação local de buscas e downloads após fechar o popup.
+- Código aberto, sem conta, anúncios, analytics ou coleta de histórico.
+
+## Compatibilidade
+
+| Item | Suporte |
 | --- | --- |
-| Manifest V3 extension | User interface, on-demand page scanning and browser downloads |
-| Offscreen document | HLS fetching and MPEG-TS assembly |
-| Windows native host | Folder picker, durable YouTube jobs and final file delivery |
-| Pinned tools | `yt-dlp`, Deno and FFmpeg artifacts verified by SHA-256 during packaging |
+| Sistema | Windows 10 ou 11, x64 |
+| Navegadores | Chrome, Edge, Brave e Vivaldi baseados no Chromium 116+ |
+| Vídeos diretos | MP4, WebM e MOV |
+| Streaming | HLS MPEG-TS compatível, com limite seguro de 256 MiB |
+| Plataformas públicas | YouTube, TikTok, Instagram e X |
 
-The native host communicates through Chromium Native Messaging over `stdio`.
-It does not start a localhost server, open a listening socket or send usage data
-to the project maintainer.
+Não há suporte para conteúdo privado, autenticado, protegido por DRM, com
+restrição de idade ou transmissões ao vivo. O Video Radar não lê cookies,
+credenciais, `netrc` nem o perfil do navegador. Veja todos os
+[limites conhecidos](docs/README.pt-BR.md#limites-e-uso-responsável).
 
-## Requirements
+## Privacidade e segurança
 
-- Windows 10 or Windows 11, x64
-- Chrome, Edge, Brave or Vivaldi based on Chromium 116+
-- PowerShell
-- Internet access while packaging the native helper and while downloading
-  authorized media
+O auxiliar nativo se comunica com a extensão pelo Native Messaging do Chromium
+usando `stdio`. Ele não abre servidor local nem porta de rede. Os dados necessários
+para o download permanecem no computador e são enviados somente aos servidores
+da mídia solicitada.
 
-## Install from source
+Leia a [Política de Privacidade](PRIVACY.md) e a [Política de Segurança](SECURITY.md).
 
-1. Clone the repository and enter its root directory.
-2. Build the distributable native helper:
+## Instalação pelo código-fonte
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-native-helper.ps1
-   ```
+Esta opção é destinada a desenvolvedores. Ela requer Windows, PowerShell,
+Node.js 22 e internet no primeiro empacotamento.
 
-   The first build downloads the exact artifacts recorded in
-   `native-host/tool-lock.json`. The generated package is stored in
-   `dist\video-radar-helper` and is intentionally excluded from Git.
-3. Open `chrome://extensions`, `edge://extensions`, `brave://extensions` or
-   `vivaldi://extensions`, enable developer mode and load the **repository
-   root** as an unpacked extension (**Carregar sem compactação**). Do not load
-   `dist`.
-4. Run `dist\video-radar-helper\Instalar-Video-Radar.cmd`.
-5. Reload the extension. Its expected stable ID is
-   `cakpfifpfmbdcilimpedanglnopnmckg`.
+```powershell
+git clone https://github.com/carlosesl1/videodownloader.git
+cd videodownloader
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-native-helper.ps1
+```
 
-The root-level `Instalar-Video-Radar.cmd` is not the packaged installer. Run the
-copy located inside `dist\video-radar-helper`.
+Depois:
 
-## Use
+1. Abra `chrome://extensions`, `edge://extensions`, `brave://extensions` ou
+   `vivaldi://extensions`.
+2. Ative o **Modo do desenvolvedor**, clique em **Carregar sem compactação** e
+   selecione a pasta raiz do repositório, onde está `manifest.json`. Não
+   selecione `dist`.
+3. Execute `dist\video-radar-helper\Instalar-Video-Radar.cmd`.
+4. Volte à página de extensões e clique em **Recarregar**.
 
-1. Open a page containing authorized media.
-2. Open Video Radar and click **Buscar vídeos** ("Search videos").
-3. Choose an available quality and start the download.
-4. Open **Configurar downloads** ("Configure downloads") to choose a default
-   Windows folder or enable **Perguntar onde salvar cada download** ("Ask where
-   to save each download").
+O ID estável esperado é `cakpfifpfmbdcilimpedanglnopnmckg`. O launcher
+`Instalar-Video-Radar.cmd` da raiz não substitui a cópia gerada dentro de
+`dist\video-radar-helper`.
 
-Direct files use the browser download manager. Compatible HLS streams are
-assembled as `.ts`. Public YouTube jobs use the native helper and preserve
-their status while the popup is closed. Use **Cancelar** to stop an active job.
-Automatic direct/HLS delivery temporarily uses
-`Downloads\Video Radar\.staging`.
-
-To uninstall completely, remove the extension from each browser and delete the
-current-user Native Messaging registrations plus `%LOCALAPPDATA%\VideoRadar`.
-The exact PowerShell commands are in the
-[Portuguese documentation](docs/README.pt-BR.md#desinstalação).
-
-## Development
-
-The regular test suite is offline:
+## Desenvolvimento
 
 ```powershell
 npm run check
 npm run check:all
 ```
 
-`check:all` validates the extension, runs the JavaScript tests and runs the
-native-host test executable. Packaging is separate because it may download
-pinned third-party artifacts.
+`check:all` valida a extensão, executa os testes JavaScript e a suíte do auxiliar
+nativo. O empacotamento da Release é separado porque baixa ferramentas fixadas e
+verificadas por SHA-256. Consulte [Como publicar uma versão](docs/RELEASING.md).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
-[PRIVACY.md](PRIVACY.md) before contributing or reporting a problem.
+Contribuições são bem-vindas. Antes de abrir uma mudança, leia o
+[guia de contribuição](CONTRIBUTING.md). Para relatar problemas, use as
+[Issues](https://github.com/carlosesl1/videodownloader/issues).
 
-## Known boundaries
+## Desinstalação
 
-- No DRM, private, authenticated, age-restricted or live-content bypass.
-- No cookies, credentials, `netrc` or browser-profile access.
-- No bulk playlist downloading; individual YouTube Shorts are supported.
-- HLS support currently targets MPEG-TS output; incompatible fragmented MP4
-  playlists are rejected safely.
-- YouTube behavior depends on public formats supported by `yt-dlp` and may
-  change when the service changes.
+Na instalação normal, remova **Video Radar** em **Aplicativos instalados** do
+Windows e depois remova a extensão de cada navegador. Os vídeos concluídos não
+são apagados. A [documentação completa](docs/README.pt-BR.md#desinstalação)
+inclui a limpeza manual do pacote de desenvolvedor.
 
-## License
+## Licença
 
-Video Radar is available under the [MIT License](LICENSE). Bundled or downloaded
-third-party tools retain their own licenses, which are included in generated
-native-helper packages.
+Video Radar é distribuído sob a [licença MIT](LICENSE). Ferramentas de terceiros
+mantêm suas próprias licenças, incluídas nos pacotes gerados.
