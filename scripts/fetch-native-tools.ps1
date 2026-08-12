@@ -1,5 +1,7 @@
 ﻿[CmdletBinding()]
 param(
+  [ValidateSet('win-x64', 'win-arm64')]
+  [string]$RuntimeIdentifier = 'win-x64',
   [string]$LockPath,
   [string]$CacheRoot,
   [string]$ReadyRoot
@@ -17,7 +19,7 @@ if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
   $CacheRoot = Join-Path $projectRoot '.tools\native-cache'
 }
 if ([string]::IsNullOrWhiteSpace($ReadyRoot)) {
-  $ReadyRoot = Join-Path $projectRoot '.tools\native-ready'
+  $ReadyRoot = Join-Path $projectRoot ".tools\native-ready\$RuntimeIdentifier"
 }
 $LockPath = [IO.Path]::GetFullPath($LockPath)
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot)
@@ -29,24 +31,39 @@ $downloadHeaders = @{
   'Accept' = 'application/octet-stream'
   'X-GitHub-Api-Version' = '2022-11-28'
 }
-if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
-  $downloadHeaders['Authorization'] = 'Bearer ' + $env:GITHUB_TOKEN
+
+# Every pinned asset below belongs to a public upstream repository. Do not
+# forward this repository's GITHUB_TOKEN across repository boundaries: a
+# workflow installation token is scoped to Video Radar and is neither needed
+# nor an appropriate credential for denoland/deno or yt-dlp/* downloads.
+
+$targetArchitecture = if ($RuntimeIdentifier -ceq 'win-arm64') { 'arm64' } else { 'x64' }
+$denoAssetName = if ($RuntimeIdentifier -ceq 'win-arm64') {
+  'deno-aarch64-pc-windows-msvc.zip'
+} else {
+  'deno-x86_64-pc-windows-msvc.zip'
 }
+$ffmpegAssetName = if ($RuntimeIdentifier -ceq 'win-arm64') {
+  'ffmpeg-N-125875-g5d4d3bdc61-winarm64-gpl.zip'
+} else {
+  'ffmpeg-N-125875-g5d4d3bdc61-win64-gpl.zip'
+}
+$ytDlpAssetName = if ($RuntimeIdentifier -ceq 'win-arm64') { 'yt-dlp_arm64.exe' } else { 'yt-dlp.exe' }
 
 $expectedSources = @{
   'deno' = [ordered]@{
     repository = 'denoland/deno'
-    assetName = 'deno-x86_64-pc-windows-msvc.zip'
+    assetName = $denoAssetName
     archive = 'zip'
     outputs = @('deno.exe')
-    checksumAssetName = 'deno-x86_64-pc-windows-msvc.zip.sha256sum'
+    checksumAssetName = "$denoAssetName.sha256sum"
     licenseFileName = 'deno-LICENSE.md'
     licensePath = 'LICENSE.md'
     archiveLicenses = @()
   }
   'ffmpeg' = [ordered]@{
     repository = 'yt-dlp/FFmpeg-Builds'
-    assetName = 'ffmpeg-master-latest-win64-gpl.zip'
+    assetName = $ffmpegAssetName
     archive = 'zip'
     outputs = @('ffmpeg.exe', 'ffprobe.exe')
     checksumAssetName = 'checksums.sha256'
@@ -54,14 +71,14 @@ $expectedSources = @{
     licensePath = 'LICENSE'
     archiveLicenses = @(
       [ordered]@{
-        archivePath = 'ffmpeg-master-latest-win64-gpl/LICENSE.txt'
+        archivePath = ([IO.Path]::GetFileNameWithoutExtension($ffmpegAssetName) + '/LICENSE.txt')
         fileName = 'ffmpeg-GPL-LICENSE.txt'
       }
     )
   }
   'yt-dlp' = [ordered]@{
     repository = 'yt-dlp/yt-dlp'
-    assetName = 'yt-dlp.exe'
+    assetName = $ytDlpAssetName
     archive = 'file'
     outputs = @('yt-dlp.exe')
     checksumAssetName = 'SHA2-256SUMS'
@@ -135,6 +152,35 @@ function Assert-FileIntegrity {
   $actualHash = Get-Sha256 -Path $file.FullName
   if (-not (Test-HexDigestEqual -Expected $ExpectedHash -Actual $actualHash)) {
     throw "SHA-256 inesperado em $($file.Name)."
+  }
+}
+
+function Assert-PeArchitecture {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Architecture
+  )
+
+  $expectedMachine = if ($Architecture -ceq 'arm64') { 0xaa64 } else { 0x8664 }
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $reader = [IO.BinaryReader]::new($stream)
+  try {
+    if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5a4d) {
+      throw "Executável PE inválido: $Path"
+    }
+    $stream.Position = 0x3c
+    $peOffset = $reader.ReadInt32()
+    if ($peOffset -lt 64 -or ($peOffset + 6) -gt $stream.Length) {
+      throw "Cabeçalho PE fora dos limites: $Path"
+    }
+    $stream.Position = $peOffset
+    if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne $expectedMachine) {
+      throw "Arquitetura PE incompatível em $Path. Esperado $Architecture."
+    }
+  }
+  finally {
+    $reader.Dispose()
+    $stream.Dispose()
   }
 }
 
@@ -266,17 +312,30 @@ if (-not (Test-Path -LiteralPath $LockPath -PathType Leaf)) {
 }
 
 $lock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
-Assert-PropertySet -Value $lock -Expected @('schemaVersion', 'generatedAt', 'sources') -Label 'Lock'
-if ([int]$lock.schemaVersion -ne 1 -or @($lock.sources).Count -ne 3) {
-  throw 'O lock deve usar schemaVersion 1 e conter exatamente três fontes.'
+Assert-PropertySet -Value $lock -Expected @('schemaVersion', 'generatedAt', 'targets') -Label 'Lock'
+if ([int]$lock.schemaVersion -ne 2 -or @($lock.targets).Count -ne 2) {
+  throw 'O lock deve usar schemaVersion 2 e conter exatamente dois targets.'
 }
-$sourceNames = @($lock.sources | ForEach-Object { [string]$_.name })
+$targetRids = @($lock.targets | ForEach-Object { [string]$_.rid })
+if (($targetRids -join "`n") -cne "win-x64`nwin-arm64") {
+  throw 'Os targets do lock devem ser win-x64 e win-arm64, nessa ordem.'
+}
+$targetMatches = @($lock.targets | Where-Object { [string]$_.rid -ceq $RuntimeIdentifier })
+if ($targetMatches.Count -ne 1) {
+  throw "O lock deve conter exatamente um target $RuntimeIdentifier."
+}
+$target = $targetMatches[0]
+Assert-PropertySet -Value $target -Expected @('rid', 'architecture', 'sources') -Label "Target $RuntimeIdentifier"
+if ([string]$target.architecture -cne $targetArchitecture) {
+  throw "A arquitetura do target $RuntimeIdentifier não corresponde ao RID."
+}
+$sourceNames = @($target.sources | ForEach-Object { [string]$_.name })
 if (($sourceNames -join "`n") -cne "deno`nffmpeg`nyt-dlp") {
   throw 'As fontes do lock devem estar ordenadas e sem duplicatas.'
 }
 
 $validatedSources = @()
-foreach ($source in @($lock.sources)) {
+foreach ($source in @($target.sources)) {
   $name = [string]$source.name
   if (-not $expectedSources.ContainsKey($name)) {
     throw "Fonte não permitida: $name."
@@ -323,7 +382,7 @@ try {
   foreach ($source in $validatedSources) {
     $verified = $verifiedDownloads[[string]$source.name]
     if ([string]$source.archive -ceq 'file') {
-      if (@($source.outputs).Count -ne 1 -or [string]$source.outputs[0] -cne [string]$source.assetName) {
+      if (@($source.outputs).Count -ne 1) {
         throw "Layout de arquivo inválido em $($source.name)."
       }
       Copy-Item -LiteralPath $verified.asset -Destination (Join-Path $readyStaging $source.outputs[0])
@@ -358,6 +417,9 @@ try {
   $actualExecutables = @(Get-ChildItem -LiteralPath $readyStaging -File -Filter '*.exe' | Sort-Object Name | ForEach-Object { $_.Name })
   if (($actualExecutables -join "`n") -cne ($expectedExecutables -join "`n")) {
     throw 'O ready staging não contém exatamente os quatro executáveis esperados.'
+  }
+  foreach ($executable in $expectedExecutables) {
+    Assert-PeArchitecture -Path (Join-Path $readyStaging $executable) -Architecture $targetArchitecture
   }
 
   New-Item -ItemType Directory -Path (Split-Path -Parent $ReadyRoot) -Force | Out-Null

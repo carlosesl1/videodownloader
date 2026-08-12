@@ -14,13 +14,24 @@ public sealed class NativeMessageChannel(Stream input, Stream output)
         var header = new byte[sizeof(uint)];
         var read = await input.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken);
         if (read == 0) return null;
-        if (read != header.Length) throw new InvalidDataException("Cabeçalho Native Messaging incompleto.");
+        if (read != header.Length)
+            throw new NativeMessageFramingException("Cabeçalho Native Messaging incompleto.");
 
         var length = BinaryPrimitives.ReadUInt32LittleEndian(header);
-        if (length is 0 or > MaxMessageBytes) throw new InvalidDataException("Mensagem Native Messaging inválida.");
+        if (length is 0 or > MaxMessageBytes)
+            throw new NativeMessageFramingException("Mensagem Native Messaging inválida.");
 
         var body = new byte[(int)length];
-        await input.ReadExactlyAsync(body, cancellationToken);
+        try
+        {
+            await input.ReadExactlyAsync(body, cancellationToken);
+        }
+        catch (EndOfStreamException exception)
+        {
+            throw new NativeMessageFramingException(
+                "Corpo Native Messaging incompleto.",
+                exception);
+        }
         return JsonDocument.Parse(body);
     }
 
@@ -35,13 +46,28 @@ public sealed class NativeMessageChannel(Stream input, Stream output)
         await writeLock.WaitAsync(cancellationToken);
         try
         {
-            await output.WriteAsync(header, cancellationToken);
-            await output.WriteAsync(body, cancellationToken);
-            await output.FlushAsync(cancellationToken);
+            // Once a header is visible, cancellation cannot safely interrupt its body:
+            // a partial frame would desynchronize every later message on stdout.
+            await output.WriteAsync(header, CancellationToken.None);
+            await output.WriteAsync(body, CancellationToken.None);
+            await output.FlushAsync(CancellationToken.None);
         }
         finally
         {
             writeLock.Release();
         }
+    }
+}
+
+public sealed class NativeMessageFramingException : IOException
+{
+    public NativeMessageFramingException(string message)
+        : base(message)
+    {
+    }
+
+    public NativeMessageFramingException(string message, Exception innerException)
+        : base(message, innerException)
+    {
     }
 }

@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: July 29, 2026
+Last updated: August 12, 2026
 
 Video Radar is designed to operate locally and on demand. It has no project
 account, telemetry, analytics, advertising or maintainer-operated backend.
@@ -19,6 +19,33 @@ requested operation, such as a public media URL, selected quality, filename or
 destination folder. Public metadata is cached only in the helper's memory for
 up to 30 minutes for YouTube and 5 minutes for TikTok, Instagram and X. It
 communicates with the extension through Native Messaging over `stdio`.
+
+For restart recovery, native social-download jobs are stored locally under the
+current Windows user's `%LOCALAPPDATA%\VideoRadar\download-queue` directory.
+An entry can include the public URL, selected media/subtitle options,
+destination, job identifiers, progress, result path and a bounded error code.
+The queue allows at most 32 non-terminal jobs and 64 entries in total; the
+oldest terminal entries are pruned when space is needed. It is not synchronized
+to an account or project server. After Windows restarts, processing resumes only
+when a compatible browser starts and reconnects the on-demand native helper.
+Video Radar does not install a background service or daemon.
+
+## Optional local diagnostics
+
+Diagnostic event logging is disabled by default and requires explicit opt-in in
+**Configure downloads**. When enabled, each structured record contains only a
+UTC timestamp, a code-controlled event name and, when applicable, a bounded
+error code. Raw URLs, cookies, credentials, media or destination paths, command
+lines, browser-profile data and process stdout/stderr are never accepted as log
+fields. Local rotation keeps at most eight event files of 256 KiB each.
+
+The health summary can be viewed without enabling event logs. It reports the
+host/protocol version, operating system and process architecture, available
+space on the selected download volume, and the availability, version and size
+of bundled tools. A diagnostic ZIP is created only after the user selects
+**Export** and chooses a destination. The export adds tool SHA-256 hashes, a
+privacy notice and any existing bounded event logs. It is not uploaded by Video
+Radar and remains in the chosen folder until the user deletes it.
 
 ## Network requests
 
@@ -40,8 +67,11 @@ The project maintainer does not receive these requests or their contents.
 
 Video Radar does not collect or transmit browsing history, download history,
 cookies, credentials, browser-profile data, personal identifiers or usage
-analytics to the maintainer. It does not use `netrc` or authenticated browser
-sessions.
+analytics to the maintainer. The native helper and HLS fetches do not use
+`netrc`, browser profiles or authenticated sessions. A direct download is
+delegated to Chromium's downloads API, whose network request can follow the
+browser's normal cookie semantics; the extension does not read or receive those
+cookies.
 
 ## Permissions
 
@@ -59,9 +89,14 @@ sessions.
 ## Retention and deletion
 
 Local extension data can be removed by uninstalling the extension or clearing
-its site/extension data in the browser. Native-helper files can be removed by
-following the uninstall instructions in the Portuguese documentation. Finished
-media remains wherever the user chose to save it.
+its site/extension data in the browser. Diagnostic event files can be deleted
+from **Configure downloads**; disabling logging prevents new records but does
+not delete existing ones. Because the durable queue, diagnostic settings and
+logs are user-generated data, a normal helper uninstall may leave them under
+`%LOCALAPPDATA%\VideoRadar`. Follow the manual cleanup instructions in the
+Portuguese documentation to remove that directory after confirming no partial
+download or exported report is still needed. Finished media and diagnostic ZIPs
+outside that directory remain wherever the user chose to save them.
 
 ## Questions
 

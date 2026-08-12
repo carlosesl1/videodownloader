@@ -2,7 +2,11 @@
   "manifest_version": 3,
   "name": "Vídeo Radar",
   "description": "Detecte e baixe vídeos disponíveis nas páginas que você visita.",
-  "version": "1.0.0",
+  "version": "1.2.0",
+  "incognito": "not_allowed",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';"
+  },
   "permissions": [
     "activeTab",
     "alarms",
@@ -18,11 +22,20 @@
     "https://*/*"
   ],
   "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
     "128": "assets/icon-128.png"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Vídeo Radar"
+    "default_title": "Vídeo Radar",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "32": "assets/icon-32.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
   },
   "background": {
     "service_worker": "src/background/main.js",

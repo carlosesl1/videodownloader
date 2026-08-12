@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using VideoRadar.NativeHost.Files;
+using VideoRadar.NativeHost.Diagnostics;
 using VideoRadar.NativeHost.Host;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.Protocol;
@@ -15,8 +16,22 @@ internal static partial class TestSuite
 {
     private static void ServerTests()
     {
+        NativeHostServerExportsOptInDiagnostics().GetAwaiter().GetResult();
         NativeHostServerRunsTheFramedProtocol().GetAwaiter().GetResult();
-        NativeHostServerUpdatesOnlyAfterMetadataFailureAndRetries().GetAwaiter().GetResult();
+        NativeHostServerStopsAfterFatalFramingError().GetAwaiter().GetResult();
+        NativeHostServerReplaysOnlyMatchingStartOperations().GetAwaiter().GetResult();
+        NativeHostServerReplaysDurableStartsAcrossRestarts().GetAwaiter().GetResult();
+        StartOperationJournalCoordinatesProcessesAndRecoversInterruptedStarts().GetAwaiter().GetResult();
+        DownloadQueueStorePersistsIdempotentlyAndRecoversRunningJobs();
+        DownloadQueueStoreBoundsPendingWork();
+        NativeHostServerRecoversTheQueuePumpAfterAJobPersistenceFault().GetAwaiter().GetResult();
+        NativeHostServerKeepsFailedPartialsUntilExplicitCancel().GetAwaiter().GetResult();
+        NativeHostServerFailsClosedWhenCompletedOutputWasReplaced().GetAwaiter().GetResult();
+        NativeHostServerQueuesPausesResumesAndListsDownloads().GetAwaiter().GetResult();
+        NativeHostServerRequeuesActiveDownloadsAtEof().GetAwaiter().GetResult();
+        NativeHostServerReconcilesCompletedOutputManifests().GetAwaiter().GetResult();
+        NativeHostServerFailsClosedWhenRebootFindsAReplacedCompletedOutput().GetAwaiter().GetResult();
+        NativeHostServerDoesNotRetryDeterministicMetadataFailures().GetAwaiter().GetResult();
         NativeHostServerCancelsMetadataBeforeTheBrowserDeadline().GetAwaiter().GetResult();
         NativeHostServerStartsAndCancelsWithoutRunningUpdater().GetAwaiter().GetResult();
         NativeHostServerRejectsBusyAndCancelsTheCurrentJob().GetAwaiter().GetResult();
@@ -35,13 +50,873 @@ internal static partial class TestSuite
         ProgramPingDiagnosticIsPureAndMachineReadable();
     }
 
+    private static async Task NativeHostServerExportsOptInDiagnostics()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-diagnostic-server-tests",
+            Guid.NewGuid().ToString("N"));
+        var tools = Path.Combine(root, "tools");
+        var local = Path.Combine(root, "local");
+        Directory.CreateDirectory(tools);
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var input = new ControlledInputStream(FrameCommands(
+                Command("getDiagnostics", "r-health", "{}"),
+                Command("setDiagnostics", "r-enable", "{\"enabled\":true}"),
+                Command("exportDiagnostics", "r-export", "{\"destinationFolder\":\"C:\\\\Diagnostics\"}"),
+                Command("clearDiagnostics", "r-clear", "{}")));
+            using var output = new SignallingOutputStream();
+            var diagnostic = new FakeDiagnosticService();
+            var run = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                new FakeYouTubeService(),
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                diagnosticService: diagnostic).RunAsync(CancellationToken.None);
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var messages = ReadFrames(output);
+            Equal("x64", Message(messages, "diagnostics", "r-health")
+                .GetProperty("architecture").GetString());
+            True(diagnostic.Enabled, "The diagnostics opt-in was not forwarded.");
+            Equal(@"C:\Diagnostics", diagnostic.ExportedDestination);
+            Equal("diagnosticsExported", Message(messages, "diagnosticsExported", "r-export")
+                .GetProperty("type").GetString());
+            True(diagnostic.Cleared, "Diagnostic logs were not cleared.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void DownloadQueueStorePersistsIdempotentlyAndRecoversRunningJobs()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-queue-store-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            const string url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+            var store = new DownloadQueueStore(root);
+            var selection = new DownloadSelection(
+                1080,
+                AudioOnly: false,
+                SubtitleLanguage: "pt-BR",
+                IncludeAutomaticSubtitles: true);
+            var first = store.Enqueue(
+                "op-queue", "job-queue", url, selection, null,
+                "jNQXAC9IVRw", "Me at the zoo");
+            True(!first.Replayed, "The first durable enqueue was reported as a replay.");
+            Equal(1, first.Position);
+            Equal(DownloadQueueStates.Queued, first.Entry.State);
+
+            var replay = new DownloadQueueStore(root).Enqueue(
+                "op-queue",
+                "unused-job-id",
+                url,
+                selection,
+                null,
+                "jNQXAC9IVRw",
+                "Me at the zoo");
+            True(replay.Replayed, "An identical operation was not replayed.");
+            Equal("job-queue", replay.Entry.JobId);
+            Equal("jNQXAC9IVRw", replay.Entry.Snapshot.VideoId);
+            Equal("Me at the zoo", replay.Entry.Snapshot.Title);
+            Throws<DownloadQueuePayloadConflictException>(() => store.Enqueue(
+                "op-queue",
+                "job-conflict",
+                url,
+                DownloadSelection.Video(720),
+                null));
+
+            store.Update("job-queue", entry => entry with
+            {
+                State = DownloadQueueStates.Running,
+                AttemptCount = 1,
+                Snapshot = entry.Snapshot with
+                {
+                    Stage = "video",
+                    Percent = 42,
+                    DownloadedBytes = 420,
+                    TotalBytes = 1_000
+                }
+            });
+            using (var activeLease = store.TryAcquireRunnerLease("op-queue", "job-queue"))
+            {
+                True(activeLease is not null, "The queue runner lease was not acquired.");
+                if (OperatingSystem.IsWindows())
+                {
+                    var stillOwned = new DownloadQueueStore(root).ReconcileAfterRestart().Single();
+                    Equal(DownloadQueueStates.Running, stillOwned.State);
+                }
+            }
+            var recovered = new DownloadQueueStore(root).ReconcileAfterRestart().Single();
+            Equal(DownloadQueueStates.Queued, recovered.State);
+            Equal(DownloadQueueStates.Queued, recovered.Snapshot.Stage);
+            True(recovered.ResumePartial, "An interrupted running job was not made resumable.");
+            Equal(42, recovered.Snapshot.Percent);
+            Equal(420L, recovered.Snapshot.DownloadedBytes);
+
+            store.Update("job-queue", entry => entry with
+            {
+                State = DownloadQueueStates.Paused,
+                Snapshot = entry.Snapshot with { Stage = DownloadQueueStates.Paused }
+            });
+            var paused = new DownloadQueueStore(root).ReconcileAfterRestart().Single();
+            Equal(DownloadQueueStates.Paused, paused.State);
+
+            store.Update("job-queue", entry => entry with
+            {
+                State = DownloadQueueStates.Failed,
+                Snapshot = entry.Snapshot with
+                {
+                    Stage = DownloadQueueStates.Failed,
+                    ErrorCode = "NETWORK_ERROR"
+                },
+                ResumePartial = false
+            });
+            var retried = store.Enqueue("op-queue", "unused-retry-id", url, selection, null);
+            True(retried.Replayed, "A matching failed operation did not reuse its durable identity.");
+            Equal("job-queue", retried.Entry.JobId);
+            Equal(DownloadQueueStates.Queued, retried.Entry.State);
+            Equal(DownloadQueueStates.Queued, retried.Entry.Snapshot.Stage);
+            Equal(null, retried.Entry.Snapshot.ErrorCode);
+            True(retried.Entry.ResumePartial, "Retrying a failed operation did not preserve resumable partials.");
+
+            store.Update("job-queue", entry => entry with
+            {
+                State = DownloadQueueStates.Paused,
+                Snapshot = entry.Snapshot with { Stage = DownloadQueueStates.Paused }
+            });
+
+            var entryPath = Directory.EnumerateFiles(root, "*.json", SearchOption.TopDirectoryOnly).Single();
+            using var document = JsonDocument.Parse(File.ReadAllBytes(entryPath));
+            var tampered = document.RootElement.EnumerateObject().ToDictionary(
+                property => property.Name,
+                property => property.Value.Clone());
+            tampered["state"] = JsonDocument.Parse("\"queued\"").RootElement.Clone();
+            File.WriteAllText(entryPath, JsonSerializer.Serialize(tampered));
+            Throws<InvalidDataException>(() => new DownloadQueueStore(root).ReadAll());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void DownloadQueueStoreBoundsPendingWork()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-queue-bound-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var store = new DownloadQueueStore(root);
+            for (var index = 0; index < DownloadQueueStore.MaximumNonTerminalEntries; index++)
+            {
+                store.Enqueue(
+                    $"op-{index}",
+                    $"job-{index}",
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                    DownloadSelection.Video(720),
+                    null);
+            }
+            Throws<DownloadQueueFullException>(() => store.Enqueue(
+                "op-overflow",
+                "job-overflow",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Video(720),
+                null));
+
+            var retryRoot = Path.Combine(root, "retry-at-capacity");
+            Directory.CreateDirectory(retryRoot);
+            var retryStore = new DownloadQueueStore(retryRoot);
+            var failed = retryStore.Enqueue(
+                "op-retry-capacity",
+                "job-retry-capacity",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Video(720),
+                null).Entry;
+            retryStore.Update(failed.JobId, entry => entry with
+            {
+                State = DownloadQueueStates.Failed,
+                Snapshot = entry.Snapshot with
+                {
+                    Stage = DownloadQueueStates.Failed,
+                    ErrorCode = "NETWORK_ERROR"
+                }
+            });
+            for (var index = 0; index < DownloadQueueStore.MaximumNonTerminalEntries; index++)
+            {
+                retryStore.Enqueue(
+                    $"op-retry-fill-{index}",
+                    $"job-retry-fill-{index}",
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                    DownloadSelection.Video(720),
+                    null);
+            }
+            Throws<DownloadQueueFullException>(() => retryStore.Enqueue(
+                failed.OperationId,
+                "unused-retry-job",
+                failed.Url,
+                failed.Selection,
+                null));
+            Equal(DownloadQueueStates.Failed,
+                retryStore.ReadByJobId(failed.JobId)!.State);
+
+            var retainedRoot = Path.Combine(root, "retained-failures");
+            Directory.CreateDirectory(retainedRoot);
+            var retainedStore = new DownloadQueueStore(retainedRoot);
+            for (var index = 0; index < DownloadQueueStore.MaximumEntries; index++)
+            {
+                var retained = retainedStore.Enqueue(
+                    $"op-retained-{index}",
+                    $"job-retained-{index}",
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                    DownloadSelection.Video(720),
+                    null).Entry;
+                retainedStore.Update(retained.JobId, entry => entry with
+                {
+                    State = DownloadQueueStates.Failed,
+                    Snapshot = entry.Snapshot with
+                    {
+                        Stage = DownloadQueueStates.Failed,
+                        ErrorCode = "NETWORK_ERROR"
+                    },
+                    ResumePartial = true
+                });
+            }
+            Throws<DownloadQueueFullException>(() => retainedStore.Enqueue(
+                "op-retained-overflow",
+                "job-retained-overflow",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Video(720),
+                null));
+            Equal(DownloadQueueStore.MaximumEntries, retainedStore.ReadAll().Count);
+            Equal(DownloadQueueStates.Failed,
+                retainedStore.ReadByJobId("job-retained-0")!.State);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerRecoversTheQueuePumpAfterAJobPersistenceFault()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-queue-supervisor-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var input = new AppendableInputStream();
+            using var output = new SignallingOutputStream();
+            var service = new FakeYouTubeService();
+            service.StartHandler = async (jobId, _, height, _, onProgress, _) =>
+            {
+                if (service.StartCallCount == 1)
+                {
+                    service.Snapshot = new JobSnapshot(
+                        jobId, "jNQXAC9IVRw", "invalid\ntitle", height,
+                        "video", 10, null, null);
+                    await onProgress(new JobProgress("video", 10, 100, 1_000, 50, 18));
+                    throw new InvalidOperationException("The invalid snapshot unexpectedly persisted.");
+                }
+
+                const string finalPath = @"C:\Downloads\Video Radar\recovered-pump.mp4";
+                service.Snapshot = new JobSnapshot(
+                    jobId, "jNQXAC9IVRw", "Me at the zoo", height,
+                    "finalize", 100, finalPath, null);
+                await onProgress(new JobProgress(
+                    "finalize", 100, 1_000, 1_000, null, null, finalPath));
+                return new JobResult(jobId, finalPath);
+            };
+            var store = new DownloadQueueStore(root);
+            var run = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            const string payload = "{\"operationId\":\"op-pump-recovery\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null}";
+            input.Append(FrameCommands(Command("startDownload", "r-pump-recovery", payload)));
+            await output.WaitForMessageAsync("jobQueued", "r-pump-recovery")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var queued = Message(ReadFrames(output), "jobQueued", "r-pump-recovery");
+            var jobId = queued.GetProperty("jobId").GetString()!;
+            await output.WaitForTypeAsync("jobCompleted").WaitAsync(TimeSpan.FromSeconds(5));
+
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(2, service.StartCallCount);
+            var persisted = store.ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Complete, persisted.State);
+            Equal(@"C:\Downloads\Video Radar\recovered-pump.mp4", persisted.Snapshot.Path);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerKeepsFailedPartialsUntilExplicitCancel()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-failed-partial-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var input = new AppendableInputStream();
+            using var output = new SignallingOutputStream();
+            var service = new FakeYouTubeService
+            {
+                StartHandler = (_, _, _, _, _, _) =>
+                    throw new MediaDownloadException("NETWORK_ERROR", "Falha de rede.")
+            };
+            var store = new DownloadQueueStore(root);
+            var run = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            const string payload = "{\"operationId\":\"op-failed-partial\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null}";
+            input.Append(FrameCommands(Command("startDownload", "r-failed-partial", payload)));
+            await output.WaitForMessageAsync("jobQueued", "r-failed-partial")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var queued = Message(ReadFrames(output), "jobQueued", "r-failed-partial");
+            var jobId = queued.GetProperty("jobId").GetString()!;
+            await output.WaitForMessageAsync("jobFailed", $"queue:{jobId}")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var failed = store.ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Failed, failed.State);
+            True(failed.ResumePartial, "A normal queue failure discarded its durable identity.");
+
+            input.Append(FrameCommands(Command(
+                "cancelDownload",
+                "r-discard-failed",
+                JsonSerializer.Serialize(new { jobId }))));
+            await output.WaitForMessageAsync("jobCancelled", "r-discard-failed")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var cancelled = store.ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Cancelled, cancelled.State);
+            True(!cancelled.ResumePartial, "A cancelled failed job retained a discarded partial.");
+            Equal(1, service.DiscardPartialCallCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerFailsClosedWhenCompletedOutputWasReplaced()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-complete-mismatch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            const string finalPath = @"C:\Downloads\Video Radar\replaced.mp4";
+            using var input = new AppendableInputStream();
+            using var output = new SignallingOutputStream();
+            var service = new FakeYouTubeService
+            {
+                StartHandler = (jobId, _, _, _, _, _) =>
+                    Task.FromResult(new JobResult(jobId, finalPath)),
+                CommitError = new OutputOwnershipMismatchException()
+            };
+            var store = new DownloadQueueStore(root);
+            var run = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            const string payload = "{\"operationId\":\"op-complete-mismatch\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null}";
+            input.Append(FrameCommands(Command("startDownload", "r-complete-mismatch", payload)));
+            await output.WaitForMessageAsync("jobQueued", "r-complete-mismatch")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var jobId = Message(ReadFrames(output), "jobQueued", "r-complete-mismatch")
+                .GetProperty("jobId")
+                .GetString()!;
+            await output.WaitForMessageAsync("jobFailed", $"queue:{jobId}")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var messages = ReadFrames(output);
+            True(!messages.Any(message =>
+                    message.GetProperty("type").GetString() == "jobCompleted"
+                    && message.TryGetProperty("jobId", out var completedJob)
+                    && completedJob.GetString() == jobId),
+                "A replaced completed output was exposed as jobCompleted.");
+            var failed = store.ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Failed, failed.State);
+            Equal("OUTPUT_OWNERSHIP_MISMATCH", failed.Snapshot.ErrorCode);
+            Equal<string?>(null, failed.Snapshot.Path);
+            True(failed.ResumePartial, "The mismatched output identity was not recoverable.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerQueuesPausesResumesAndListsDownloads()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-queue-server-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var input = new AppendableInputStream();
+            using var output = new SignallingOutputStream();
+            var service = new FakeYouTubeService();
+            service.StartHandler = async (jobId, _, height, _, onProgress, cancellationToken) =>
+            {
+                service.Snapshot = new JobSnapshot(
+                    jobId,
+                    "jNQXAC9IVRw",
+                    "Me at the zoo",
+                    height,
+                    "video",
+                    20,
+                    null,
+                    null);
+                await onProgress(new JobProgress("video", 20, 200, 1_000, 50, 16));
+                if (service.StartCallCount == 1)
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                const string finalPath = @"C:\Downloads\Video Radar\queued.mp4";
+                await onProgress(new JobProgress(
+                    "finalize", null, 1_000, 1_000, null, null, finalPath));
+                return new JobResult(jobId, finalPath);
+            };
+            var server = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: new DownloadQueueStore(root));
+            var run = server.RunAsync(CancellationToken.None);
+
+            const string payload = "{\"operationId\":\"op-queue-server\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":1080,\"audioOnly\":false,\"subtitleLanguage\":\"pt-BR\",\"includeAutomaticSubtitles\":true},\"destinationFolder\":null,\"media\":{\"videoId\":\"jNQXAC9IVRw\",\"title\":\"Me at the zoo\"}}";
+            input.Append(FrameCommands(Command("startDownload", "r-enqueue", payload)));
+            await output.WaitForMessageAsync("jobQueued", "r-enqueue")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            await output.WaitForTypeAsync("jobStarted").WaitAsync(TimeSpan.FromSeconds(5));
+            var queued = Message(ReadFrames(output), "jobQueued", "r-enqueue");
+            var jobId = queued.GetProperty("jobId").GetString()!;
+            Equal("queued", queued.GetProperty("job").GetProperty("state").GetString());
+            Equal("jNQXAC9IVRw", queued.GetProperty("job").GetProperty("videoId").GetString());
+            Equal("Me at the zoo", queued.GetProperty("job").GetProperty("title").GetString());
+
+            input.Append(FrameCommands(Command("getJob", "r-active-queue", "{}")));
+            await output.WaitForMessageAsync("ready", "r-active-queue")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var activeQueueJob = Message(ReadFrames(output), "ready", "r-active-queue")
+                .GetProperty("job");
+            Equal(jobId, activeQueueJob.GetProperty("jobId").GetString());
+            Equal("op-queue-server", activeQueueJob.GetProperty("operationId").GetString());
+            True(
+                activeQueueJob.EnumerateObject().Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(["jobId", "operationId", "videoId", "title", "height", "stage", "percent", "path", "errorCode"]),
+                "Queue getJob did not return the protocol-compatible job snapshot.");
+
+            input.Append(FrameCommands(Command(
+                "pauseDownload",
+                "r-pause",
+                JsonSerializer.Serialize(new { jobId }))));
+            await output.WaitForMessageAsync("jobPaused", "r-pause")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            var paused = Message(ReadFrames(output), "jobPaused", "r-pause");
+            Equal("paused", paused.GetProperty("job").GetProperty("state").GetString());
+            Equal(1, service.PauseCallCount);
+
+            input.Append(FrameCommands(
+                Command("listQueue", "r-list", "{}"),
+                Command(
+                    "resumeDownload",
+                    "r-resume",
+                    JsonSerializer.Serialize(new { jobId }))));
+            await output.WaitForMessageAsync("queueSnapshot", "r-list")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            await output.WaitForMessageAsync("jobQueued", "r-resume")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            await output.WaitForTypeAsync("jobCompleted").WaitAsync(TimeSpan.FromSeconds(5));
+
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            var messages = ReadFrames(output);
+            var list = Message(messages, "queueSnapshot", "r-list");
+            Equal(1, list.GetProperty("jobs").GetArrayLength());
+            Equal("paused", list.GetProperty("jobs")[0].GetProperty("state").GetString());
+            Equal("pt-BR", list.GetProperty("jobs")[0]
+                .GetProperty("selection")
+                .GetProperty("subtitleLanguage")
+                .GetString());
+            Equal(2, service.StartCallCount);
+            True(service.RunOptions[1].ResumePartial, "The resumed process did not receive resume options.");
+            True(service.RunOptions.All(options => options.DurableOutputIdentity),
+                "A queued run did not retain durable output identity.");
+            Equal(1, service.CommitCompletedCallCount);
+            var asynchronousPause = Message(messages, "jobPaused", $"queue:{jobId}");
+            True(
+                asynchronousPause.EnumerateObject().Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(["type", "requestId", "jobId", "operationId", "job"]),
+                "The asynchronous pause event does not match the protocol-v5 shape.");
+            var persisted = new DownloadQueueStore(root).ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Complete, persisted.State);
+            Equal(100, persisted.Snapshot.Percent);
+            Equal(@"C:\Downloads\Video Radar\queued.mp4", persisted.Snapshot.Path);
+            True(!messages.Any(message =>
+                    message.GetProperty("type").GetString() == "jobFailed"
+                    && message.TryGetProperty("jobId", out var failedJobId)
+                    && failedJobId.GetString() == jobId),
+                "after_move incorrectly failed the durable queue before validation/commit.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerRequeuesActiveDownloadsAtEof()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-queue-eof-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var input = new AppendableInputStream();
+            using var output = new SignallingOutputStream();
+            var service = new FakeYouTubeService();
+            service.StartHandler = async (jobId, _, height, _, onProgress, cancellationToken) =>
+            {
+                service.Snapshot = new JobSnapshot(
+                    jobId,
+                    "jNQXAC9IVRw",
+                    "Me at the zoo",
+                    height,
+                    "video",
+                    30,
+                    null,
+                    null);
+                await onProgress(new JobProgress("video", 30, 300, 1_000, 50, 14));
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new InvalidOperationException("The cancelled test download unexpectedly resumed.");
+            };
+            var store = new DownloadQueueStore(root);
+            var run = new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            const string payload = "{\"operationId\":\"op-eof-requeue\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null}";
+            input.Append(FrameCommands(Command("startDownload", "r-eof-enqueue", payload)));
+            await output.WaitForTypeAsync("jobStarted").WaitAsync(TimeSpan.FromSeconds(5));
+            var jobId = Message(ReadFrames(output), "jobQueued", "r-eof-enqueue")
+                .GetProperty("jobId")
+                .GetString()!;
+
+            input.Complete();
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var messages = ReadFrames(output);
+            var requeued = Message(messages, "jobQueued", $"queue:{jobId}");
+            True(
+                requeued.EnumerateObject().Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(["type", "requestId", "jobId", "operationId", "replayed", "position", "job"]),
+                "The restart-recovery queue event does not match the protocol-v5 shape.");
+            Equal(1, requeued.GetProperty("position").GetInt32());
+            True(!requeued.GetProperty("replayed").GetBoolean(), "An EOF requeue was incorrectly marked as a replay.");
+            Equal(DownloadQueueStates.Queued, requeued.GetProperty("job").GetProperty("state").GetString());
+            True(requeued.GetProperty("job").GetProperty("resumePartial").GetBoolean(),
+                "The EOF-recovered download was not marked resumable.");
+            var persisted = store.ReadByJobId(jobId)!;
+            Equal(DownloadQueueStates.Queued, persisted.State);
+            True(persisted.ResumePartial, "The EOF recovery was not durable.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerReconcilesCompletedOutputManifests()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-completed-manifest-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var store = new DownloadQueueStore(root);
+            var queued = store.Enqueue(
+                "op-completed-manifest",
+                "job-completed-manifest",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Video(720),
+                null).Entry;
+            store.Update(queued.JobId, entry => entry with
+            {
+                State = DownloadQueueStates.Complete,
+                Snapshot = entry.Snapshot with
+                {
+                    Stage = DownloadQueueStates.Complete,
+                    Percent = 100,
+                    Path = @"C:\Downloads\Video Radar\completed.mp4"
+                }
+            });
+            using var input = new MemoryStream();
+            using var output = new MemoryStream();
+            var service = new FakeYouTubeService();
+
+            await new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            Equal(1, service.CommitCompletedCallCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerFailsClosedWhenRebootFindsAReplacedCompletedOutput()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "video-radar-reboot-complete-mismatch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            const string finalPath = @"C:\Downloads\Video Radar\replaced-after-reboot.mp4";
+            var store = new DownloadQueueStore(root);
+            var queued = store.Enqueue(
+                "op-reboot-mismatch",
+                "job-reboot-mismatch",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Video(720),
+                null).Entry;
+            var completed = store.Update(queued.JobId, entry => entry with
+            {
+                State = DownloadQueueStates.Complete,
+                Snapshot = entry.Snapshot with
+                {
+                    Stage = DownloadQueueStates.Complete,
+                    Percent = 100,
+                    Path = finalPath
+                }
+            });
+            var previousUpdatedAt = completed.UpdatedAt;
+            var service = new FakeYouTubeService
+            {
+                CommitError = new OutputOwnershipMismatchException()
+            };
+            using var input = new MemoryStream();
+            using var output = new MemoryStream();
+
+            await new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                downloadQueueStore: store).RunAsync(CancellationToken.None);
+
+            var failed = store.ReadByJobId(queued.JobId)!;
+            Equal(DownloadQueueStates.Failed, failed.State);
+            Equal("OUTPUT_OWNERSHIP_MISMATCH", failed.Snapshot.ErrorCode);
+            Equal<string?>(null, failed.Snapshot.Path);
+            True(failed.ResumePartial, "Reboot mismatch lost its recovery identity.");
+            True(failed.UpdatedAt > previousUpdatedAt,
+                "Reboot mismatch did not publish a newer durable update.");
+            Equal(1, service.CommitCompletedCallCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task NativeHostServerReplaysDurableStartsAcrossRestarts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "video-radar-start-journal-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            const string payload = "{\"operationId\":\"op-durable\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}";
+            using var firstInput = new ControlledInputStream(FrameCommands(
+                Command("startDownload", "r-first", payload)));
+            using var firstOutput = new SignallingOutputStream();
+            var firstService = new FakeYouTubeService
+            {
+                StartHandler = (jobId, _, _, _, _, _) => Task.FromResult(
+                    new JobResult(jobId, @"C:\Downloads\Video Radar\durable.mp4"))
+            };
+            var journal = new StartOperationJournal(root);
+            var firstRun = new NativeHostServer(
+                new NativeMessageChannel(firstInput, firstOutput),
+                firstService,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                startOperationJournal: journal).RunAsync(CancellationToken.None);
+            await firstOutput.WaitForTypeAsync("jobCompleted").WaitAsync(TimeSpan.FromSeconds(5));
+            firstInput.Complete();
+            await firstRun.WaitAsync(TimeSpan.FromSeconds(5));
+            var firstStarted = Message(ReadFrames(firstOutput), "jobStarted", "r-first");
+            var firstJobId = firstStarted.GetProperty("jobId").GetString();
+
+            using var replayInput = new MemoryStream(FrameCommands(
+                Command("startDownload", "r-replay", payload),
+                Command("getJob", "r-reconcile", "{}")));
+            using var replayOutput = new MemoryStream();
+            var replayService = new FakeYouTubeService();
+            await new NativeHostServer(
+                new NativeMessageChannel(replayInput, replayOutput),
+                replayService,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                startOperationJournal: new StartOperationJournal(root)).RunAsync(CancellationToken.None);
+
+            var replayMessages = ReadFrames(replayOutput);
+            var replayed = Message(replayMessages, "jobStarted", "r-replay");
+            Equal(firstJobId, replayed.GetProperty("jobId").GetString());
+            Equal("complete", replayed.GetProperty("job").GetProperty("stage").GetString());
+            Equal(0, replayService.StartCallCount);
+            var reconciled = Message(replayMessages, "ready", "r-reconcile");
+            Equal(firstJobId, reconciled.GetProperty("job").GetProperty("jobId").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task StartOperationJournalCoordinatesProcessesAndRecoversInterruptedStarts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "video-radar-active-lock-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var first = new StartOperationJournal(root);
+            var second = new StartOperationJournal(root);
+            using (var active = first.TryAcquireActiveLock("op-interrupted", "job-interrupted"))
+            {
+                True(active is not null, "The first process did not acquire the durable active lease.");
+                True(
+                    second.TryAcquireActiveLock("op-other", "job-other") is null,
+                    "A second process acquired the global download lease.");
+                var owner = second.ReadActiveOwner();
+                Equal("op-interrupted", owner!.OperationId);
+                Equal("job-interrupted", owner.JobId);
+                first.Write(StartOperationJournalEntry.Create(
+                    "op-interrupted",
+                    "job-interrupted",
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                    720,
+                    null,
+                    new JobSnapshot(
+                        "job-interrupted",
+                        string.Empty,
+                        string.Empty,
+                        720,
+                        "preparing",
+                        null,
+                        null,
+                        null,
+                        "op-interrupted")));
+            }
+
+            const string payload = "{\"operationId\":\"op-interrupted\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}";
+            using var input = new MemoryStream(FrameCommands(
+                Command("startDownload", "r-recovered", payload)));
+            using var output = new MemoryStream();
+            var service = new FakeYouTubeService();
+            await new NativeHostServer(
+                new NativeMessageChannel(input, output),
+                service,
+                new FakeUpdatePolicy(),
+                new FakeFolderPicker(),
+                DefaultDownloadFolder,
+                new FakeDownloadFileMover(),
+                startOperationJournal: second).RunAsync(CancellationToken.None);
+
+            var recovered = Message(ReadFrames(output), "jobStarted", "r-recovered");
+            Equal("job-interrupted", recovered.GetProperty("jobId").GetString());
+            Equal("failed", recovered.GetProperty("job").GetProperty("stage").GetString());
+            Equal("HOST_RESTARTED", recovered.GetProperty("job").GetProperty("errorCode").GetString());
+            Equal(0, service.StartCallCount);
+            using var reacquired = first.TryAcquireActiveLock("op-next", "job-next");
+            True(reacquired is not null, "Interrupted-operation recovery leaked the global lease.");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static async Task NativeHostServerRunsTheFramedProtocol()
     {
         using var input = new ControlledInputStream(FrameCommands(
             Command("ping", "r-ping", "{}"),
             Command("listFormats", "r-formats", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}"),
             Command("getJob", "r-empty", "{}"),
-            Command("startDownload", "r-start", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":\"C:\\\\Media\\\\Video Radar\"}"),
+            Command("startDownload", "r-start", "{\"operationId\":\"op-start\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":\"C:\\\\Media\\\\Video Radar\"}"),
             Command("getJob", "r-active", "{}")));
         using var output = new SignallingOutputStream();
         var updater = new FakeUpdatePolicy { Error = new InvalidOperationException("network diagnostics") };
@@ -70,8 +945,12 @@ internal static partial class TestSuite
         True(messages.All(message => AllowedServerTypes.Contains(message.GetProperty("type").GetString()!)), "Server emitted a type outside the protocol allowlist.");
 
         var ready = Message(messages, "ready", "r-ping");
-        Equal(3, ready.GetProperty("protocolVersion").GetInt32());
+        Equal(5, ready.GetProperty("protocolVersion").GetInt32());
         Equal(HostInfo.NativeName, ready.GetProperty("nativeName").GetString());
+        Equal(HostInfo.Version, ready.GetProperty("hostVersion").GetString());
+        True(
+            ready.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()).SequenceEqual(HostInfo.Capabilities),
+            "ready capabilities do not match the native host contract.");
         Equal(DefaultDownloadFolder, ready.GetProperty("defaultFolder").GetString());
 
         var formats = Message(messages, "formats", "r-formats");
@@ -90,6 +969,7 @@ internal static partial class TestSuite
         var jobId = started.GetProperty("jobId").GetString()!;
         True(Guid.TryParse(jobId, out _), "startDownload did not create a UUID job id.");
         Equal(jobId, started.GetProperty("job").GetProperty("jobId").GetString());
+        Equal("op-start", started.GetProperty("job").GetProperty("operationId").GetString());
         Equal("preparing", started.GetProperty("job").GetProperty("stage").GetString());
 
         var active = Message(messages, "ready", "r-active");
@@ -112,6 +992,92 @@ internal static partial class TestSuite
         Equal(SelectedDownloadFolder, service.DestinationFolders.Single());
     }
 
+    private static async Task NativeHostServerStopsAfterFatalFramingError()
+    {
+        var invalidHeader = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            invalidHeader,
+            NativeMessageChannel.MaxMessageBytes + 1U);
+        var validFrame = FrameCommands(Command("ping", "r-after-invalid", "{}"));
+        using var input = new MemoryStream(invalidHeader.Concat(validFrame).ToArray());
+        using var output = new MemoryStream();
+
+        await new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            new FakeYouTubeService(),
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
+
+        Equal(0L, output.Length);
+    }
+
+    private static async Task NativeHostServerReplaysOnlyMatchingStartOperations()
+    {
+        const string payload = "{\"operationId\":\"op-idempotent\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}";
+        using var input = new AppendableInputStream();
+        using var output = new SignallingOutputStream();
+        var service = new FakeYouTubeService();
+        service.StartHandler = async (jobId, _, height, _, _, cancellationToken) =>
+        {
+            service.Snapshot = new JobSnapshot(
+                jobId,
+                "jNQXAC9IVRw",
+                "Idempotent",
+                height,
+                "video",
+                10,
+                null,
+                null);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        };
+        var run = new NativeHostServer(
+            new NativeMessageChannel(input, output),
+            service,
+            new FakeUpdatePolicy(),
+            new FakeFolderPicker(),
+            DefaultDownloadFolder,
+            new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
+
+        input.Append(FrameCommands(Command("startDownload", "r-original", payload)));
+        await output.WaitForMessageAsync("jobStarted", "r-original").WaitAsync(TimeSpan.FromSeconds(5));
+        var original = Message(ReadFrames(output), "jobStarted", "r-original");
+        var jobId = original.GetProperty("jobId").GetString()!;
+
+        input.Append(FrameCommands(
+            Command("startDownload", "r-active-replay", payload),
+            Command("startDownload", "r-active-conflict", "{\"operationId\":\"op-idempotent\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":null}"),
+            Command("startDownload", "r-busy", "{\"operationId\":\"op-other\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
+        await output.WaitForMessageAsync("jobStarted", "r-active-replay").WaitAsync(TimeSpan.FromSeconds(5));
+        await output.WaitForMessageAsync("jobFailed", "r-active-conflict").WaitAsync(TimeSpan.FromSeconds(5));
+        await output.WaitForMessageAsync("jobFailed", "r-busy").WaitAsync(TimeSpan.FromSeconds(5));
+
+        input.Append(FrameCommands(Command(
+            "cancelDownload",
+            "r-cancel-idempotent",
+            JsonSerializer.Serialize(new { jobId }))));
+        await output.WaitForTypeAsync("jobCancelled").WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(20);
+
+        input.Append(FrameCommands(
+            Command("startDownload", "r-terminal-replay", payload),
+            Command("startDownload", "r-terminal-conflict", "{\"operationId\":\"op-idempotent\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":null}")));
+        await output.WaitForMessageAsync("jobStarted", "r-terminal-replay").WaitAsync(TimeSpan.FromSeconds(5));
+        await output.WaitForMessageAsync("jobFailed", "r-terminal-conflict").WaitAsync(TimeSpan.FromSeconds(5));
+        input.Complete();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var messages = ReadFrames(output);
+        Equal(jobId, Message(messages, "jobStarted", "r-active-replay").GetProperty("jobId").GetString());
+        Equal(jobId, Message(messages, "jobStarted", "r-terminal-replay").GetProperty("jobId").GetString());
+        Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", "r-active-conflict").GetProperty("code").GetString());
+        Equal("YOUTUBE_BUSY", Message(messages, "jobFailed", "r-busy").GetProperty("code").GetString());
+        Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", "r-terminal-conflict").GetProperty("code").GetString());
+        Equal(1, service.StartCallCount);
+    }
+
     private static async Task NativeHostServerRejectsBusyAndCancelsTheCurrentJob()
     {
         var service = new FakeYouTubeService();
@@ -126,8 +1092,8 @@ internal static partial class TestSuite
         using var dynamicInput = new AppendableInputStream();
         using var dynamicOutput = new SignallingOutputStream();
         dynamicInput.Append(FrameCommands(
-            Command("startDownload", "r-first", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}"),
-            Command("startDownload", "r-second", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
+            Command("startDownload", "r-first", "{\"operationId\":\"op-first\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-second", "{\"operationId\":\"op-second\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
         var server = new NativeHostServer(
             new NativeMessageChannel(dynamicInput, dynamicOutput),
             service,
@@ -149,12 +1115,14 @@ internal static partial class TestSuite
         Equal("YOUTUBE_BUSY", busy.GetProperty("code").GetString());
         var cancelled = Message(messages, "jobCancelled", "r-first");
         Equal(jobId, cancelled.GetProperty("jobId").GetString());
+        Equal(jobId, Message(messages, "jobCancelled", "r-cancel")
+            .GetProperty("jobId").GetString());
         Equal(1, service.StartCallCount);
         Equal(1, service.CancelCallCount);
         Equal<string?>(null, service.DestinationFolders.Single());
     }
 
-    private static async Task NativeHostServerUpdatesOnlyAfterMetadataFailureAndRetries()
+    private static async Task NativeHostServerDoesNotRetryDeterministicMetadataFailures()
     {
         using var input = new MemoryStream(FrameCommands(
             Command("listFormats", "r-formats-retry", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}")));
@@ -162,9 +1130,8 @@ internal static partial class TestSuite
         var updater = new FakeUpdatePolicy();
         var service = new FakeYouTubeService
         {
-            ListHandler = (call, _, _) => call == 1
-                ? Task.FromException<FormatCatalog>(new InvalidOperationException("outdated extractor"))
-                : Task.FromResult(FakeYouTubeService.Catalog())
+            ListHandler = (_, _, _) =>
+                Task.FromException<FormatCatalog>(new InvalidOperationException("outdated extractor"))
         };
 
         await new NativeHostServer(
@@ -175,9 +1142,10 @@ internal static partial class TestSuite
             DefaultDownloadFolder,
             new FakeDownloadFileMover()).RunAsync(CancellationToken.None);
 
-        _ = Message(ReadFrames(output), "formats", "r-formats-retry");
-        Equal(2, service.ListCallCount);
-        Equal(1, updater.CallCount);
+        var failure = Message(ReadFrames(output), "jobFailed", "r-formats-retry");
+        Equal("YOUTUBE_METADATA", failure.GetProperty("code").GetString());
+        Equal(1, service.ListCallCount);
+        Equal(0, updater.CallCount);
     }
 
     private static async Task NativeHostServerCancelsMetadataBeforeTheBrowserDeadline()
@@ -245,7 +1213,7 @@ internal static partial class TestSuite
         var run = server.RunAsync(CancellationToken.None);
 
         input.Append(FrameCommands(
-            Command("startDownload", "r-blocked", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
+            Command("startDownload", "r-blocked", "{\"operationId\":\"op-blocked\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}")));
         await output.WaitForMessageAsync("jobStarted", "r-blocked").WaitAsync(TimeSpan.FromSeconds(5));
         var started = Message(ReadFrames(output), "jobStarted", "r-blocked");
         var jobId = started.GetProperty("jobId").GetString()!;
@@ -272,7 +1240,7 @@ internal static partial class TestSuite
     private static async Task NativeHostServerCancelsAndAwaitsTheJobAtEof()
     {
         using var input = new MemoryStream(FrameCommands(
-            Command("startDownload", "r-eof", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":360,\"destinationFolder\":null}")));
+            Command("startDownload", "r-eof", "{\"operationId\":\"op-eof\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":360,\"destinationFolder\":null}")));
         using var output = new SignallingOutputStream();
         var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var service = new FakeYouTubeService();
@@ -316,10 +1284,15 @@ internal static partial class TestSuite
             Command("listFormats", "r-list-missing", "{}"),
             Command("listFormats", "r-list-type", "{\"url\":42}"),
             Command("listFormats", "r-list-extra", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"extra\":true}"),
-            Command("startDownload", "r-height-type", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720.5,\"destinationFolder\":null}"),
-            Command("startDownload", "r-height-range", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":143,\"destinationFolder\":null}"),
-            Command("startDownload", "r-url", "{\"url\":\"https://example.test/video\",\"height\":720,\"destinationFolder\":null}"),
-            Command("startDownload", "r-destination", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":\"relative\"}"),
+            Command("startDownload", "r-operation-missing", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-operation-invalid", "{\"operationId\":\"contains space\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-height-type", "{\"operationId\":\"op-height-type\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720.5,\"destinationFolder\":null}"),
+            Command("startDownload", "r-height-range", "{\"operationId\":\"op-height-range\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":143,\"destinationFolder\":null}"),
+            Command("startDownload", "r-audio-subtitle", "{\"operationId\":\"op-audio-subtitle\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":null,\"audioOnly\":true,\"subtitleLanguage\":\"pt-BR\",\"includeAutomaticSubtitles\":false},\"destinationFolder\":null}"),
+            Command("startDownload", "r-media-title-control", "{\"operationId\":\"op-media-control\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null,\"media\":{\"videoId\":\"jNQXAC9IVRw\",\"title\":\"line1\\u000aline2\"}}"),
+            Command("startDownload", "r-media-extra", "{\"operationId\":\"op-media-extra\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"selection\":{\"height\":720,\"audioOnly\":false,\"subtitleLanguage\":null,\"includeAutomaticSubtitles\":false},\"destinationFolder\":null,\"media\":{\"videoId\":\"jNQXAC9IVRw\",\"title\":\"Me at the zoo\",\"extra\":true}}"),
+            Command("startDownload", "r-url", "{\"operationId\":\"op-url\",\"url\":\"https://example.test/video\",\"height\":720,\"destinationFolder\":null}"),
+            Command("startDownload", "r-destination", "{\"operationId\":\"op-destination\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":720,\"destinationFolder\":\"relative\"}"),
             Command("cancelDownload", "r-cancel-type", "{\"jobId\":42}"),
             Command("cancelDownload", "r-cancel-missing", "{\"jobId\":\"not-current\"}"),
             Command("chooseDownloadFolder", "r-choose-extra", "{\"extra\":true}"),
@@ -339,7 +1312,7 @@ internal static partial class TestSuite
 
         var messages = ReadFrames(output);
         Equal("INVALID_COMMAND", Message(messages, "jobFailed", "r-command").GetProperty("code").GetString());
-        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-height-type", "r-height-range", "r-destination", "r-cancel-type", "r-choose-extra" })
+        foreach (var requestId in new[] { "r-ping-extra", "r-get-extra", "r-list-missing", "r-list-type", "r-list-extra", "r-operation-missing", "r-operation-invalid", "r-height-type", "r-height-range", "r-audio-subtitle", "r-media-title-control", "r-media-extra", "r-destination", "r-cancel-type", "r-choose-extra" })
             Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
         Equal("INVALID_URL", Message(messages, "jobFailed", "r-url").GetProperty("code").GetString());
         Equal("JOB_NOT_FOUND", Message(messages, "jobFailed", "r-cancel-missing").GetProperty("code").GetString());
@@ -354,7 +1327,7 @@ internal static partial class TestSuite
     {
         using var input = new ControlledInputStream(FrameCommands(
             Command("listFormats", "r-metadata", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\"}"),
-            Command("startDownload", "r-download", "{\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":null}")));
+            Command("startDownload", "r-download", "{\"operationId\":\"op-download\",\"url\":\"https://youtu.be/jNQXAC9IVRw\",\"height\":1080,\"destinationFolder\":null}")));
         using var output = new SignallingOutputStream();
         var service = new FakeYouTubeService
         {
@@ -388,7 +1361,7 @@ internal static partial class TestSuite
     private static async Task NativeHostServerPreservesSafeMediaDownloadFailures()
     {
         using var input = new ControlledInputStream(FrameCommands(
-            Command("startDownload", "r-instagram", "{\"url\":\"https://www.instagram.com/reel/Chunk8-jurw/\",\"height\":960,\"destinationFolder\":null}")));
+            Command("startDownload", "r-instagram", "{\"operationId\":\"op-instagram\",\"url\":\"https://www.instagram.com/reel/Chunk8-jurw/\",\"height\":960,\"destinationFolder\":null}")));
         using var output = new SignallingOutputStream();
         var service = new FakeYouTubeService();
         service.StartHandler = (_, _, _, _, _, _) =>
@@ -553,12 +1526,14 @@ internal static partial class TestSuite
         using var input = new MemoryStream(FrameCommands(
             Command("moveDownloadedFile", "r-move", JsonSerializer.Serialize(new
             {
+                operationId = "op_42",
                 downloadId = 42,
                 sourcePath = source,
                 destinationFolder = destination
             })),
             Command("moveDownloadedFile", "r-extra", JsonSerializer.Serialize(new
             {
+                operationId = "op_43",
                 downloadId = 43,
                 sourcePath = source,
                 destinationFolder = destination,
@@ -566,31 +1541,48 @@ internal static partial class TestSuite
             })),
             Command("moveDownloadedFile", "r-negative", JsonSerializer.Serialize(new
             {
+                operationId = "op_negative",
                 downloadId = -1,
                 sourcePath = source,
                 destinationFolder = destination
             })),
             Command("moveDownloadedFile", "r-empty", JsonSerializer.Serialize(new
             {
+                operationId = "op_empty",
                 downloadId = 44,
                 sourcePath = source,
                 destinationFolder = ""
             })),
             Command("moveDownloadedFile", "r-invalid-path", JsonSerializer.Serialize(new
             {
+                operationId = "op_invalid",
                 downloadId = 45,
                 sourcePath = "relative.ts",
                 destinationFolder = destination
             })),
             Command("moveDownloadedFile", "r-io", JsonSerializer.Serialize(new
             {
+                operationId = "op_io",
                 downloadId = 46,
                 sourcePath = @"C:\Sensitive\copy-error.ts",
                 destinationFolder = destination
             })),
+            Command("moveDownloadedFile", "r-missing-operation", JsonSerializer.Serialize(new
+            {
+                downloadId = 47,
+                sourcePath = source,
+                destinationFolder = destination
+            })),
+            Command("moveDownloadedFile", "r-invalid-operation", JsonSerializer.Serialize(new
+            {
+                operationId = "op.invalid",
+                downloadId = 48,
+                sourcePath = source,
+                destinationFolder = destination
+            })),
             Command("ping", "r-after-move-errors", "{}")));
         using var output = new MemoryStream();
-        var mover = new FakeDownloadFileMover((sourcePath, destinationFolder, downloadId) =>
+        var mover = new FakeDownloadFileMover((sourcePath, destinationFolder, downloadId, _) =>
         {
             if (sourcePath == "relative.ts")
                 throw new ArgumentException("secret invalid path C:\\Sensitive");
@@ -612,20 +1604,23 @@ internal static partial class TestSuite
         True(!raw.Contains("Sensitive", StringComparison.OrdinalIgnoreCase), "A mover path leaked to Native Messaging stdout.");
         var messages = ReadFrames(output);
         var moved = Message(messages, "fileMoved", "r-move");
+        Equal("op_42", moved.GetProperty("operationId").GetString());
         Equal(42L, moved.GetProperty("downloadId").GetInt64());
         Equal(finalPath, moved.GetProperty("finalPath").GetString());
         True(
             moved.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal)
-                .SetEquals(["type", "requestId", "downloadId", "finalPath"]),
+                .SetEquals(["type", "requestId", "operationId", "downloadId", "finalPath"]),
             "fileMoved exposed an unexpected property.");
 
-        foreach (var requestId in new[] { "r-extra", "r-negative", "r-empty", "r-invalid-path" })
+        foreach (var requestId in new[] { "r-extra", "r-negative", "r-empty", "r-missing-operation", "r-invalid-operation" })
+            Equal("INVALID_PAYLOAD", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
+        foreach (var requestId in new[] { "r-invalid-path" })
             Equal("DESTINATION_INVALID", Message(messages, "jobFailed", requestId).GetProperty("code").GetString());
         Equal("DESTINATION_MOVE_FAILED", Message(messages, "jobFailed", "r-io").GetProperty("code").GetString());
         _ = Message(messages, "ready", "r-after-move-errors");
 
         Equal(3, mover.Calls.Count);
-        Equal(new FileMoveCall(source, destination, 42), mover.Calls[0]);
+        Equal(new FileMoveCall(source, destination, 42, "op_42"), mover.Calls[0]);
     }
 
     private static string[] InvalidDownloadFolders() =>
@@ -723,7 +1718,7 @@ internal static partial class TestSuite
     private const string SelectedDownloadFolder = @"C:\Media\Video Radar";
 
     private static readonly HashSet<string> AllowedServerTypes =
-        ["ready", "formats", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled", "fileMoved", "fileRevealed"];
+        ["ready", "formats", "jobQueued", "jobPaused", "queueSnapshot", "jobStarted", "jobProgress", "jobCompleted", "jobCancelled", "jobFailed", "folderSelected", "folderSelectionCancelled", "fileMoved", "fileRevealed", "diagnostics", "diagnosticsExported", "diagnosticsCleared"];
 
     private static string Command(string type, string requestId, string payload) =>
         $"{{\"type\":{JsonSerializer.Serialize(type)},\"requestId\":{JsonSerializer.Serialize(requestId)},\"payload\":{payload}}}";
@@ -790,18 +1785,31 @@ internal static partial class TestSuite
         }
     }
 
-    private sealed record FileMoveCall(string SourcePath, string DestinationFolder, long DownloadId);
+    private sealed record FileMoveCall(
+        string SourcePath,
+        string DestinationFolder,
+        long DownloadId,
+        string OperationId);
 
     private sealed class FakeDownloadFileMover(
-        Func<string, string, long, FileMoveResult>? handler = null) : IDownloadFileMover
+        Func<string, string, long, string, FileMoveResult>? handler = null) : IDownloadFileMover
     {
         public List<FileMoveCall> Calls { get; } = [];
         public List<string> RevealCalls { get; } = [];
 
         public FileMoveResult Move(string sourcePath, string destinationFolder, long downloadId)
         {
-            Calls.Add(new FileMoveCall(sourcePath, destinationFolder, downloadId));
-            return handler?.Invoke(sourcePath, destinationFolder, downloadId)
+            return Move(sourcePath, destinationFolder, downloadId, "legacy-test-operation");
+        }
+
+        public FileMoveResult Move(
+            string sourcePath,
+            string destinationFolder,
+            long downloadId,
+            string operationId)
+        {
+            Calls.Add(new FileMoveCall(sourcePath, destinationFolder, downloadId, operationId));
+            return handler?.Invoke(sourcePath, destinationFolder, downloadId, operationId)
                 ?? new FileMoveResult(downloadId, Path.Combine(destinationFolder, Path.GetFileName(sourcePath)));
         }
 
@@ -855,15 +1863,21 @@ internal static partial class TestSuite
         }
     }
 
-    private sealed class FakeYouTubeService : IYouTubeService
+    private sealed class FakeYouTubeService : IYouTubeService, IResumableYouTubeService
     {
         public int ListCallCount { get; private set; }
         public int StartCallCount { get; private set; }
         public int CancelCallCount { get; private set; }
+        public int PauseCallCount { get; private set; }
+        public int DiscardPartialCallCount { get; private set; }
+        public int CommitCompletedCallCount { get; private set; }
         public Exception? ListError { get; init; }
+        public Exception? CommitError { get; init; }
         public Func<int, string, CancellationToken, Task<FormatCatalog>>? ListHandler { get; init; }
         public JobSnapshot? Snapshot { get; set; }
         public List<string?> DestinationFolders { get; } = [];
+        public List<DownloadSelection> Selections { get; } = [];
+        public List<DownloadRunOptions> RunOptions { get; } = [];
         public Func<string, string, int, string?, Func<JobProgress, Task>, CancellationToken, Task<JobResult>>? StartHandler { get; set; }
 
         public Task<FormatCatalog> ListFormatsAsync(string url, CancellationToken cancellationToken)
@@ -895,13 +1909,88 @@ internal static partial class TestSuite
                 ?? Task.FromResult(new JobResult(jobId, @"C:\Downloads\Video Radar\video.mp4"));
         }
 
+        public Task<JobResult> StartDownloadAsync(
+            string jobId,
+            string url,
+            DownloadSelection selection,
+            string? destinationFolder,
+            DownloadRunOptions options,
+            Func<JobProgress, Task> onProgress,
+            CancellationToken cancellationToken)
+        {
+            Selections.Add(selection);
+            RunOptions.Add(options);
+            return StartDownloadAsync(
+                jobId,
+                url,
+                selection.Height ?? 0,
+                destinationFolder,
+                onProgress,
+                cancellationToken);
+        }
+
         public Task CancelAsync(string jobId)
         {
             CancelCallCount++;
             return Task.CompletedTask;
         }
 
+        public Task PauseAsync(string jobId)
+        {
+            PauseCallCount++;
+            return Task.CompletedTask;
+        }
+
+        public Task DiscardPartialAsync(
+            string jobId,
+            string? destinationFolder,
+            CancellationToken cancellationToken = default)
+        {
+            DiscardPartialCallCount++;
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task CommitCompletedAsync(
+            string jobId,
+            string? destinationFolder,
+            string finalPath,
+            CancellationToken cancellationToken = default)
+        {
+            CommitCompletedCallCount++;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (CommitError is not null) throw CommitError;
+            return Task.CompletedTask;
+        }
+
         public JobSnapshot? GetJob() => Snapshot;
+    }
+
+    private sealed class FakeDiagnosticService : IDiagnosticService
+    {
+        public bool Enabled { get; private set; }
+        public bool Cleared { get; private set; }
+        public string? ExportedDestination { get; private set; }
+
+        public DiagnosticSummary GetSummary(string downloadFolder) => new(
+            DateTimeOffset.Parse("2026-08-12T12:00:00Z"),
+            HostInfo.Version,
+            HostInfo.ProtocolVersion,
+            "x64",
+            "Windows fixture",
+            1_000,
+            Enabled,
+            0,
+            [new DiagnosticTool("ffprobe.exe", true, "8.0", 10, null)]);
+
+        public void SetEnabled(bool enabled) => Enabled = enabled;
+        public void Record(string eventName, string? code = null) { }
+        public string Export(string destinationFolder, string downloadFolder)
+        {
+            ExportedDestination = destinationFolder;
+            return Path.Combine(destinationFolder, "VideoRadar-Diagnostics.zip");
+        }
+        public void Clear() => Cleared = true;
     }
 
     private sealed record UpdateCall(string Executable, IReadOnlyList<string> Arguments, Func<string, Task>? OnOutput);

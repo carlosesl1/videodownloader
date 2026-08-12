@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.Json;
 using VideoRadar.NativeHost.Files;
 using VideoRadar.NativeHost.Host;
+using VideoRadar.NativeHost.Diagnostics;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.Protocol;
 using VideoRadar.NativeHost.Tools;
@@ -41,7 +43,12 @@ public static class Program
             var processRunner = new ProcessRunner();
             var downloadPaths = new DownloadPaths();
             var downloadPathsFactory = new DownloadPathsFactory(downloadPaths.Home, downloadPaths.TempRoot);
-            var youtubeService = new YouTubeService(toolsDirectory, processRunner, downloadPathsFactory);
+            var youtubeService = new YouTubeService(
+                toolsDirectory,
+                processRunner,
+                downloadPathsFactory,
+                new FfprobeMediaValidator(toolsDirectory));
+            var diagnosticService = CreateDiagnosticService(toolsDirectory);
             var updatePolicy = new UpdatePolicy(toolsDirectory, processRunner);
             var fileMover = new DownloadFileMover();
             if (!OperatingSystem.IsWindows())
@@ -53,7 +60,10 @@ public static class Program
                 updatePolicy,
                 folderPicker,
                 downloadPaths.Home,
-                fileMover);
+                fileMover,
+                startOperationJournal: StartOperationJournal.CreateDefault(),
+                downloadQueueStore: DownloadQueueStore.CreateDefault(),
+                diagnosticService: diagnosticService);
             await server.RunAsync(CancellationToken.None);
             return 0;
         }
@@ -122,4 +132,22 @@ public static class Program
     public sealed record PingDiagnostic(bool Ok, string Host, int ProtocolVersion, ToolDiagnostic Tools);
 
     public sealed record ToolDiagnostic(bool YtDlp, bool Deno, bool Ffmpeg, bool Ffprobe);
+
+    private static IDiagnosticService CreateDiagnosticService(string toolsDirectory)
+    {
+        try
+        {
+            return new DiagnosticService(toolsDirectory);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or NotSupportedException
+            or ArgumentException
+            or System.Security.SecurityException)
+        {
+            // Optional diagnostics must not prevent the download host from starting.
+            return NullDiagnosticService.Instance;
+        }
+    }
 }

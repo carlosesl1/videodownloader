@@ -1,6 +1,6 @@
 {
   "name": "video-radar-extension",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "On-demand Chromium extension for authorized direct, HLS and public social-video downloads.",
   "license": "MIT",
@@ -27,6 +27,8 @@
     "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dotnet.ps1 run --project native-host/VideoRadar.NativeHost.Tests",
     "check:all": "npm run check && npm run test:native",
     "check:release": "node scripts/validate-release.mjs",
-    "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-v1-release.ps1"
+    "release:sbom": "node scripts/generate-sbom.mjs",
+    "verify:release": "node scripts/verify-release-artifacts.mjs",
+    "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   }
 }

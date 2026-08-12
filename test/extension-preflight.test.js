@@ -33,7 +33,13 @@ test('production preflight contract has the exact Chrome and helper boundaries',
   assert.deepEqual([...manifest.permissions].sort(), expectedPermissions);
   assert.ok(!manifest.host_permissions?.length);
   assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
-  await access(new URL(`../${manifest.icons['128']}`, import.meta.url));
+  assert.equal(manifest.incognito, 'not_allowed');
+  assert.equal(
+    manifest.content_security_policy.extension_pages,
+    "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';",
+  );
+  assert.deepEqual(manifest.action.default_icon, manifest.icons);
+  await Promise.all(Object.values(manifest.icons).map((icon) => access(new URL(`../${icon}`, import.meta.url))));
 
   const key = Buffer.from(manifest.key, 'base64');
   assert.ok(key.length > 0);
@@ -77,13 +83,16 @@ test('production preflight contract has the exact Chrome and helper boundaries',
 test('helper lock, project, scripts, and README retain the offline installation contract', async () => {
   const root = new URL('../', import.meta.url);
   const lock = JSON.parse(await readFile(new URL('../native-host/tool-lock.json', import.meta.url), 'utf8'));
-  assert.equal(lock.schemaVersion, 1);
-  assert.deepEqual(lock.sources.map((source) => source.name), ['deno', 'ffmpeg', 'yt-dlp']);
-  for (const source of lock.sources) {
+  assert.equal(lock.schemaVersion, 2);
+  assert.deepEqual(lock.targets.map(({ rid }) => rid), ['win-x64', 'win-arm64']);
+  for (const target of lock.targets) {
+  assert.deepEqual(target.sources.map((source) => source.name), ['deno', 'ffmpeg', 'yt-dlp']);
+  for (const source of target.sources) {
     assert.match(source.url, /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/releases\/assets\/\d+$/);
     assert.match(source.sha256, /^[0-9a-f]{64}$/);
     assert.ok(source.outputs.length > 0);
     assert.match(source.license.url, /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[0-9a-f]{40}\//);
+  }
   }
 
   const csproj = await readFile(new URL('../native-host/VideoRadar.NativeHost/VideoRadar.NativeHost.csproj', import.meta.url), 'utf8');

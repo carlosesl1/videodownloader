@@ -79,8 +79,8 @@ test('hostCommand aceita só comando, request ID e payload objeto seguros', () =
   assert.throws(() => hostCommand(HOST_COMMANDS.PING, 'r1', []), /Mensagem inválida/);
 });
 
-test('expõe os comandos e eventos nomeados do protocolo nativo v3', () => {
-  assert.equal(MIN_NATIVE_PROTOCOL_VERSION, 3);
+test('expõe os comandos e eventos nomeados do protocolo nativo v5', () => {
+  assert.equal(MIN_NATIVE_PROTOCOL_VERSION, 5);
   assert.equal(HOST_COMMANDS.CHOOSE_DOWNLOAD_FOLDER, 'chooseDownloadFolder');
   assert.equal(HOST_COMMANDS.MOVE_DOWNLOADED_FILE, 'moveDownloadedFile');
   assert.equal(HOST_COMMANDS.REVEAL_DOWNLOADED_FILE, 'revealDownloadedFile');
@@ -101,10 +101,12 @@ test('valida os formatos reais de eventos do host e normaliza download', () => {
     ...progressEvent, stage: 'video',
   });
   assert.deepEqual(assertHostEvent({
-    type: 'ready', requestId: 'r1', protocolVersion: 3, nativeName: 'host',
+    type: 'ready', requestId: 'r1', protocolVersion: 5, nativeName: 'host',
+    hostVersion: '1.2.0', capabilities: ['idempotentStart', 'idempotentMove'],
     defaultFolder: 'C:\\Users\\Carlos\\Downloads',
   }), {
-    type: 'ready', requestId: 'r1', protocolVersion: 3, nativeName: 'host',
+    type: 'ready', requestId: 'r1', protocolVersion: 5, nativeName: 'host',
+    hostVersion: '1.2.0', capabilities: ['idempotentStart', 'idempotentMove'],
     defaultFolder: 'C:\\Users\\Carlos\\Downloads',
   });
   assert.deepEqual(assertHostEvent({ type: 'ready', requestId: 'r1', job: null }), {
@@ -113,8 +115,8 @@ test('valida os formatos reais de eventos do host e normaliza download', () => {
   assert.deepEqual(assertHostEvent({ type: 'jobStarted', requestId: 'r1', jobId: 'j1', job: snapshot }), {
     type: 'jobStarted', requestId: 'r1', jobId: 'j1', job: snapshot,
   });
-  assert.deepEqual(assertHostEvent({ type: 'jobCompleted', requestId: 'r1', jobId: 'j1', path: 'C:/Downloads/a.mp4' }), {
-    type: 'jobCompleted', requestId: 'r1', jobId: 'j1', path: 'C:/Downloads/a.mp4',
+  assert.deepEqual(assertHostEvent({ type: 'jobCompleted', requestId: 'r1', jobId: 'j1', path: 'C:\\Downloads\\a.mp4' }), {
+    type: 'jobCompleted', requestId: 'r1', jobId: 'j1', path: 'C:\\Downloads\\a.mp4',
   });
   assert.deepEqual(assertHostEvent({ type: 'jobCancelled', requestId: 'r1', jobId: 'j1' }), {
     type: 'jobCancelled', requestId: 'r1', jobId: 'j1',
@@ -149,10 +151,10 @@ test('valida seleção, cancelamento e movimentação de destino', () => {
     type: 'folderSelectionCancelled', requestId: 'r3',
   });
   assert.deepEqual(assertHostEvent({
-    type: 'fileMoved', requestId: 'r4', downloadId: 0,
+    type: 'fileMoved', requestId: 'r4', operationId: 'move-1', downloadId: 0,
     finalPath: 'D:\\Videos\\clip.mp4',
   }), {
-    type: 'fileMoved', requestId: 'r4', downloadId: 0,
+    type: 'fileMoved', requestId: 'r4', operationId: 'move-1', downloadId: 0,
     finalPath: 'D:\\Videos\\clip.mp4',
   });
   assert.deepEqual(assertHostEvent({
@@ -187,10 +189,10 @@ test('rejeita prefixos de dispositivo Windows em todos os caminhos do protocolo'
   ]) {
     for (const event of [
       { type: 'folderSelected', requestId: 'r1', path },
-      { type: 'fileMoved', requestId: 'r1', downloadId: 1, finalPath: path },
+      { type: 'fileMoved', requestId: 'r1', operationId: 'move-1', downloadId: 1, finalPath: path },
       {
-        type: 'ready', requestId: 'r1', protocolVersion: 3,
-        nativeName: 'host', defaultFolder: path,
+        type: 'ready', requestId: 'r1', protocolVersion: 5,
+        nativeName: 'host', hostVersion: '1.1.0', capabilities: [], defaultFolder: path,
       },
     ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/, `${event.type}: ${path}`);
   }
@@ -210,7 +212,8 @@ test('rejeita caminhos Windows não canônicos ou com segmentos inválidos', () 
 
 test('ready do ping exige protocolo compatível, caminho absoluto e formato exato', () => {
   const ready = {
-    type: 'ready', requestId: 'r1', protocolVersion: 3, nativeName: 'host',
+    type: 'ready', requestId: 'r1', protocolVersion: 5, nativeName: 'host',
+    hostVersion: '1.1.0', capabilities: ['idempotentStart'],
     defaultFolder: 'C:\\Users\\Carlos\\Downloads',
   };
   assert.deepEqual(assertHostEvent(ready), ready);
@@ -220,7 +223,10 @@ test('ready do ping exige protocolo compatível, caminho absoluto e formato exat
     { ...ready, protocolVersion: '2' },
     { ...ready, defaultFolder: 'Downloads' },
     { ...ready, extra: true },
-    { type: 'ready', requestId: 'r1', protocolVersion: 3, nativeName: 'host' },
+    {
+      type: 'ready', requestId: 'r1', protocolVersion: 5, nativeName: 'host',
+      hostVersion: '1.1.0', capabilities: ['idempotentStart'],
+    },
   ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
 });
 
@@ -229,11 +235,14 @@ test('rejeita limites e valores inseguros vindos do host', () => {
   for (const event of [
     { ...base, percent: 101 }, { ...base, downloadedBytes: -1 }, { ...base, totalBytes: Infinity },
     { ...base, stage: 'unknown' }, { ...base, etaSeconds: NaN },
+    { type: 'jobStarted', requestId: 'r1', jobId: 'j1', job: { ...snapshot, jobId: 123 } },
     { type: 'jobCompleted', requestId: 'r1', jobId: 'j1', path: 'x'.repeat(1025) },
+    { type: 'jobFailed', requestId: 'r1', code: 123, message: 'falha', details: {} },
     { type: 'jobFailed', requestId: 'r1', code: 'lowercase', message: 'falha', details: {} },
     { type: 'jobFailed', requestId: 'r1', code: 'HOST_ERROR', message: 'x'.repeat(257), details: {} },
     { type: 'jobFailed', requestId: 'r1', code: 'HOST_ERROR', message: 'falha', details: { nested: new Date() } },
     { type: 'formats', requestId: 'r1', videoId, title: 'x'.repeat(513), durationSeconds: 1, qualities: [] },
+    { type: 'formats', requestId: 'r1', videoId: 123, title: 'video', durationSeconds: 1, qualities: [] },
   ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
 });
 
@@ -249,4 +258,75 @@ test('reduz formatos válidos com alturas distintas e ordenadas', () => {
     videoId, title: 'Me at the zoo', durationSeconds: 19, qualities: event.qualities,
   });
   assert.throws(() => assertHostEvent({ ...event, qualities: [...event.qualities, { ...event.qualities[1] }] }), /Mensagem inválida/);
+});
+
+test('valida diagnóstico redigido e caminhos de exportação', () => {
+  const diagnostics = {
+    type: 'diagnostics', requestId: 'health-1', generatedAt: '2026-08-12T12:00:00Z',
+    hostVersion: '1.2.0', protocolVersion: 5, architecture: 'arm64',
+    operatingSystem: 'Microsoft Windows 11', availableBytes: 123456,
+    loggingEnabled: true, logFileCount: 2,
+    tools: [{
+      name: 'ffprobe.exe', available: true, version: '8.0', sizeBytes: 123,
+      sha256: 'a'.repeat(64),
+    }],
+  };
+  assert.deepEqual(assertHostEvent(diagnostics), diagnostics);
+  assert.deepEqual(assertHostEvent({
+    type: 'diagnosticsExported', requestId: 'export-1',
+    path: 'D:\\Suporte\\VideoRadar-Diagnostics-20260812.zip',
+  }), {
+    type: 'diagnosticsExported', requestId: 'export-1',
+    path: 'D:\\Suporte\\VideoRadar-Diagnostics-20260812.zip',
+  });
+  assert.deepEqual(assertHostEvent({
+    type: 'diagnosticsCleared', requestId: 'clear-1',
+  }), {
+    type: 'diagnosticsCleared', requestId: 'clear-1',
+  });
+
+  for (const event of [
+    { ...diagnostics, architecture: 'x86' },
+    { ...diagnostics, availableBytes: -1 },
+    { ...diagnostics, logFileCount: 9 },
+    { ...diagnostics, tools: [{ ...diagnostics.tools[0], sha256: 'secret' }] },
+    { ...diagnostics, rawLog: 'https://private.example/video' },
+  ]) assert.throws(() => assertHostEvent(event), /Mensagem inválida/);
+});
+
+test('preserva catálogo rico de vídeo, áudio, codec, HDR, tamanho e legendas', () => {
+  const quality = {
+    height: 2160, label: '2160p60 HDR', container: 'webm', combined: false,
+    fps: 60, hdr: true, dynamicRange: 'HDR10', videoCodec: 'vp9.2', audioCodec: 'opus',
+    bitrateKbps: 18000.5, estimatedSizeBytes: 2_000_000_000,
+    estimatedSizeApproximate: true,
+  };
+  const format = {
+    formatId: '251', height: null, container: 'WEBM', combined: false,
+    audioOnly: true, fps: null, hdr: false, dynamicRange: null, videoCodec: null,
+    audioCodec: 'opus', bitrateKbps: 160, fileSizeBytes: 4_000_000,
+    fileSizeApproximate: false, language: 'pt-BR',
+  };
+  const subtitle = {
+    language: 'pt-BR', label: 'Português', automatic: false, containers: ['VTT'],
+  };
+  const event = {
+    type: 'formats', requestId: 'rich-1', platform: 'youtube', videoId,
+    title: 'Me at the zoo', durationSeconds: 19, qualities: [quality],
+    formats: [format], subtitles: [subtitle], audioLanguages: ['pt-BR'],
+  };
+  assert.deepEqual(assertFormatsResult(event), {
+    platform: 'youtube', videoId, title: 'Me at the zoo', durationSeconds: 19,
+    qualities: [quality],
+    formats: [{ ...format, container: 'webm' }],
+    subtitles: [subtitle],
+    audioLanguages: ['pt-BR'],
+  });
+
+  for (const invalidEvent of [
+    { ...event, qualities: [{ ...quality, fps: Infinity }] },
+    { ...event, formats: [{ ...format, audioOnly: true, height: 720 }] },
+    { ...event, subtitles: [{ ...subtitle, language: '../pt' }] },
+    { ...event, audioLanguages: ['pt-BR', 'PT-br'] },
+  ]) assert.throws(() => assertFormatsResult(invalidEvent), /Mensagem inválida/);
 });

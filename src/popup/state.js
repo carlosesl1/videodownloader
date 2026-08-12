@@ -8,6 +8,7 @@ const ERROR_MESSAGES = Object.freeze({
   HLS_ENCRYPTED: 'Esta playlist usa criptografia não suportada.',
   HLS_FMP4: 'Esta playlist usa segmentos fMP4, não suportados nesta versão.',
   HLS_BYTERANGE: 'Esta playlist usa intervalos de bytes não suportados.',
+  HLS_SEPARATE_AUDIO: 'Esta qualidade usa áudio separado e não pode ser salva com segurança nesta versão.',
   HLS_LIVE: 'Transmissões HLS ao vivo não são suportadas nesta versão.',
   HLS_MANIFEST_TOO_LARGE: 'A playlist HLS ultrapassa os limites seguros de análise.',
   HLS_VARIANT_LIMIT: 'A playlist HLS anuncia qualidades demais para processar com segurança.',
@@ -32,6 +33,11 @@ const ERROR_MESSAGES = Object.freeze({
   FORMAT_UNAVAILABLE: 'A qualidade escolhida não está mais disponível. Busque o vídeo novamente.',
   MEDIA_ACCESS_DENIED: 'O servidor da plataforma recusou o arquivo. Busque o vídeo novamente ou tente mais tarde.',
   MEDIA_DOWNLOAD_FAILED: 'Não foi possível baixar o arquivo de vídeo. Tente novamente.',
+  MEDIA_VALIDATION_FAILED: 'O arquivo baixado não passou pela validação final e foi descartado com segurança.',
+  QUEUE_FULL: 'A fila está cheia. Aguarde ou cancele um download antes de adicionar outro.',
+  INVALID_JOB_STATE: 'Este download não pode executar essa ação no estado atual.',
+  JOB_NOT_FOUND: 'Este download não foi encontrado na fila.',
+  JOB_OWNED_BY_ANOTHER_HOST: 'O download está sendo controlado por outra janela. Tente novamente em instantes.',
   PRIVATE_CONTENT: 'Este vídeo não está disponível publicamente.',
   NO_VIDEO: 'Este post não contém um vídeo compatível.',
   UNSUPPORTED_POST: 'Este tipo de publicação ainda não é compatível.',
@@ -196,6 +202,16 @@ function relocationView(record) {
       action: 'open-download-settings',
     };
   }
+  if (record.status === 'interrupted') {
+    return {
+      phase: 'error',
+      stagingPath: record.stagingPath,
+      statusLabel: record.stagingPath
+        ? `Download interrompido. Arquivo parcial em ${record.stagingPath}`
+        : 'O download foi interrompido. Tente novamente.',
+      error: { code: record.errorCode ?? 'BROWSER_DOWNLOAD_INTERRUPTED' },
+    };
+  }
   return {};
 }
 
@@ -260,10 +276,15 @@ function youtubeView(snapshot, existing) {
     ...snapshot.format,
     filename: youtubeFilename(snapshot.title, snapshot.format),
   };
+  const matchesPersisted = (variant) => snapshot.format.height === 0
+    ? variant.audioOnly === true || variant.height === 0
+    : variant.height === snapshot.format.height;
   const variants = ['youtube', 'remote-media'].includes(existing?.kind) && existing.variants?.length
-    ? existing.variants.map((variant) => variant.height === snapshot.format.height ? persistedVariant : variant)
+    ? existing.variants.map((variant) => matchesPersisted(variant)
+      ? { ...variant, ...persistedVariant }
+      : variant)
     : [persistedVariant];
-  const selectedIndex = Math.max(0, variants.findIndex((variant) => variant.height === snapshot.format.height));
+  const selectedIndex = Math.max(0, variants.findIndex(matchesPersisted));
   const selected = variants[selectedIndex] ?? persistedVariant;
   return {
     id: `${platform}:${snapshot.videoId}`,
@@ -276,6 +297,181 @@ function youtubeView(snapshot, existing) {
     downloadedBytes: snapshot.downloadedBytes, totalBytes: snapshot.totalBytes,
     speedBytesPerSecond: snapshot.speedBytesPerSecond, etaSeconds: snapshot.etaSeconds,
     updatedAt: snapshot.updatedAt,
+    ...(Array.isArray(existing?.subtitles) ? {
+      subtitles: existing.subtitles.map((subtitle) => ({ ...subtitle })),
+      selectedSubtitleIndex: existing.selectedSubtitleIndex ?? -1,
+      audioLanguages: [...(existing.audioLanguages ?? [])],
+    } : {}),
+  };
+}
+
+function queueSelectionMatches(variant, selection) {
+  if (variant?.selection) {
+    return variant.selection.height === selection.height
+      && variant.selection.audioOnly === selection.audioOnly;
+  }
+  return selection.audioOnly ? variant?.audioOnly === true : variant?.height === selection.height;
+}
+
+function queueJobView(job, existing) {
+  const page = canonicalMediaPage(job.url);
+  const platform = page?.platform ?? 'youtube';
+  const format = job.selection.audioOnly
+    ? { height: 0, label: 'Somente áudio', container: 'm4a', combined: false }
+    : {
+        height: job.selection.height,
+        label: `${job.selection.height}p`,
+        container: 'mp4',
+        combined: false,
+      };
+  const fallbackVariant = {
+    ...format,
+    audioOnly: job.selection.audioOnly,
+    selection: { ...job.selection },
+    filename: job.selection.audioOnly
+      ? `${job.title}-audio.m4a`
+      : youtubeFilename(job.title, format),
+  };
+  const variants = ['youtube', 'remote-media'].includes(existing?.kind)
+    && existing.variants?.length
+    ? existing.variants.map((variant) => ({ ...variant }))
+    : [fallbackVariant];
+  let selectedIndex = variants.findIndex((variant) => queueSelectionMatches(variant, job.selection));
+  if (selectedIndex < 0) {
+    variants.push(fallbackVariant);
+    selectedIndex = variants.length - 1;
+  }
+  variants[selectedIndex] = {
+    ...variants[selectedIndex],
+    selection: { ...job.selection },
+  };
+  const selected = variants[selectedIndex];
+  const view = normalizeJobView({
+    jobId: job.jobId,
+    operationId: job.operationId,
+    videoId: job.videoId,
+    title: job.title,
+    height: job.height,
+    stage: job.stage,
+    percent: job.percent,
+    path: job.path,
+    errorCode: job.error,
+  });
+  const nonterminal = ['queued', 'running', 'paused'].includes(job.state);
+  const queuedLabel = job.position
+    ? `Na fila · posição ${job.position}`
+    : 'Na fila…';
+  const statusLabel = job.state === 'queued'
+    ? queuedLabel
+    : job.state === 'paused'
+      ? `${view.statusLabel}${job.resumePartial ? ' · progresso preservado' : ''}`
+      : job.state === 'failed' && job.error
+        ? userMessageForError(job.error)
+        : view.statusLabel;
+  const subtitles = Array.isArray(existing?.subtitles)
+    ? existing.subtitles.map((subtitle) => ({ ...subtitle }))
+    : null;
+  const selectedSubtitleIndex = subtitles === null
+    ? null
+    : job.selection.subtitleLanguage === null
+      ? -1
+      : subtitles.findIndex((subtitle) => (
+          subtitle.language.toLowerCase() === job.selection.subtitleLanguage.toLowerCase()
+          && subtitle.automatic === job.selection.includeAutomaticSubtitles
+        ));
+  return {
+    id: `media-job:${job.jobId}`,
+    kind: platform === 'youtube' ? 'youtube' : 'remote-media',
+    platform,
+    url: job.url,
+    title: job.title,
+    filename: selected.filename ?? fallbackVariant.filename,
+    variants,
+    selectedIndex,
+    predictedFormat: selected.container ?? format.container,
+    phase: view.stage,
+    jobId: job.jobId,
+    operationId: job.operationId,
+    active: nonterminal,
+    progress: view.percent,
+    statusLabel,
+    path: view.path,
+    error: job.error,
+    format,
+    selection: { ...job.selection },
+    queueState: job.state,
+    isQueueJob: true,
+    position: job.position,
+    resumePartial: job.resumePartial,
+    attemptCount: job.attemptCount,
+    downloadedBytes: job.downloadedBytes,
+    totalBytes: job.totalBytes,
+    speedBytesPerSecond: job.speedBytesPerSecond,
+    etaSeconds: job.etaSeconds,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    ...(subtitles === null ? {} : {
+      subtitles,
+      selectedSubtitleIndex: selectedSubtitleIndex >= 0 ? selectedSubtitleIndex : -1,
+      audioLanguages: [...(existing.audioLanguages ?? [])],
+    }),
+  };
+}
+
+function pendingPlaceholderForJob(item, job) {
+  if (item?.isQueueJob
+    || !['youtube', 'remote-media'].includes(item?.kind)
+    || item.phase !== 'preparing') return false;
+  const itemPage = canonicalMediaPage(item.url);
+  const jobPage = canonicalMediaPage(job.url);
+  const selected = item.variants?.[item.selectedIndex ?? 0];
+  return itemPage?.canonicalUrl === jobPage?.canonicalUrl
+    && queueSelectionMatches(selected, job.selection);
+}
+
+function resetMediaPlaceholder(item) {
+  const {
+    operationId, format, selection, queueState, isQueueJob, position, resumePartial,
+    attemptCount, downloadedBytes, totalBytes, speedBytesPerSecond, etaSeconds,
+    createdAt, updatedAt, ...source
+  } = item;
+  const selected = source.variants?.[source.selectedIndex ?? 0];
+  return {
+    ...source,
+    filename: selected?.filename ?? source.filename,
+    jobId: null,
+    phase: 'ready',
+    active: false,
+    progress: null,
+    path: null,
+    error: null,
+    statusLabel: '',
+  };
+}
+
+function mergeQueueJob(state, job) {
+  const matches = (entry) => entry.jobId === job.jobId;
+  const existingItem = state.items.find(matches);
+  const existingDownload = (state.downloads ?? []).find(matches);
+  const placeholder = existingItem?.isQueueJob
+    ? null
+    : existingItem ?? state.items.find((entry) => pendingPlaceholderForJob(entry, job));
+  const item = queueJobView(job, existingDownload ?? existingItem ?? placeholder);
+  const items = state.items
+    .filter((entry) => entry !== existingItem || !existingItem?.isQueueJob)
+    .map((entry) => entry === placeholder ? resetMediaPlaceholder(entry) : entry);
+  const downloads = [
+    ...(state.downloads ?? []).filter((entry) => !matches(entry)),
+    item,
+  ];
+  return {
+    ...state,
+    status: state.status === 'restoring' ? 'restoring' : 'results',
+    target: state.target || 'downloads',
+    items,
+    downloads,
+    busyId: currentBusyId(items, downloads),
+    message: item.active ? item.statusLabel : 'Download atualizado',
   };
 }
 
@@ -382,6 +578,17 @@ export function reduceState(state, event) {
         filename: selected.filename ?? item.filename,
         ...(['youtube', 'remote-media'].includes(item.kind) ? { predictedFormat: selected.container } : {}),
       };
+    });
+  }
+
+  if (event.type === 'SUBTITLE_SELECTED') {
+    return updateStateItem(state, event.id, (item) => {
+      if (item.active || ['permission', 'preparing', 'sent'].includes(item.phase)) return {};
+      const selectedIndex = event.selectedIndex;
+      if (!Number.isSafeInteger(selectedIndex)
+        || selectedIndex < -1
+        || selectedIndex >= (item.subtitles?.length ?? 0)) return {};
+      return { selectedSubtitleIndex: selectedIndex };
     });
   }
 
@@ -519,15 +726,17 @@ export function reduceState(state, event) {
     if (!event.snapshot) return state;
     const page = canonicalMediaPage(event.snapshot.url);
     const itemId = `${page?.platform ?? 'youtube'}:${event.snapshot.videoId}`;
-    const existingItem = state.items.find((entry) => entry.id === itemId);
-    const existingDownload = (state.downloads ?? []).find((entry) => entry.id === itemId);
+    const matches = (entry) => entry.id === itemId || entry.jobId === event.snapshot.jobId;
+    const existingItem = state.items.find(matches);
+    const existingDownload = (state.downloads ?? []).find(matches);
+    if (existingItem?.isQueueJob || existingDownload?.isQueueJob) return state;
     const item = youtubeView(event.snapshot, existingItem ?? existingDownload);
     const items = existingItem
       ? state.items.map((entry) => entry === existingItem ? item : entry)
       : state.items;
     const downloads = existingItem
-      ? (state.downloads ?? []).filter((entry) => entry.id !== item.id)
-      : [...(state.downloads ?? []).filter((entry) => entry.id !== item.id), item];
+      ? (state.downloads ?? []).filter((entry) => !matches(entry))
+      : [...(state.downloads ?? []).filter((entry) => !matches(entry)), item];
     return {
       ...state,
       status: state.status === 'restoring' ? 'restoring' : 'results',
@@ -548,6 +757,10 @@ export function reduceState(state, event) {
     ) || entry.id === itemId;
     const existingItem = state.items.find(matches);
     const existingDownload = (state.downloads ?? []).find(matches);
+    // v5 publishes the durable queue entry before its compatibility snapshot.
+    // Once either section owns that job as a queue item, the lossy legacy view
+    // must not replace it or remove pause/resume controls from the download.
+    if (existingItem?.isQueueJob || existingDownload?.isQueueJob) return state;
     const item = youtubeView(event.snapshot, existingItem ?? existingDownload);
     const items = existingItem
       ? state.items.map((entry) => entry === existingItem ? item : entry)
@@ -561,6 +774,23 @@ export function reduceState(state, event) {
       busyId: item.active ? item.id : currentBusyId(items, downloads),
       message: item.active ? 'Download em andamento' : state.message || 'Download atualizado',
     };
+  }
+
+  if (event.type === 'DOWNLOAD_QUEUE_JOB_UPDATED') {
+    if (!event.job) return state;
+    return mergeQueueJob(state, event.job);
+  }
+
+  if (event.type === 'DOWNLOAD_QUEUE_RESTORED') {
+    if (!Array.isArray(event.jobs)) return state;
+    const jobIds = new Set(event.jobs.map((job) => job.jobId));
+    const reconciled = {
+      ...state,
+      items: state.items.filter((item) => !item.isQueueJob || jobIds.has(item.jobId)),
+      downloads: (state.downloads ?? [])
+        .filter((item) => !item.isQueueJob || jobIds.has(item.jobId)),
+    };
+    return event.jobs.reduce(mergeQueueJob, reconciled);
   }
 
   if (event.type === 'YOUTUBE_START_CANCELLED') {

@@ -9,6 +9,11 @@ public sealed record FileMoveResult(long DownloadId, string FinalPath);
 public interface IDownloadFileMover
 {
     FileMoveResult Move(string sourcePath, string destinationFolder, long downloadId);
+    FileMoveResult Move(
+        string sourcePath,
+        string destinationFolder,
+        long downloadId,
+        string operationId);
     void Reveal(string path);
 }
 

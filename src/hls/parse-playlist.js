@@ -154,21 +154,38 @@ function resolveUri(uri, playlistUrl) {
   }
 }
 
-function parseStreamVariant(attributes, uri, playlistUrl) {
+function parseStreamVariant(attributes, uri, playlistUrl, audioGroups) {
   if (!/^\d+$/.test(attributes.BANDWIDTH || '')) {
     throw invalid('Malformed EXT-X-STREAM-INF bandwidth');
   }
   const bandwidth = Number(attributes.BANDWIDTH);
-  const resolution = /^(\d+)x(\d+)$/i.exec(attributes.RESOLUTION || '');
-  if (!Number.isSafeInteger(bandwidth) || bandwidth < 1 || !resolution) {
+  const resolution = attributes.RESOLUTION === undefined
+    ? null
+    : /^(\d+)x(\d+)$/i.exec(attributes.RESOLUTION);
+  if (!Number.isSafeInteger(bandwidth) || bandwidth < 1
+    || (attributes.RESOLUTION !== undefined && !resolution)) {
     throw invalid('Malformed EXT-X-STREAM-INF');
   }
 
-  const width = Number(resolution[1]);
-  const height = Number(resolution[2]);
-  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+  const width = resolution ? Number(resolution[1]) : 0;
+  const height = resolution ? Number(resolution[2]) : 0;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)
+    || (resolution && (width < 1 || height < 1))) {
     throw invalid('Malformed EXT-X-STREAM-INF resolution');
   }
+  if (attributes.AUDIO !== undefined) {
+    const group = audioGroups.get(attributes.AUDIO);
+    if (!group) throw invalid('Unknown HLS audio group');
+    if (group.some((rendition) => rendition.external)) {
+      throw new HlsError(
+        'HLS_SEPARATE_AUDIO',
+        'HLS playlists with separate audio are not supported',
+        { groupId: attributes.AUDIO },
+      );
+    }
+  }
+
+  const megabits = Math.round((bandwidth / 1_000_000) * 10) / 10;
 
   return {
     url: resolveUri(uri, playlistUrl),
@@ -176,8 +193,27 @@ function parseStreamVariant(attributes, uri, playlistUrl) {
     height,
     bandwidth,
     codecs: attributes.CODECS || null,
-    label: `${height}p`,
+    label: height > 0 ? `${height}p` : `${megabits} Mbps`,
   };
+}
+
+function parseAudioGroups(lines, playlistUrl) {
+  const groups = new Map();
+  for (const line of lines) {
+    if (!line.startsWith('#EXT-X-MEDIA:')) continue;
+    const attributes = parseAttributes(tagValue(line, '#EXT-X-MEDIA:'));
+    if (attributes.TYPE !== 'AUDIO') continue;
+    if (!attributes['GROUP-ID'] || !attributes.NAME) {
+      throw invalid('Malformed EXT-X-MEDIA audio rendition');
+    }
+    const group = groups.get(attributes['GROUP-ID']) ?? [];
+    group.push({
+      external: attributes.URI !== undefined,
+      ...(attributes.URI ? { url: resolveUri(attributes.URI, playlistUrl) } : {}),
+    });
+    groups.set(attributes['GROUP-ID'], group);
+  }
+  return groups;
 }
 
 function parseDuration(line) {
@@ -224,6 +260,7 @@ function assertNoUnpairedUris(lines, consumedUriIndices) {
 function parseMaster(lines, playlistUrl, limits) {
   const variants = [];
   const consumedUriIndices = new Set();
+  const audioGroups = parseAudioGroups(lines, playlistUrl);
 
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index];
@@ -239,7 +276,7 @@ function parseMaster(lines, playlistUrl, limits) {
       );
     }
     const attributes = parseAttributes(tagValue(line, '#EXT-X-STREAM-INF:'));
-    variants.push(parseStreamVariant(attributes, uri, playlistUrl));
+    variants.push(parseStreamVariant(attributes, uri, playlistUrl, audioGroups));
     consumedUriIndices.add(index + 1);
     index += 1;
   }

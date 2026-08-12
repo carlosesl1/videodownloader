@@ -1,4 +1,4 @@
-VIDEO RADAR 1.0.0 - PACOTE PARA DESENVOLVEDORES
+VIDEO RADAR 1.2.0 - PACOTE PARA DESENVOLVEDORES DA DESKTOP EDITION
 
 Este ZIP e a alternativa transparente ao instalador principal.
 
@@ -14,4 +14,6 @@ Use o Video Radar somente para midia propria, em dominio publico, sob licenca
 que permita download ou com autorizacao explicita. O projeto nao contorna DRM,
 login, conteudo privado ou restricoes de acesso.
 
-Para a instalacao comum, prefira VideoRadar-Setup-1.0.0-Windows-x64.exe.
+Para a instalacao comum, use VideoRadar-Setup-1.2.0-Windows-x64.exe em PCs
+Intel/AMD ou VideoRadar-Setup-1.2.0-Windows-arm64.exe em Windows 11 ARM64.
+O instalador recusa automaticamente um pacote da arquitetura errada.

@@ -1,8 +1,12 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using VideoRadar.NativeHost.Files;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Processes;
+using VideoRadar.NativeHost.Windows;
 using VideoRadar.NativeHost.YouTube;
+using NativeProcessResult = VideoRadar.NativeHost.Processes.ProcessResult;
 
 namespace VideoRadar.NativeHost.Tests;
 
@@ -12,6 +16,7 @@ internal static partial class TestSuite
     {
         DownloadArgumentsAreExactAndHardened();
         DownloadArgumentsRejectUnsafeHeights();
+        DownloadArgumentsRejectUnsafeInputs();
         DownloadPathsReserveUniqueSafeStems();
         DownloadPathsConfineJobDirectoriesAndFinalFiles();
         DownloadFileMoverMovesWithoutOverwrite();
@@ -20,10 +25,25 @@ internal static partial class TestSuite
         DownloadFileMoverCopiesAcrossVolumesBeforeDeletingSource();
         DownloadFileMoverPreservesSourceWhenCopyFails();
         DownloadFileMoverKeepsDeliveredFileWhenSourceCleanupFails();
+        DownloadFileMoverReplaysCommittedOperations();
+        DownloadFileMoverNamespacesAndWaitsForDeliveryLocks();
+        DownloadFileMoverRejectsCrossOperationSources();
+        DownloadFileMoverRecoversOnlyMatchingPreparedDeliveries();
+        DownloadFileMoverAuthenticatesRecoveryWithoutTheSource();
+        DownloadFileMoverMigratesLegacyJournalsOnlyWithTheSource();
         YouTubeServiceUsesPerJobDestination();
+        YouTubeServiceRejectsUnavailableDestinationVolume();
         ProgressParserNormalizesKnownMessages();
         ProgressParserRejectsMalformedMessages();
         YouTubeServiceDownloadsWithHostOwnedPathsAndProgress();
+        YouTubeServiceValidatesFinalMediaBeforeCompletion();
+        YouTubeServiceRejectsAndRemovesInvalidFinalMedia();
+        YouTubeServiceRecoversAfterMoveWithTheOriginalStem();
+        YouTubeServiceRecoversWhenFfprobeWasInterrupted();
+        YouTubeServiceRecoversAfterValidationBeforeQueueCommit();
+        YouTubeServiceReplacesOnlyInvalidManifestOwnedOutputs();
+        YouTubeServiceNeverAdoptsOrDeletesReplacedManifestOutputs();
+        YouTubeServiceRequiresTheSelectedSubtitleKind();
         YouTubeServiceReusesInstagramMetadataForDownload();
         YouTubeServiceRefreshesExpiredInstagramMetadataBeforeDownload();
         YouTubeServiceRetriesInstagramAccessDeniedWithFreshMetadata();
@@ -31,8 +51,11 @@ internal static partial class TestSuite
         YouTubeServiceRejectsInvalidFinalPathsAndSafeFailures();
         YouTubeServiceClassifiesDownloadFailuresSafely();
         YouTubeServiceSerializesAndCancelsTheActiveJob();
+        YouTubeServicePausePreservesAndDiscardRemovesPartials();
         ProcessRunnerClosesChildStandardInput();
+        ProcessRunnerBoundsCapturedOutputAndOversizedLines();
         ProcessRunnerCancellationKillsTheChildTree();
+        ProcessRunnerHardTimeoutKillsTheChildTree();
     }
 
     private static void DownloadArgumentsAreExactAndHardened()
@@ -45,15 +68,21 @@ internal static partial class TestSuite
         var arguments = YtDlpArguments.Download(tools, home, temp, stem, canonicalUrl, 1080);
         var expected = new[]
         {
-            "--ignore-config", "--no-playlist", "--no-plugin-dirs", "--no-remote-components",
+            "--ignore-config", "--no-config-locations", "--no-update", "--no-playlist",
+            "--no-plugin-dirs", "--no-remote-components", "--no-js-runtimes",
             "--js-runtimes", $"deno:{Path.Combine(tools, "deno.exe")}",
             "--ffmpeg-location", tools,
+            "--socket-timeout", "30", "--retries", "5", "--fragment-retries", "5",
+            "--extractor-retries", "3", "--file-access-retries", "3",
+            "--retry-sleep", "http:exp=1:10:2", "--retry-sleep", "fragment:exp=1:10:2",
+            "--retry-sleep", "extractor:exp=1:10:2", "--retry-sleep", "file_access:linear=1:3:1",
+            "--abort-on-error", "--abort-on-unavailable-fragments",
             "--windows-filenames", "--trim-filenames", "180", "--no-overwrites",
             "--paths", home, "--paths", $"temp:{temp}",
             "--output", $"{stem}.%(ext)s",
             "--format", "b[height=1080][ext=mp4]/bv*[height=1080][ext=mp4]+ba[ext=m4a]/b[height=1080]/bv*[height=1080]+ba",
             "--merge-output-format", "mp4/webm",
-            "--newline", "--progress", "--progress-delta", "0.5",
+            "--newline", "--progress", "--progress-delta", "1",
             "--progress-template", "download:VR_PROGRESS:{\"progress\":%(progress)j,\"vcodec\":%(info.vcodec)j,\"acodec\":%(info.acodec)j}",
             "--progress-template", "postprocess:VR_POSTPROCESS:%(progress)j",
             "--print", "after_move:VR_FILE:%(filepath)j",
@@ -73,8 +102,38 @@ internal static partial class TestSuite
         foreach (var height in new[] { int.MinValue, 0, 143, 4321, int.MaxValue })
         {
             Throws<ArgumentOutOfRangeException>(() =>
-                YtDlpArguments.Download("tools", "home", "temp", "stem", "https://www.youtube.com/watch?v=jNQXAC9IVRw", height));
+                YtDlpArguments.Download(
+                    @"C:\video-radar-tools",
+                    @"C:\Users\Alice\Downloads\Video Radar",
+                    @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
+                    "stem",
+                    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                    height));
         }
+    }
+
+    private static void DownloadArgumentsRejectUnsafeInputs()
+    {
+        var tools = @"C:\video-radar-tools";
+        var home = @"C:\Users\Alice\Downloads\Video Radar";
+        var temp = @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job";
+        var canonical = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+
+        Throws<ArgumentException>(() => YtDlpArguments.Download(" ", home, temp, "stem", canonical, 720));
+        Throws<ArgumentException>(() => YtDlpArguments.Download(tools, "home", temp, "stem", canonical, 720));
+        Throws<ArgumentException>(() => YtDlpArguments.Download(tools, home, "temp", "stem", canonical, 720));
+        Throws<ArgumentException>(() => YtDlpArguments.Download(tools, home, temp, @"..\outside", canonical, 720));
+        Throws<ArgumentException>(() => YtDlpArguments.Download(tools, home, temp, "bad:name", canonical, 720));
+        Throws<ArgumentException>(() => YtDlpArguments.Download(
+            tools,
+            home,
+            temp,
+            "stem",
+            "https://youtu.be/jNQXAC9IVRw",
+            720));
+        Throws<ArgumentException>(() => YtDlpArguments.Metadata(
+            tools,
+            "https://youtu.be/jNQXAC9IVRw"));
     }
 
     private static void DownloadPathsReserveUniqueSafeStems()
@@ -260,6 +319,241 @@ internal static partial class TestSuite
         True(File.Exists(source), "Cleanup failure should leave the staging copy for later maintenance.");
     }
 
+    private static void DownloadFileMoverReplaysCommittedOperations()
+    {
+        using var scope = new DownloadTestScope();
+        const string operationId = "op_idempotent";
+        var source = scope.CreateStagingFile(operationId, "aula.ts", "bytes");
+        var destination = scope.CreateDestination("idempotent-target");
+        var transfer = new RecordingFileTransfer(sameVolume: true);
+        var mover = new DownloadFileMover(
+            transfer,
+            new ExplorerFileRevealer(),
+            Path.Combine(scope.Root, "journal"));
+
+        var first = mover.Move(source, destination, 10, operationId);
+        var replay = mover.Move(source, destination, 10, operationId);
+
+        Equal(first, replay);
+        Equal(Path.Combine(destination, "aula.ts"), replay.FinalPath);
+        Equal("bytes", File.ReadAllText(replay.FinalPath));
+        True(!File.Exists(source), "Committed operation replay recreated or retained staging.");
+        True(transfer.Operations.SequenceEqual(["move"]), "Committed replay delivered the file twice.");
+    }
+
+    private static void DownloadFileMoverNamespacesAndWaitsForDeliveryLocks()
+    {
+        using var scope = new DownloadTestScope();
+        var journalRoot = Path.Combine(scope.Root, "journal");
+        var firstSource = scope.CreateStagingFile("delivery", "aula.ts", "first");
+        var secondSource = scope.CreateStagingFile("op_waiting", "aula.ts", "second");
+        var firstDestination = scope.CreateDestination("first-lock-target");
+        var secondDestination = scope.CreateDestination("second-lock-target");
+        using var copyStarted = new ManualResetEventSlim();
+        using var releaseCopy = new ManualResetEventSlim();
+        var blockingTransfer = new RecordingFileTransfer(sameVolume: false)
+        {
+            CopyStartedSignal = copyStarted,
+            CopyReleaseSignal = releaseCopy
+        };
+        var firstMover = new DownloadFileMover(
+            blockingTransfer,
+            new ExplorerFileRevealer(),
+            journalRoot);
+        var secondMover = new DownloadFileMover(
+            new RecordingFileTransfer(sameVolume: true),
+            new ExplorerFileRevealer(),
+            journalRoot);
+
+        var first = Task.Run(() => firstMover.Move(
+            firstSource,
+            firstDestination,
+            20,
+            "delivery"));
+        Task<FileMoveResult>? second = null;
+        try
+        {
+            True(copyStarted.Wait(TimeSpan.FromSeconds(5)), "The first delivery never acquired its global lock.");
+            second = Task.Run(() => secondMover.Move(
+                secondSource,
+                secondDestination,
+                21,
+                "op_waiting"));
+
+            Thread.Sleep(TimeSpan.FromMilliseconds(1_200));
+            True(!second.IsCompleted, "A concurrent delivery did not wait for the long-running global lock.");
+        }
+        finally
+        {
+            releaseCopy.Set();
+        }
+
+        True(
+            second is not null && Task.WaitAll([first, second], TimeSpan.FromSeconds(10)),
+            "Delivery lock wait did not complete.");
+        Equal("first", File.ReadAllText(first.Result.FinalPath));
+        Equal("second", File.ReadAllText(second!.Result.FinalPath));
+    }
+
+    private static void DownloadFileMoverRejectsCrossOperationSources()
+    {
+        using var scope = new DownloadTestScope();
+        var source = scope.CreateStagingFile("op_owner", "aula.ts", "keep");
+        var destination = scope.CreateDestination("operation-owner-target");
+        var transfer = new RecordingFileTransfer(sameVolume: true);
+        var mover = new DownloadFileMover(
+            transfer,
+            new ExplorerFileRevealer(),
+            Path.Combine(scope.Root, "journal"));
+
+        Throws<ArgumentException>(() => mover.Move(source, destination, 11, "op_other"));
+
+        True(File.Exists(source), "Cross-operation rejection removed the staging source.");
+        Equal(0, transfer.Operations.Count);
+    }
+
+    private static void DownloadFileMoverRecoversOnlyMatchingPreparedDeliveries()
+    {
+        using (var scope = new DownloadTestScope())
+        {
+            const string operationId = "op_recover";
+            var source = scope.CreateStagingFile(operationId, "aula.ts", "bytes");
+            var destination = scope.CreateDestination("recover-target");
+            var transfer = new RecordingFileTransfer(sameVolume: false)
+            {
+                PromoteErrorAfterMove = new IOException("controlled crash after promotion")
+            };
+            var mover = new DownloadFileMover(
+                transfer,
+                new ExplorerFileRevealer(),
+                Path.Combine(scope.Root, "journal"));
+
+            Throws<IOException>(() => mover.Move(source, destination, 12, operationId));
+            True(File.Exists(source), "Interrupted prepared delivery removed the recovery source.");
+            True(File.Exists(Path.Combine(destination, "aula.ts")), "Promotion did not create the recoverable destination.");
+
+            transfer.PromoteErrorAfterMove = null;
+            var recovered = mover.Move(source, destination, 12, operationId);
+
+            Equal(Path.Combine(destination, "aula.ts"), recovered.FinalPath);
+            True(!File.Exists(source), "Matching prepared delivery did not clean the staging source.");
+            True(
+                transfer.Operations.SequenceEqual(["copy", "promote", "delete-partial", "delete-source"]),
+                "Prepared recovery performed a duplicate delivery.");
+        }
+
+        using (var scope = new DownloadTestScope())
+        {
+            const string operationId = "op_collision";
+            var source = scope.CreateStagingFile(operationId, "aula.ts", "good");
+            var destination = scope.CreateDestination("collision-target");
+            var transfer = new RecordingFileTransfer(sameVolume: false)
+            {
+                PromoteErrorAfterMove = new IOException("controlled crash after promotion")
+            };
+            var mover = new DownloadFileMover(
+                transfer,
+                new ExplorerFileRevealer(),
+                Path.Combine(scope.Root, "journal"));
+
+            Throws<IOException>(() => mover.Move(source, destination, 13, operationId));
+            File.WriteAllText(Path.Combine(destination, "aula.ts"), "evil");
+            transfer.PromoteErrorAfterMove = null;
+
+            Throws<IOException>(() => mover.Move(source, destination, 13, operationId));
+            True(File.Exists(source), "Conflicting recovery deleted the staging source.");
+            Equal("good", File.ReadAllText(source));
+        }
+    }
+
+    private static void DownloadFileMoverAuthenticatesRecoveryWithoutTheSource()
+    {
+        using var scope = new DownloadTestScope();
+        const string operationId = "op_hash_recovery";
+        var source = scope.CreateStagingFile(operationId, "aula.ts", "good");
+        var destination = scope.CreateDestination("hash-recovery-target");
+        var journalRoot = Path.Combine(scope.Root, "journal");
+        var mover = new DownloadFileMover(
+            new RecordingFileTransfer(sameVolume: true),
+            new ExplorerFileRevealer(),
+            journalRoot);
+
+        var delivered = mover.Move(source, destination, 22, operationId);
+        True(!File.Exists(source), "The committed source should be absent for hash-only recovery.");
+        File.WriteAllText(delivered.FinalPath, "evil");
+
+        Throws<IOException>(() => mover.Move(source, destination, 22, operationId));
+        Equal("evil", File.ReadAllText(delivered.FinalPath));
+
+        using var journal = JsonDocument.Parse(File.ReadAllText(Path.Combine(journalRoot, $"{operationId}.json")));
+        var digest = journal.RootElement.GetProperty("sourceSha256").GetString();
+        True(
+            digest is { Length: 64 } && digest.All(Uri.IsHexDigit),
+            "The move journal did not persist a SHA-256 source digest.");
+    }
+
+    private static void DownloadFileMoverMigratesLegacyJournalsOnlyWithTheSource()
+    {
+        using (var scope = new DownloadTestScope())
+        {
+            const string operationId = "op_legacy_migrate";
+            var source = scope.CreateStagingFile(operationId, "aula.ts", "legacy");
+            var destination = scope.CreateDestination("legacy-migrate-target");
+            var finalPath = Path.Combine(destination, "aula.ts");
+            var journalRoot = Directory.CreateDirectory(Path.Combine(scope.Root, "journal")).FullName;
+            var journalPath = Path.Combine(journalRoot, $"{operationId}.json");
+            File.WriteAllText(journalPath, JsonSerializer.Serialize(new
+            {
+                operationId,
+                downloadId = 23,
+                sourcePath = source,
+                destinationFolder = destination,
+                finalPath,
+                sourceLength = new FileInfo(source).Length,
+                state = "prepared",
+                updatedAt = DateTimeOffset.UtcNow
+            }));
+            var mover = new DownloadFileMover(
+                new RecordingFileTransfer(sameVolume: true),
+                new ExplorerFileRevealer(),
+                journalRoot);
+
+            var migrated = mover.Move(source, destination, 23, operationId);
+
+            Equal(finalPath, migrated.FinalPath);
+            using var journal = JsonDocument.Parse(File.ReadAllText(journalPath));
+            Equal(64, journal.RootElement.GetProperty("sourceSha256").GetString()!.Length);
+        }
+
+        using (var scope = new DownloadTestScope())
+        {
+            const string operationId = "op_legacy_unverifiable";
+            var source = scope.CreateStagingFile(operationId, "aula.ts", "legacy");
+            var destination = scope.CreateDestination("legacy-unverifiable-target");
+            var finalPath = Path.Combine(destination, "aula.ts");
+            File.Move(source, finalPath);
+            var journalRoot = Directory.CreateDirectory(Path.Combine(scope.Root, "journal")).FullName;
+            File.WriteAllText(Path.Combine(journalRoot, $"{operationId}.json"), JsonSerializer.Serialize(new
+            {
+                operationId,
+                downloadId = 24,
+                sourcePath = source,
+                destinationFolder = destination,
+                finalPath,
+                sourceLength = new FileInfo(finalPath).Length,
+                state = "committed",
+                updatedAt = DateTimeOffset.UtcNow
+            }));
+            var mover = new DownloadFileMover(
+                new RecordingFileTransfer(sameVolume: true),
+                new ExplorerFileRevealer(),
+                journalRoot);
+
+            Throws<IOException>(() => mover.Move(source, destination, 24, operationId));
+            Equal("legacy", File.ReadAllText(finalPath));
+        }
+    }
+
     private static void ProgressParserNormalizesKnownMessages()
     {
         var line = "VR_PROGRESS:{\"progress\":{\"status\":\"downloading\",\"downloaded_bytes\":50,\"total_bytes\":100,\"speed\":25.75,\"eta\":2},\"vcodec\":\"avc1\",\"acodec\":\"none\"}";
@@ -314,6 +608,7 @@ internal static partial class TestSuite
                 File.WriteAllText(expectedFinalPath, "video");
                 foreach (var line in new[]
                 {
+                    "VR_PROGRESS:{\"progress\":{\"downloaded_bytes\":50,\"total_bytes\":100},\"vcodec\":\"avc1\",\"acodec\":\"none\"}",
                     "VR_PROGRESS:{\"progress\":{\"downloaded_bytes\":50,\"total_bytes\":100},\"vcodec\":\"avc1\",\"acodec\":\"none\"}",
                     "VR_PROGRESS:{\"progress\":{\"downloaded_bytes\":40,\"total_bytes\":100},\"vcodec\":\"avc1\",\"acodec\":\"none\"}",
                     "VR_PROGRESS:{\"progress\":{\"downloaded_bytes\":25,\"total_bytes\":100},\"vcodec\":\"none\",\"acodec\":\"mp4a\"}",
@@ -406,9 +701,495 @@ internal static partial class TestSuite
             CancellationToken.None).GetAwaiter().GetResult();
 
         Equal(Path.GetFullPath(expectedPath), result.Path);
-        Equal(Path.GetFullPath(destination), runner.Calls[1].Arguments[13]);
+        var pathsIndex = runner.Calls[1].Arguments.ToList().IndexOf("--paths");
+        Equal(Path.GetFullPath(destination), runner.Calls[1].Arguments[pathsIndex + 1]);
         True(!File.Exists(Path.Combine(fallback, Path.GetFileName(expectedPath))),
             "YouTube wrote the per-job download to the fallback folder.");
+    }
+
+    private static void YouTubeServiceValidatesFinalMediaBeforeCompletion()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var expectedPath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllBytes(expectedPath, new byte[19_000]);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new NativeProcessResult(0, string.Empty, string.Empty);
+            });
+        var validator = new RecordingMediaFileValidator();
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths),
+            validator);
+
+        var result = service.StartDownloadAsync(
+            "validated-job",
+            "https://youtu.be/jNQXAC9IVRw",
+            1080,
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(1, validator.CallCount);
+        Equal(expectedPath, validator.Path);
+        True(validator.Request!.ExpectVideo, "Video validation did not require a video stream.");
+        True(validator.Request.ExpectAudio, "Video validation did not require an audio stream.");
+        Equal(19d, validator.Request.ExpectedDurationSeconds);
+        Equal(4_608_000L, validator.Request.EstimatedSizeBytes);
+        Equal("complete", service.GetJob()!.Stage);
+    }
+
+    private static void YouTubeServiceRejectsAndRemovesInvalidFinalMedia()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var expectedPath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var subtitlePath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].pt-BR.vtt");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllText(expectedPath, "invalid");
+                File.WriteAllText(subtitlePath, "invalid subtitle sidecar");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new NativeProcessResult(0, string.Empty, string.Empty);
+            });
+        var validator = new RecordingMediaFileValidator { Failure = new MediaValidationException() };
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths),
+            validator);
+
+        try
+        {
+            service.StartDownloadAsync(
+                "invalid-media-job",
+                "https://youtu.be/jNQXAC9IVRw",
+                new DownloadSelection(
+                    1080,
+                    AudioOnly: false,
+                    SubtitleLanguage: "pt-BR",
+                    IncludeAutomaticSubtitles: false),
+                null,
+                new DownloadRunOptions(),
+                _ => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (MediaDownloadException exception)
+        {
+            Equal("MEDIA_VALIDATION_FAILED", exception.Code);
+            Equal("MEDIA_VALIDATION_FAILED", service.GetJob()!.ErrorCode);
+            True(!File.Exists(expectedPath), "A final file rejected by ffprobe was left as a successful-looking download.");
+            True(!File.Exists(subtitlePath), "A sidecar from rejected media was left behind.");
+            True(!exception.Message.Contains(expectedPath, StringComparison.OrdinalIgnoreCase), "Validation error leaked the final path.");
+            return;
+        }
+
+        throw new InvalidOperationException("Invalid final media was accepted.");
+    }
+
+    private static void YouTubeServiceRecoversAfterMoveWithTheOriginalStem()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        const string jobId = "recover-after-move";
+        var originalStem = "Me at the zoo [jNQXAC9IVRw]";
+        var expectedPath = Path.Combine(paths.Home, $"{originalStem}.mp4");
+        var firstRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllBytes(expectedPath, new byte[19_000]);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                throw new OperationCanceledException("simulated process crash after after_move");
+            });
+        var first = new YouTubeService(
+            "tools",
+            firstRunner,
+            new SinglePathsFactory(paths),
+            new RecordingMediaFileValidator());
+
+        Throws<OperationCanceledException>(() => first.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(
+                ResumePartial: false,
+                PreservePartialOnCancellation: true,
+                DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult());
+
+        var jobTemp = Path.Combine(paths.TempRoot, jobId);
+        True(File.Exists(Path.Combine(jobTemp, "output-manifest.json")),
+            "The output manifest did not survive an after_move crash.");
+        True(File.Exists(expectedPath), "The recoverable final output was removed after after_move.");
+
+        var renamedMetadata = ReadFixture().Replace(
+            "\"title\": \"Me at the zoo\"",
+            "\"title\": \"Title changed after restart\"",
+            StringComparison.Ordinal);
+        var recoveryRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, renamedMetadata, string.Empty)));
+        var validator = new RecordingMediaFileValidator();
+        var recovery = new YouTubeService(
+            "tools",
+            recoveryRunner,
+            new SinglePathsFactory(paths),
+            validator);
+
+        var result = recovery.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(ResumePartial: true, DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(1, recoveryRunner.Calls.Count);
+        Equal(1, validator.CallCount);
+        True(!File.Exists(Path.Combine(paths.Home, "Title changed after restart [jNQXAC9IVRw].mp4")),
+            "A metadata title change replaced the durable output identity.");
+        recovery.CommitCompletedAsync(jobId, null, result.Path).GetAwaiter().GetResult();
+        True(!Directory.Exists(jobTemp), "The committed manifest was not released.");
+        recovery.CommitCompletedAsync(jobId, null, result.Path).GetAwaiter().GetResult();
+        True(!Directory.Exists(jobTemp), "An idempotent commit recreated an empty job directory.");
+    }
+
+    private static void YouTubeServiceRecoversWhenFfprobeWasInterrupted()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        const string jobId = "recover-during-ffprobe";
+        var expectedPath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllBytes(expectedPath, new byte[19_000]);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new NativeProcessResult(0, string.Empty, string.Empty);
+            });
+        var interruptedValidator = new RecordingMediaFileValidator
+        {
+            Failure = new OperationCanceledException("simulated crash during ffprobe")
+        };
+        var first = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths),
+            interruptedValidator);
+
+        Throws<OperationCanceledException>(() => first.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(
+                PreservePartialOnCancellation: true,
+                DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult());
+
+        var recoveryRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)));
+        var recoveryValidator = new RecordingMediaFileValidator();
+        var recovery = new YouTubeService(
+            "tools",
+            recoveryRunner,
+            new SinglePathsFactory(paths),
+            recoveryValidator);
+        var result = recovery.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(ResumePartial: true, DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(1, recoveryRunner.Calls.Count);
+        Equal(1, recoveryValidator.CallCount);
+        recovery.CommitCompletedAsync(jobId, null, result.Path).GetAwaiter().GetResult();
+    }
+
+    private static void YouTubeServiceRecoversAfterValidationBeforeQueueCommit()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        const string jobId = "recover-after-validation";
+        var expectedPath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllBytes(expectedPath, new byte[19_000]);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new NativeProcessResult(0, string.Empty, string.Empty);
+            });
+        var firstValidator = new RecordingMediaFileValidator();
+        var first = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths),
+            firstValidator);
+        var firstResult = first.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, firstResult.Path);
+        Equal(1, firstValidator.CallCount);
+        True(File.Exists(Path.Combine(paths.TempRoot, jobId, "output-manifest.json")),
+            "Validation removed the manifest before the queue commit.");
+
+        var recoveryRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)));
+        var recoveryValidator = new RecordingMediaFileValidator();
+        var recovery = new YouTubeService(
+            "tools",
+            recoveryRunner,
+            new SinglePathsFactory(paths),
+            recoveryValidator);
+        var recovered = recovery.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(ResumePartial: true, DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(firstResult.Path, recovered.Path);
+        Equal(1, recoveryRunner.Calls.Count);
+        Equal(1, recoveryValidator.CallCount);
+        recovery.CommitCompletedAsync(jobId, null, recovered.Path).GetAwaiter().GetResult();
+    }
+
+    private static void YouTubeServiceReplacesOnlyInvalidManifestOwnedOutputs()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        const string jobId = "recover-invalid-output";
+        var stem = "Me at the zoo [jNQXAC9IVRw]";
+        var expectedPath = Path.Combine(paths.Home, $"{stem}.mp4");
+        var userFile = Path.Combine(paths.Home, $"{stem}.notes.txt");
+        var firstRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllText(expectedPath, "invalid owned output");
+                File.WriteAllText(userFile, "user data");
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                throw new OperationCanceledException("simulated crash before validation");
+            });
+        var first = new YouTubeService(
+            "tools",
+            firstRunner,
+            new SinglePathsFactory(paths),
+            new RecordingMediaFileValidator());
+        Throws<OperationCanceledException>(() => first.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(
+                PreservePartialOnCancellation: true,
+                DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult());
+
+        var recoveryRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                True(!File.Exists(expectedPath), "The invalid owned output was not removed before retry.");
+                True(File.Exists(userFile), "A non-manifest user file was removed during recovery.");
+                var outputIndex = call.Arguments.ToList().IndexOf("--output");
+                Equal($"{stem}.%(ext)s", call.Arguments[outputIndex + 1]);
+                File.WriteAllBytes(expectedPath, new byte[19_000]);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                return new NativeProcessResult(0, string.Empty, string.Empty);
+            });
+        var validator = new ScriptedMediaFileValidator(
+            (_, _, _) => throw new MediaValidationException(),
+            (path, _, _) => Task.FromResult(
+                new MediaValidationResult("mov,mp4", 19, new FileInfo(path).Length, 1, 1)));
+        var recovery = new YouTubeService(
+            "tools",
+            recoveryRunner,
+            new SinglePathsFactory(paths),
+            validator);
+        var result = recovery.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(ResumePartial: true, DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(expectedPath, result.Path);
+        Equal(2, validator.CallCount);
+        Equal("user data", File.ReadAllText(userFile));
+        recovery.CommitCompletedAsync(jobId, null, result.Path).GetAwaiter().GetResult();
+    }
+
+    private static void YouTubeServiceNeverAdoptsOrDeletesReplacedManifestOutputs()
+    {
+        VerifyReplacedManifestOutputIsPreserved("invalid", Encoding.UTF8.GetBytes("foreign file"));
+        var plausibleMedia = Enumerable.Repeat((byte)0x5a, 19_000).ToArray();
+        VerifyReplacedManifestOutputIsPreserved("valid", plausibleMedia);
+    }
+
+    private static void VerifyReplacedManifestOutputIsPreserved(
+        string suffix,
+        byte[] replacement)
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var jobId = $"replaced-output-{suffix}";
+        var expectedPath = Path.Combine(paths.Home, "Me at the zoo [jNQXAC9IVRw].mp4");
+        var original = Enumerable.Repeat((byte)0x11, 19_000).ToArray();
+        var firstRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllBytes(expectedPath, original);
+                await call.OnOutput!($"VR_FILE:{JsonSerializer.Serialize(expectedPath)}");
+                throw new OperationCanceledException("simulated crash after after_move");
+            });
+        var first = new YouTubeService(
+            "tools",
+            firstRunner,
+            new SinglePathsFactory(paths),
+            new RecordingMediaFileValidator());
+        Throws<OperationCanceledException>(() => first.StartDownloadAsync(
+            jobId,
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(DurableOutputIdentity: true),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult());
+
+        File.WriteAllBytes(expectedPath, replacement);
+        var validator = new RecordingMediaFileValidator();
+        var recoveryRunner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)));
+        var recovery = new YouTubeService(
+            "tools",
+            recoveryRunner,
+            new SinglePathsFactory(paths),
+            validator);
+        MediaDownloadException? failure = null;
+        try
+        {
+            _ = recovery.StartDownloadAsync(
+                jobId,
+                "https://youtu.be/jNQXAC9IVRw",
+                DownloadSelection.Video(1080),
+                null,
+                new DownloadRunOptions(ResumePartial: true, DurableOutputIdentity: true),
+                _ => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (MediaDownloadException exception)
+        {
+            failure = exception;
+        }
+
+        Equal("OUTPUT_OWNERSHIP_MISMATCH", failure?.Code);
+        Equal(1, recoveryRunner.Calls.Count);
+        Equal(0, validator.CallCount);
+        True(File.ReadAllBytes(expectedPath).SequenceEqual(replacement),
+            $"The {suffix} same-name replacement was adopted or modified.");
+
+        recovery.DiscardPartialAsync(jobId, null).GetAwaiter().GetResult();
+        True(File.ReadAllBytes(expectedPath).SequenceEqual(replacement),
+            $"Discard deleted the {suffix} same-name replacement.");
+        True(!Directory.Exists(Path.Combine(paths.TempRoot, jobId)),
+            "Discard did not release the mismatched durable identity.");
+    }
+
+    private static void YouTubeServiceRequiresTheSelectedSubtitleKind()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)));
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths));
+
+        Throws<InvalidDataException>(() => service.StartDownloadAsync(
+            "subtitle-kind-job",
+            "https://youtu.be/jNQXAC9IVRw",
+            new DownloadSelection(
+                720,
+                SubtitleLanguage: "pt-BR",
+                IncludeAutomaticSubtitles: true),
+            null,
+            new DownloadRunOptions(),
+            _ => Task.CompletedTask,
+            CancellationToken.None).GetAwaiter().GetResult());
+        Equal(1, runner.Calls.Count);
+    }
+
+    private static void YouTubeServiceRejectsUnavailableDestinationVolume()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(
+                0,
+                ReadFixture(),
+                string.Empty)));
+        var probe = new FixedVolumeSpaceProbe(VolumeSpaceStatus.Unavailable);
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new SinglePathsFactory(paths),
+            TimeProvider.System,
+            probe);
+
+        try
+        {
+            service.StartDownloadAsync(
+                "job-unavailable-volume",
+                "https://youtu.be/jNQXAC9IVRw",
+                720,
+                _ => Task.CompletedTask,
+                CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (MediaDownloadException exception)
+        {
+            Equal("STORAGE_UNAVAILABLE", exception.Code);
+            Equal("STORAGE_UNAVAILABLE", service.GetJob()!.ErrorCode);
+            Equal(1, runner.Calls.Count);
+            True(probe.CallCount > 0, "The destination volume was not checked.");
+            True(
+                !exception.Message.Contains(paths.Home, StringComparison.OrdinalIgnoreCase),
+                "The unavailable-volume error leaked the destination path.");
+            return;
+        }
+
+        throw new InvalidOperationException("An unavailable destination volume was accepted.");
     }
 
     private static void YouTubeServiceReusesInstagramMetadataForDownload()
@@ -483,7 +1264,7 @@ internal static partial class TestSuite
         var service = new YouTubeService(
             "tools",
             runner,
-            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            new SinglePathsFactory(paths),
             time);
 
         service.ListFormatsAsync(instagramUrl, CancellationToken.None).GetAwaiter().GetResult();
@@ -757,6 +1538,42 @@ internal static partial class TestSuite
         Equal(0, invalidRunner.Calls.Count);
     }
 
+    private static void YouTubeServicePausePreservesAndDiscardRemovesPartials()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var downloadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var partialPath = Path.Combine(paths.TempRoot, "paused-job", "media.part");
+        var runner = new ScriptedProcessRunner(
+            _ => Task.FromResult(new NativeProcessResult(0, ReadFixture(), string.Empty)),
+            async call =>
+            {
+                File.WriteAllText(partialPath, "partial");
+                downloadStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, call.CancellationToken);
+                throw new InvalidOperationException("Unreachable paused download continuation.");
+            });
+        var factory = new SinglePathsFactory(paths);
+        var service = new YouTubeService("tools", runner, factory);
+
+        var active = service.StartDownloadAsync(
+            "paused-job",
+            "https://youtu.be/jNQXAC9IVRw",
+            DownloadSelection.Video(1080),
+            null,
+            new DownloadRunOptions(),
+            _ => Task.CompletedTask,
+            CancellationToken.None);
+        True(downloadStarted.Task.Wait(TimeSpan.FromSeconds(5)), "Download did not reach its resumable partial.");
+
+        service.PauseAsync("paused-job").GetAwaiter().GetResult();
+        Throws<OperationCanceledException>(() => active.GetAwaiter().GetResult());
+        True(File.Exists(partialPath), "Pause deleted the resumable partial.");
+
+        service.DiscardPartialAsync("paused-job", null).GetAwaiter().GetResult();
+        True(!Directory.Exists(Path.Combine(paths.TempRoot, "paused-job")), "Explicit discard left paused partials behind.");
+    }
+
     private static void ProcessRunnerCancellationKillsTheChildTree()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -780,6 +1597,60 @@ internal static partial class TestSuite
         cancellation.Cancel();
         Throws<OperationCanceledException>(() => run.GetAwaiter().GetResult());
         True(SpinWait.SpinUntil(() => !IsProcessRunning(pid), TimeSpan.FromSeconds(5)), "Cancellation did not kill the child process tree.");
+    }
+
+    private static void ProcessRunnerHardTimeoutKillsTheChildTree()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        const string script = "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru; Write-Output $child.Id; Wait-Process -Id $child.Id";
+        var childPid = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new VideoRadar.NativeHost.Processes.ProcessRunner(TimeSpan.FromSeconds(3));
+        var run = runner.RunAsync(
+            "powershell.exe",
+            ["-NoProfile", "-Command", script],
+            line =>
+            {
+                if (int.TryParse(line, out var pid)) childPid.TrySetResult(pid);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        True(childPid.Task.Wait(TimeSpan.FromSeconds(10)), "Controlled child process did not start before the timeout.");
+        var pid = childPid.Task.GetAwaiter().GetResult();
+        Throws<TimeoutException>(() => run.GetAwaiter().GetResult());
+        True(SpinWait.SpinUntil(() => !IsProcessRunning(pid), TimeSpan.FromSeconds(5)), "Hard timeout did not kill the child process tree.");
+    }
+
+    private static void ProcessRunnerBoundsCapturedOutputAndOversizedLines()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        const string script = "[Console]::Out.WriteLine('ok'); [Console]::Out.WriteLine(('X' * 40)); [Console]::Out.Write('last'); [Console]::Error.Write(('B' * 80))";
+        var lines = new List<string>();
+        var runner = new VideoRadar.NativeHost.Processes.ProcessRunner(
+            TimeSpan.FromSeconds(10),
+            maximumStandardOutputChars: 32,
+            maximumStandardErrorChars: 24,
+            maximumOutputLineChars: 16);
+
+        var result = runner.RunAsync(
+            "powershell.exe",
+            ["-NoProfile", "-Command", script],
+            line =>
+            {
+                lines.Add(line);
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(0, result.ExitCode);
+        Equal(32, result.StandardOutput.Length);
+        Equal(24, result.StandardError.Length);
+        True(result.StandardOutputTruncated, "Oversized stdout was not marked as truncated.");
+        True(result.StandardErrorTruncated, "Oversized stderr was not marked as truncated.");
+        True(result.StandardError.All(character => character == 'B'), "Bounded stderr did not retain its diagnostic tail.");
+        True(lines.SequenceEqual(["ok", "last"]), "An oversized output line reached the callback or valid lines were lost.");
     }
 
     private static void ProcessRunnerClosesChildStandardInput()
@@ -898,12 +1769,65 @@ internal static partial class TestSuite
         }
     }
 
+    private sealed class SinglePathsFactory(IDownloadPaths paths) : IDownloadPathsFactory
+    {
+        public IDownloadPaths Create(string? destinationFolder)
+        {
+            True(destinationFolder is null, "The single-path test factory received an unexpected destination.");
+            return paths;
+        }
+    }
+
+    private sealed class RecordingMediaFileValidator : IMediaFileValidator
+    {
+        public int CallCount { get; private set; }
+        public string? Path { get; private set; }
+        public MediaValidationRequest? Request { get; private set; }
+        public Exception? Failure { get; init; }
+
+        public Task<MediaValidationResult> ValidateAsync(
+            string path,
+            MediaValidationRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
+            Path = path;
+            Request = request;
+            if (Failure is not null) throw Failure;
+            return Task.FromResult(new MediaValidationResult("mov,mp4", 19, 19_000, 1, 1));
+        }
+    }
+
+    private sealed class ScriptedMediaFileValidator(
+        params Func<string, MediaValidationRequest, CancellationToken, Task<MediaValidationResult>>[] handlers)
+        : IMediaFileValidator
+    {
+        private readonly Queue<Func<string, MediaValidationRequest, CancellationToken, Task<MediaValidationResult>>>
+            handlers = new(handlers);
+
+        public int CallCount { get; private set; }
+
+        public Task<MediaValidationResult> ValidateAsync(
+            string path,
+            MediaValidationRequest request,
+            CancellationToken cancellationToken)
+        {
+            CallCount++;
+            if (handlers.Count == 0) throw new InvalidOperationException("Unexpected media validation.");
+            return handlers.Dequeue()(path, request, cancellationToken);
+        }
+    }
+
     private sealed class RecordingFileTransfer(bool sameVolume) : IFileTransfer
     {
         public List<string> Operations { get; } = [];
         public HashSet<string> ReparsePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? CopyError { get; init; }
         public Exception? DeleteSourceError { get; init; }
+        public Exception? PromoteErrorAfterMove { get; set; }
+        public ManualResetEventSlim? CopyStartedSignal { get; init; }
+        public ManualResetEventSlim? CopyReleaseSignal { get; init; }
 
         public FileAttributes GetAttributes(string path)
         {
@@ -922,6 +1846,8 @@ internal static partial class TestSuite
         public void CopyToPartial(string source, string partial)
         {
             Operations.Add("copy");
+            CopyStartedSignal?.Set();
+            CopyReleaseSignal?.Wait();
             File.Copy(source, partial, overwrite: false);
             if (CopyError is not null) throw CopyError;
         }
@@ -930,6 +1856,7 @@ internal static partial class TestSuite
         {
             Operations.Add("promote");
             File.Move(partial, destination, overwrite: false);
+            if (PromoteErrorAfterMove is not null) throw PromoteErrorAfterMove;
         }
 
         public void DeleteSource(string source)
@@ -943,6 +1870,19 @@ internal static partial class TestSuite
         {
             Operations.Add("delete-partial");
             if (File.Exists(partial)) File.Delete(partial);
+        }
+    }
+
+    private sealed class FixedVolumeSpaceProbe(VolumeSpaceStatus status) : IVolumeSpaceProbe
+    {
+        public int CallCount { get; private set; }
+
+        public VolumeSpaceStatus Check(string volumeRoot, long requiredBytes)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(volumeRoot);
+            True(requiredBytes > 0, "The volume probe received an invalid requirement.");
+            CallCount++;
+            return status;
         }
     }
 }

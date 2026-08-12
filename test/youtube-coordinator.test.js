@@ -7,7 +7,7 @@ import { HOST_COMMANDS, YOUTUBE_ACTIONS } from '../src/youtube/protocol.js';
 const VIDEO_ID = 'jNQXAC9IVRw';
 const CANONICAL_URL = `https://www.youtube.com/watch?v=${VIDEO_ID}`;
 const JOB_FIELDS = [
-  'jobId', 'videoId', 'title', 'url', 'height', 'format',
+  'jobId', 'operationId', 'videoId', 'title', 'url', 'height', 'format',
   'stage', 'percent', 'downloadedBytes', 'totalBytes', 'speedBytesPerSecond', 'etaSeconds',
   'path', 'error', 'updatedAt',
 ];
@@ -20,6 +20,20 @@ const CATALOG = Object.freeze({
     Object.freeze({ height: 720, label: '720p', container: 'webm', combined: true }),
   ]),
 });
+const RICH_CATALOG = Object.freeze({
+  ...CATALOG,
+  formats: Object.freeze([Object.freeze({
+    formatId: '140', height: null, container: 'm4a', combined: false,
+    audioOnly: true, fps: null, hdr: false, dynamicRange: null,
+    videoCodec: null, audioCodec: 'mp4a.40.2', bitrateKbps: 128,
+    fileSizeBytes: 1_000_000, fileSizeApproximate: false, language: 'pt-BR',
+  })]),
+  subtitles: Object.freeze([Object.freeze({
+    language: 'pt-BR', label: 'Português', automatic: false,
+    containers: Object.freeze(['vtt']),
+  })]),
+  audioLanguages: Object.freeze(['pt-BR']),
+});
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -28,20 +42,25 @@ function clone(value) {
 function memoryLocal(initial = {}, { beforeSet } = {}) {
   const values = clone(initial);
   const calls = { get: [], set: [], remove: [] };
+  let youtubeWriteCount = 0;
   return {
     values,
     calls,
     async get(key) {
-      calls.get.push(key);
-      if (typeof key !== 'string') throw new Error('expected one storage.local key');
-      return Object.hasOwn(values, key) ? { [key]: clone(values[key]) } : {};
+      calls.get.push(clone(key));
+      const keys = Array.isArray(key) ? key : [key];
+      return Object.fromEntries(keys.filter((name) => Object.hasOwn(values, name))
+        .map((name) => [name, clone(values[name])]));
     },
     async set(entries) {
       calls.set.push(clone(entries));
-      assert.deepEqual(Object.keys(entries), ['youtubeJob']);
-      assert.deepEqual(Object.keys(entries.youtubeJob), JOB_FIELDS);
-      await beforeSet?.(entries.youtubeJob, calls.set.length);
-      values.youtubeJob = clone(entries.youtubeJob);
+      const keys = Object.keys(entries);
+      if (keys.length === 1 && keys[0] === 'youtubeJob') {
+        assert.deepEqual(Object.keys(entries.youtubeJob), JOB_FIELDS);
+        youtubeWriteCount += 1;
+        await beforeSet?.(entries.youtubeJob, youtubeWriteCount);
+      }
+      Object.assign(values, clone(entries));
     },
     async remove(key) {
       calls.remove.push(key);
@@ -58,7 +77,7 @@ function startedEvent(jobId = 'job-1', requestId = 'start-1') {
   return {
     type: 'jobStarted', requestId, jobId,
     job: {
-      jobId, videoId: '', title: '', height: 720, stage: 'preparing',
+      jobId, operationId: 'media-test', videoId: '', title: '', height: 720, stage: 'preparing',
       percent: null, path: null, errorCode: null,
     },
   };
@@ -77,7 +96,7 @@ function progress(jobId, stage, percent, overrides = {}) {
 
 function persistedJob(overrides = {}) {
   return {
-    jobId: 'job-1', videoId: VIDEO_ID, title: CATALOG.title, url: CANONICAL_URL,
+    jobId: 'job-1', operationId: null, videoId: VIDEO_ID, title: CATALOG.title, url: CANONICAL_URL,
     height: 720, format: clone(CATALOG.qualities[1]),
     stage: 'preparing', percent: null,
     downloadedBytes: null, totalBytes: null, speedBytesPerSecond: null, etaSeconds: null,
@@ -90,23 +109,31 @@ function createEnv({
   initial,
   request,
   localOptions,
+  createStartOperationId = () => 'media-test',
   preferences = {
     schemaVersion: 2,
     askEveryTime: false,
     defaultFolder: String.raw`C:\Downloads\Video Radar`,
   },
+  onQueueEvent = () => {},
 } = {}) {
   const storageLocal = memoryLocal({ downloadPreferences: preferences, ...initial }, localOptions);
   const requests = [];
   const notificationCalls = [];
+  const keepAliveCalls = [];
   let tick = 1_000;
   const nativeClient = {
+    setKeepAlive(reason, active) {
+      keepAliveCalls.push({ reason, active });
+    },
     async request(type, payload) {
       requests.push({ type, payload: clone(payload) });
       if (request) return request(type, payload, requests.length);
       if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
       if (type === HOST_COMMANDS.START_DOWNLOAD) return startedEvent();
-      if (type === HOST_COMMANDS.CANCEL_DOWNLOAD) return { requested: true, requestId: 'cancel-1' };
+      if (type === HOST_COMMANDS.CANCEL_DOWNLOAD) {
+        return { type: 'jobCancelled', requestId: 'cancel-1', jobId: payload.jobId };
+      }
       if (type === HOST_COMMANDS.REVEAL_DOWNLOADED_FILE) {
         return { type: 'fileRevealed', requestId: 'reveal-1' };
       }
@@ -119,8 +146,39 @@ function createEnv({
   };
   const coordinator = createYouTubeCoordinator({
     nativeClient, storageLocal, notifications, now: () => tick++,
+    createStartOperationId, onQueueEvent,
   });
-  return { coordinator, storageLocal, requests, notificationCalls };
+  return { coordinator, storageLocal, requests, notificationCalls, keepAliveCalls };
+}
+
+function queuedEvent({ operationId, jobId, selection, position, media = null }) {
+  const job = {
+    jobId,
+    operationId,
+    url: CANONICAL_URL,
+    selection: clone(selection),
+    destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    state: 'queued',
+    videoId: media?.videoId ?? '',
+    title: media?.title ?? '',
+    stage: 'queued',
+    percent: null,
+    downloadedBytes: null,
+    totalBytes: null,
+    speedBytesPerSecond: null,
+    etaSeconds: null,
+    path: null,
+    errorCode: null,
+    resumePartial: false,
+    attemptCount: 0,
+    position,
+    createdAt: '2026-08-12T12:00:00Z',
+    updatedAt: '2026-08-12T12:00:00Z',
+  };
+  return {
+    type: 'jobQueued', requestId: `start-${position}`, jobId, operationId,
+    replayed: false, position, job,
+  };
 }
 
 async function start(env, url = `https://youtu.be/${VIDEO_ID}`) {
@@ -153,15 +211,90 @@ test('lista formatos sem persistir e reutiliza o catálogo em memória ao inicia
   assert.deepEqual(env.requests.at(-1), {
     type: HOST_COMMANDS.START_DOWNLOAD,
     payload: {
+      operationId: 'media-test',
       url: CANONICAL_URL,
       height: 720,
       destinationFolder: String.raw`C:\Downloads\Video Radar`,
     },
   });
-  assert.deepEqual(snapshot, persistedJob({ updatedAt: 1_000 }));
+  assert.deepEqual(snapshot, persistedJob({ operationId: 'media-test', updatedAt: 1_003 }));
   assert.deepEqual(env.storageLocal.values.youtubeJob, snapshot);
   assert.deepEqual(Object.keys(env.coordinator), ['ready', 'handle', 'handleHostEvent']);
   assert.equal(Object.isFrozen(env.coordinator), true);
+});
+
+test('v5 enfileira seleções ricas consecutivas, incluindo áudio, sem bloqueio de job único', async () => {
+  const operations = ['media-rich-video', 'media-rich-audio'];
+  const observed = [];
+  const env = createEnv({
+    createStartOperationId: () => operations.shift(),
+    onQueueEvent: (event) => observed.push(clone(event)),
+    request(type, payload) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) {
+        return { type: 'formats', requestId: 'rich-formats', ...clone(RICH_CATALOG) };
+      }
+      if (type === HOST_COMMANDS.START_DOWNLOAD) {
+        const suffix = payload.selection.audioOnly ? 'audio' : 'video';
+        return queuedEvent({
+          operationId: payload.operationId,
+          jobId: `job-${suffix}`,
+          selection: payload.selection,
+          position: suffix === 'video' ? 1 : 2,
+          media: payload.media,
+        });
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+  await env.coordinator.ready;
+  await env.coordinator.handle(message(YOUTUBE_ACTIONS.LIST_FORMATS, { url: CANONICAL_URL }));
+
+  const videoSelection = {
+    height: 720, audioOnly: false, subtitleLanguage: 'pt-BR',
+    includeAutomaticSubtitles: false,
+  };
+  const audioSelection = {
+    height: null, audioOnly: true, subtitleLanguage: null,
+    includeAutomaticSubtitles: false,
+  };
+  const video = await env.coordinator.handle(message(YOUTUBE_ACTIONS.START_DOWNLOAD, {
+    url: CANONICAL_URL, selection: videoSelection,
+  }));
+  const audio = await env.coordinator.handle(message(YOUTUBE_ACTIONS.START_DOWNLOAD, {
+    url: CANONICAL_URL, selection: audioSelection,
+  }));
+
+  assert.equal(video.stage, 'queued');
+  assert.equal(video.height, 720);
+  assert.equal(audio.stage, 'queued');
+  assert.equal(audio.height, 0);
+  assert.deepEqual(audio.format, {
+    height: 0, label: 'Somente áudio', container: 'm4a', combined: false,
+  });
+  assert.deepEqual(
+    env.requests.filter(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD)
+      .map(({ payload }) => payload),
+    [
+      {
+        operationId: 'media-rich-video', url: CANONICAL_URL,
+        selection: videoSelection,
+        media: { videoId: VIDEO_ID, title: RICH_CATALOG.title },
+        destinationFolder: String.raw`C:\Downloads\Video Radar`,
+      },
+      {
+        operationId: 'media-rich-audio', url: CANONICAL_URL,
+        selection: audioSelection,
+        media: { videoId: VIDEO_ID, title: RICH_CATALOG.title },
+        destinationFolder: String.raw`C:\Downloads\Video Radar`,
+      },
+    ],
+  );
+  assert.equal(observed.length, 2);
+  assert.deepEqual(observed.map(({ job }) => [job.videoId, job.title]), [
+    [VIDEO_ID, RICH_CATALOG.title],
+    [VIDEO_ID, RICH_CATALOG.title],
+  ]);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
 });
 
 test('lista formatos sociais allowlisted usando o mesmo coordenador persistente', async () => {
@@ -274,6 +407,7 @@ test('valida payload/altura, busca catálogo ausente e só resolve start após p
     {
       type: HOST_COMMANDS.START_DOWNLOAD,
       payload: {
+        operationId: 'media-test',
         url: CANONICAL_URL,
         height: 720,
         destinationFolder: String.raw`C:\Downloads\Video Radar`,
@@ -282,6 +416,56 @@ test('valida payload/altura, busca catálogo ausente e só resolve start após p
   ]);
   releaseWrite();
   assert.deepEqual(await pending, env.storageLocal.values.youtubeJob);
+});
+
+test('rejeita operationId não textual antes de persistir ou iniciar no host', async () => {
+  const env = createEnv({ createStartOperationId: () => 42 });
+
+  await assert.rejects(start(env), /inválida/i);
+
+  assert.equal(
+    env.requests.some(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD),
+    false,
+  );
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+});
+
+test('preserva evento terminal quando o buffer pré-start atinge o limite', async () => {
+  let signalStartRequest;
+  const startRequested = new Promise((resolve) => { signalStartRequest = resolve; });
+  let releaseStart;
+  const startResponse = new Promise((resolve) => { releaseStart = resolve; });
+  const env = createEnv({
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.START_DOWNLOAD) {
+        signalStartRequest();
+        return startResponse;
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  const pending = start(env);
+  await startRequested;
+  for (let percent = 0; percent < 64; percent += 1) {
+    await env.coordinator.handleHostEvent(progress('job-1', 'video', percent));
+  }
+  await env.coordinator.handleHostEvent({
+    type: 'jobCompleted', requestId: 'completed-before-start-response', jobId: 'job-1',
+    path: 'C:\\Downloads\\video.mp4',
+  });
+  await env.coordinator.handleHostEvent({
+    type: 'jobCancelled', requestId: 'stale-terminal', jobId: 'old-job',
+  });
+  await env.coordinator.handleHostEvent(progress('job-1', 'video', 99));
+  releaseStart(startedEvent());
+
+  const snapshot = await pending;
+  assert.equal(snapshot.stage, 'complete');
+  assert.equal(snapshot.percent, 100);
+  assert.equal(snapshot.path, 'C:\\Downloads\\video.mp4');
+  assert.equal(env.notificationCalls.length, 1);
 });
 
 test('youtube pergunta a pasta antes de iniciar', async () => {
@@ -309,6 +493,7 @@ test('youtube pergunta a pasta antes de iniciar', async () => {
       {
         type: HOST_COMMANDS.START_DOWNLOAD,
         payload: {
+          operationId: 'media-test',
           url: CANONICAL_URL,
           height: 720,
           destinationFolder: String.raw`D:\Aulas`,
@@ -360,7 +545,7 @@ test('cancelar seletor não inicia youtube', async () => {
     env.requests.some(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD),
     false,
   );
-  assert.equal(env.storageLocal.calls.set.length, 0);
+  assert.equal(env.storageLocal.calls.set.filter((entry) => Object.hasOwn(entry, 'youtubeJob')).length, 0);
 });
 
 test('serializa eventos e mantém estágio/progresso monotônicos', async () => {
@@ -388,7 +573,10 @@ test('serializa eventos e mantém estágio/progresso monotônicos', async () => 
   await writeStartedPromise;
   const stale = env.coordinator.handleHostEvent(progress('job-1', 'preparing', 99));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(env.storageLocal.calls.set.length, 2);
+  assert.equal(
+    env.storageLocal.calls.set.filter((entry) => Object.hasOwn(entry, 'youtubeJob')).length,
+    2,
+  );
   releaseWrite();
   await Promise.all([advancing, stale]);
   assert.equal(env.storageLocal.values.youtubeJob.stage, 'video');
@@ -418,7 +606,7 @@ test('persiste conclusão e envia uma única notificação sem expor caminho', a
     await start(env);
     const completed = {
       type: 'jobCompleted', requestId: 'start-1', jobId: 'job-1',
-      path: 'C:/Users/Test/Downloads/video.mp4',
+      path: 'C:\\Users\\Test\\Downloads\\video.mp4',
     };
     await Promise.all([
       env.coordinator.handleHostEvent(completed),
@@ -445,25 +633,41 @@ test('persiste conclusão e envia uma única notificação sem expor caminho', a
 });
 
 test('deduplica cancelamento e só o evento correlacionado altera o snapshot', async () => {
-  const env = createEnv();
+  let confirmCancel;
+  const env = createEnv({
+    request(type, payload) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.START_DOWNLOAD) return startedEvent();
+      if (type === HOST_COMMANDS.CANCEL_DOWNLOAD) {
+        return new Promise((resolve) => {
+          confirmCancel = () => resolve({
+            type: 'jobCancelled', requestId: 'cancel-1', jobId: payload.jobId,
+          });
+        });
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
   await start(env);
   const before = clone(env.storageLocal.values.youtubeJob);
 
-  assert.deepEqual(await env.coordinator.handle(message(YOUTUBE_ACTIONS.CANCEL_DOWNLOAD, {
+  const first = env.coordinator.handle(message(YOUTUBE_ACTIONS.CANCEL_DOWNLOAD, {
     jobId: 'job-1',
-  })), { requested: true });
-  assert.deepEqual(await env.coordinator.handle(message(YOUTUBE_ACTIONS.CANCEL_DOWNLOAD, {
+  }));
+  const second = env.coordinator.handle(message(YOUTUBE_ACTIONS.CANCEL_DOWNLOAD, {
     jobId: 'job-1',
-  })), { requested: true });
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(env.requests.filter(({ type }) => type === HOST_COMMANDS.CANCEL_DOWNLOAD).length, 1);
   assert.deepEqual(env.storageLocal.values.youtubeJob, before);
+  confirmCancel();
+  assert.deepEqual(await Promise.all([first, second]), [
+    { requested: true }, { requested: true },
+  ]);
+  assert.equal(env.storageLocal.values.youtubeJob.stage, 'cancelled');
 
   await env.coordinator.handleHostEvent({
     type: 'jobCancelled', requestId: 'start-1', jobId: 'other-job',
-  });
-  assert.deepEqual(env.storageLocal.values.youtubeJob, before);
-  await env.coordinator.handleHostEvent({
-    type: 'jobCancelled', requestId: 'start-1', jobId: 'job-1',
   });
   assert.equal(env.storageLocal.values.youtubeJob.stage, 'cancelled');
   assert.equal(env.storageLocal.values.youtubeJob.error, null);
@@ -501,7 +705,7 @@ test('ignora jobId divergente, salva falha segura e interrompe somente job ativo
 test('recriação consulta GET_JOB para ativo e reconcilia host nulo ou válido', async () => {
   const missing = createEnv({ initial: { youtubeJob: persistedJob() } });
   await missing.coordinator.ready;
-  assert.deepEqual(missing.storageLocal.calls.get, ['youtubeJob']);
+  assert.deepEqual(missing.storageLocal.calls.get, [['youtubeJob', 'mediaStartIntent']]);
   assert.deepEqual(missing.requests, [{ type: HOST_COMMANDS.GET_JOB, payload: {} }]);
   assert.equal(missing.storageLocal.values.youtubeJob.stage, 'interrupted');
   assert.equal(missing.storageLocal.values.youtubeJob.error, 'NATIVE_JOB_MISSING');
@@ -542,8 +746,272 @@ test('mantém terminal sem conectar e remove storage corrompido com segurança',
 
   const corrupted = createEnv({ initial: { youtubeJob: { stage: 'video', path: 'x'.repeat(2_000) } } });
   await corrupted.coordinator.ready;
-  assert.deepEqual(corrupted.storageLocal.calls.get, ['youtubeJob']);
+  assert.deepEqual(corrupted.storageLocal.calls.get, [['youtubeJob', 'mediaStartIntent']]);
   assert.deepEqual(corrupted.storageLocal.calls.remove, ['youtubeJob']);
   assert.equal(await corrupted.coordinator.handle(message(YOUTUBE_ACTIONS.GET_JOB, {})), null);
   assert.deepEqual(corrupted.requests, []);
+
+  const coercedError = createEnv({
+    initial: { youtubeJob: persistedJob({ stage: 'failed', error: 123 }) },
+  });
+  await coercedError.coordinator.ready;
+  assert.equal(Object.hasOwn(coercedError.storageLocal.values, 'youtubeJob'), false);
+  assert.deepEqual(coercedError.requests, []);
+});
+
+test('recupera intenção com catálogo durável sem sobrescrever com o job terminal anterior', async () => {
+  const intent = {
+    operationId: 'media-recovered',
+    url: CANONICAL_URL,
+    height: 720,
+    destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    catalog: clone(CATALOG),
+    createdAt: 50,
+  };
+  const previous = persistedJob({
+    jobId: 'old-job',
+    stage: 'complete',
+    percent: 100,
+    path: String.raw`C:\Downloads\old.mp4`,
+  });
+  const env = createEnv({
+    initial: { youtubeJob: previous, mediaStartIntent: intent },
+    request(type) {
+      assert.equal(type, HOST_COMMANDS.GET_JOB);
+      return {
+        type: 'ready',
+        requestId: 'recover-1',
+        job: {
+          jobId: 'new-job',
+          operationId: 'media-recovered',
+          videoId: VIDEO_ID,
+          title: CATALOG.title,
+          height: 720,
+          stage: 'video',
+          percent: 30,
+          path: null,
+          errorCode: null,
+        },
+      };
+    },
+  });
+
+  const recovered = await env.coordinator.ready;
+
+  assert.equal(recovered.jobId, 'new-job');
+  assert.equal(recovered.operationId, 'media-recovered');
+  assert.equal(recovered.stage, 'video');
+  assert.equal(env.storageLocal.values.youtubeJob.jobId, 'new-job');
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+  assert.deepEqual(env.requests, [{ type: HOST_COMMANDS.GET_JOB, payload: {} }]);
+});
+
+test('remove intenção corrompida sem encaminhar URL não allowlisted ao host', async () => {
+  const env = createEnv({
+    initial: {
+      mediaStartIntent: {
+        operationId: 'media-corrupt',
+        url: 'https://evil.test/video',
+        height: 720,
+        destinationFolder: String.raw`C:\Downloads\Video Radar`,
+        createdAt: 50,
+      },
+    },
+    request() {
+      throw new Error('host must not receive a corrupt intent');
+    },
+  });
+
+  assert.equal(await env.coordinator.ready, null);
+  assert.deepEqual(env.requests, []);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+
+  const nonObject = createEnv({ initial: { mediaStartIntent: 'corrupt' } });
+  assert.equal(await nonObject.coordinator.ready, null);
+  assert.deepEqual(nonObject.requests, []);
+  assert.equal(Object.hasOwn(nonObject.storageLocal.values, 'mediaStartIntent'), false);
+});
+
+test('preserva intenção válida quando a reconciliação falha de modo transitório', async () => {
+  const intent = {
+    operationId: 'media-retry',
+    url: CANONICAL_URL,
+    height: 720,
+    destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    catalog: clone(CATALOG),
+    createdAt: 50,
+  };
+  const env = createEnv({
+    initial: { mediaStartIntent: intent },
+    request(type) {
+      assert.equal(type, HOST_COMMANDS.GET_JOB);
+      throw Object.assign(new Error('host unavailable'), { code: 'NATIVE_DISCONNECTED' });
+    },
+  });
+
+  assert.equal(await env.coordinator.ready, null);
+  assert.deepEqual(env.storageLocal.values.mediaStartIntent, intent);
+  assert.deepEqual(env.storageLocal.calls.remove, []);
+  assert.deepEqual(env.requests, [{ type: HOST_COMMANDS.GET_JOB, payload: {} }]);
+  assert.deepEqual(env.keepAliveCalls.at(-1), { reason: 'media-job', active: true });
+});
+
+test('remove intenção válida após resposta conclusiva sem job correspondente', async () => {
+  const intent = {
+    operationId: 'media-missing',
+    url: CANONICAL_URL,
+    height: 720,
+    destinationFolder: String.raw`C:\Downloads\Video Radar`,
+    catalog: clone(CATALOG),
+    createdAt: 50,
+  };
+  const env = createEnv({ initial: { mediaStartIntent: intent } });
+
+  assert.equal(await env.coordinator.ready, null);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+  assert.deepEqual(env.storageLocal.calls.remove, ['mediaStartIntent']);
+});
+
+test('falha START não-timeout preserva intenção e novo START a reconcilia sem overwrite', async () => {
+  let reconcileAvailable = false;
+  let generated = 0;
+  const env = createEnv({
+    createStartOperationId() {
+      generated += 1;
+      return generated === 1 ? 'media-first' : 'media-overwrite';
+    },
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.START_DOWNLOAD) {
+        throw Object.assign(new Error('native port disconnected'), {
+          code: 'NATIVE_DISCONNECTED',
+        });
+      }
+      if (type === HOST_COMMANDS.GET_JOB) {
+        if (!reconcileAvailable) {
+          throw Object.assign(new Error('native port still unavailable'), {
+            code: 'NATIVE_DISCONNECTED',
+          });
+        }
+        return {
+          type: 'ready',
+          requestId: 'recover-after-disconnect',
+          job: {
+            jobId: 'job-orphan',
+            operationId: 'media-first',
+            videoId: VIDEO_ID,
+            title: CATALOG.title,
+            height: 720,
+            stage: 'video',
+            percent: 25,
+            path: null,
+            errorCode: null,
+          },
+        };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  await assert.rejects(start(env), /disconnected/);
+  assert.equal(env.storageLocal.values.mediaStartIntent.operationId, 'media-first');
+  assert.deepEqual(env.keepAliveCalls.at(-1), { reason: 'media-job', active: true });
+
+  await assert.rejects(start(env), /still unavailable/);
+  assert.equal(generated, 1);
+  assert.equal(env.storageLocal.values.mediaStartIntent.operationId, 'media-first');
+  assert.equal(
+    env.requests.filter(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD).length,
+    1,
+  );
+
+  reconcileAvailable = true;
+  await assert.rejects(start(env), /download YouTube ativo/);
+  assert.equal(generated, 1);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+  assert.equal(env.storageLocal.values.youtubeJob.jobId, 'job-orphan');
+  assert.equal(
+    env.requests.filter(({ type }) => type === HOST_COMMANDS.START_DOWNLOAD).length,
+    1,
+  );
+
+  const recovered = await env.coordinator.handle(message(YOUTUBE_ACTIONS.GET_JOB, {}));
+  assert.equal(recovered.jobId, 'job-orphan');
+  assert.equal(recovered.operationId, 'media-first');
+  assert.equal(recovered.stage, 'video');
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+});
+
+test('falha genérica ao postar START reconcilia imediatamente qualquer job correlacionado', async () => {
+  const env = createEnv({
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.START_DOWNLOAD) throw new Error('postMessage failed');
+      if (type === HOST_COMMANDS.GET_JOB) {
+        return {
+          type: 'ready',
+          requestId: 'recover-post-message',
+          job: {
+            jobId: 'job-posted',
+            operationId: 'media-test',
+            videoId: VIDEO_ID,
+            title: CATALOG.title,
+            height: 720,
+            stage: 'preparing',
+            percent: null,
+            path: null,
+            errorCode: null,
+          },
+        };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  const recovered = await start(env);
+  assert.equal(recovered.jobId, 'job-posted');
+  assert.equal(recovered.operationId, 'media-test');
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+  assert.deepEqual(env.requests.map(({ type }) => type), [
+    HOST_COMMANDS.LIST_FORMATS,
+    HOST_COMMANDS.START_DOWNLOAD,
+    HOST_COMMANDS.GET_JOB,
+  ]);
+});
+
+test('resposta READY sem job encerra intenção ambígua e permite uma nova operação', async () => {
+  let operationNumber = 0;
+  let startNumber = 0;
+  const env = createEnv({
+    createStartOperationId() {
+      operationNumber += 1;
+      return `media-attempt-${operationNumber}`;
+    },
+    request(type) {
+      if (type === HOST_COMMANDS.LIST_FORMATS) return formatsEvent();
+      if (type === HOST_COMMANDS.START_DOWNLOAD) {
+        startNumber += 1;
+        if (startNumber === 1) throw new Error('ambiguous send failure');
+        return {
+          ...startedEvent('job-second', 'start-second'),
+          job: {
+            ...startedEvent('job-second', 'start-second').job,
+            operationId: 'media-attempt-2',
+          },
+        };
+      }
+      if (type === HOST_COMMANDS.GET_JOB) {
+        return { type: 'ready', requestId: 'first-is-absent', job: null };
+      }
+      throw new Error(`unexpected command ${type}`);
+    },
+  });
+
+  await assert.rejects(start(env), /ambiguous send failure/);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
+
+  const second = await start(env);
+  assert.equal(second.operationId, 'media-attempt-2');
+  assert.equal(startNumber, 2);
+  assert.equal(Object.hasOwn(env.storageLocal.values, 'mediaStartIntent'), false);
 });

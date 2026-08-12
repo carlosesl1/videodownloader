@@ -8,4 +8,9 @@ public sealed record JobSnapshot(
     string Stage,
     int? Percent,
     string? Path,
-    string? ErrorCode);
+    string? ErrorCode,
+    string? OperationId = null,
+    long? DownloadedBytes = null,
+    long? TotalBytes = null,
+    long? SpeedBytesPerSecond = null,
+    int? EtaSeconds = null);

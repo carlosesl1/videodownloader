@@ -10,6 +10,8 @@ import {
   HLS_INSPECTION_PREFIX,
   HLS_OPERATION_INDEX,
   HLS_OPERATION_PREFIX,
+  HOST_PERMISSION_CLAIMS,
+  OWNED_HOST_PERMISSION_PATTERNS,
   stringIndex,
 } from '../shared/persistence-keys.js';
 
@@ -24,6 +26,8 @@ const TERMINAL_STATES = new Set(['complete', 'interrupted', 'failed']);
 const SAFE_CODE = /^[A-Z0-9_]{1,64}$/;
 const MAX_MESSAGE_LENGTH = 500;
 const MAX_DETAILS_LENGTH = 16 * 1024;
+const MAX_PERMISSION_CLAIMS = 50;
+const PERMISSION_CLAIM_TTL_MS = 10 * 60_000;
 const GENERIC_ERROR_MESSAGE = 'Não foi possível concluir a operação.';
 const MALFORMED_RESPONSE_MESSAGE = 'A resposta do processamento HLS é inválida.';
 
@@ -131,6 +135,37 @@ function normalizePatterns(patterns) {
   return [...new Set(patterns)];
 }
 
+function validPermissionPattern(value) {
+  if (typeof value !== 'string' || value.length > 2_052 || !value.endsWith('/*')) return false;
+  try {
+    const parsed = new URL(value.slice(0, -2));
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && `${parsed.origin}/*` === value;
+  } catch {
+    return false;
+  }
+}
+
+function samePatterns(left, right) {
+  const normalizedLeft = normalizePatterns(left);
+  const normalizedRight = normalizePatterns(right);
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((pattern) => normalizedRight.includes(pattern));
+}
+
+function validPermissionClaim(value) {
+  return isObject(value)
+    && Object.keys(value).length === 3
+    && typeof value.claimId === 'string'
+    && /^[A-Za-z0-9._:-]{1,128}$/.test(value.claimId)
+    && Array.isArray(value.permissionPatterns)
+    && value.permissionPatterns.length > 0
+    && value.permissionPatterns.length <= 50
+    && value.permissionPatterns.every(validPermissionPattern)
+    && Number.isSafeInteger(value.createdAt)
+    && value.createdAt >= 0;
+}
+
 function defaultOperationId() {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
   return `hls-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -220,6 +255,14 @@ export function createBackgroundHandlers({
     return task;
   }
 
+  function timestamp() {
+    const value = now();
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new BackgroundError('BACKGROUND_CLOCK', 'O relógio do sistema é inválido.');
+    }
+    return value;
+  }
+
   async function whenIdle() {
     while (true) {
       const observed = queue;
@@ -271,6 +314,57 @@ export function createBackgroundHandlers({
       displayName,
     });
     await relocation.deliver(downloadId);
+  }
+
+  async function createRelocationIntent({
+    operationId,
+    destinationFolder,
+    mediaKind,
+    mediaUrl,
+    displayName,
+    trackBrowser = false,
+  }) {
+    if (!destinationFolder && !trackBrowser) return false;
+    if (typeof relocation?.createIntent !== 'function'
+      || typeof relocation?.bindIntent !== 'function') {
+      throw new BackgroundError(
+        'DESTINATION_HELPER_UNAVAILABLE',
+        'O auxiliar nativo não oferece entrega transacional.',
+      );
+    }
+    await relocation.createIntent({
+      downloadId: null,
+      operationId,
+      destinationFolder: destinationFolder ?? null,
+      mediaKind,
+      mediaUrl,
+      displayName,
+    });
+    return true;
+  }
+
+  async function bindRelocationIntent(operationId, downloadId, prepared, fallbackRecord) {
+    if (!prepared) return;
+    try {
+      await relocation.bindIntent(operationId, downloadId);
+    } catch {
+      if (fallbackRecord?.destinationFolder) {
+        try {
+          await relocation.track({ ...fallbackRecord, downloadId, operationId });
+        } catch {
+          requestMaintenance();
+          return;
+        }
+      } else {
+        requestMaintenance();
+        return;
+      }
+    }
+    try {
+      await relocation.deliver(downloadId);
+    } catch {
+      requestMaintenance();
+    }
   }
 
   async function getRecord(operationId) {
@@ -363,11 +457,7 @@ export function createBackgroundHandlers({
   }
 
   function touchRecord(record) {
-    const updatedAt = now();
-    if (!Number.isSafeInteger(updatedAt) || updatedAt < 0) {
-      throw new BackgroundError('BACKGROUND_CLOCK', 'O relógio do sistema é inválido.');
-    }
-    return { ...record, updatedAt };
+    return { ...record, updatedAt: timestamp() };
   }
 
   async function persistRecord(record, { touch = true, entries = {} } = {}) {
@@ -425,9 +515,191 @@ export function createBackgroundHandlers({
     return permissions.contains({ origins: patterns });
   }
 
-  async function removeUnusedPermissions(candidatePatterns) {
-    const candidates = normalizePatterns(candidatePatterns);
-    if (candidates.length === 0) return;
+  async function readPermissionClaims() {
+    const stored = await storageLocal.get(HOST_PERMISSION_CLAIMS);
+    const raw = stored?.[HOST_PERMISSION_CLAIMS];
+    if (!Array.isArray(raw)) return { claims: [], dirty: raw !== undefined };
+    const claims = [];
+    const ids = new Set();
+    for (const candidate of raw) {
+      if (!validPermissionClaim(candidate) || ids.has(candidate.claimId)) continue;
+      ids.add(candidate.claimId);
+      claims.push({
+        claimId: candidate.claimId,
+        permissionPatterns: normalizePatterns(candidate.permissionPatterns),
+        createdAt: candidate.createdAt,
+      });
+    }
+    return { claims, dirty: claims.length !== raw.length };
+  }
+
+  async function writePermissionClaims(claims) {
+    if (claims.length === 0) {
+      await storageLocal.remove(HOST_PERMISSION_CLAIMS);
+      return;
+    }
+    await storageLocal.set({ [HOST_PERMISSION_CLAIMS]: claims });
+  }
+
+  async function activePermissionClaims() {
+    const loaded = await readPermissionClaims();
+    if (loaded.claims.length === 0) {
+      if (loaded.dirty) await writePermissionClaims([]);
+      return [];
+    }
+    const observedAt = timestamp();
+    const active = loaded.claims.filter((claim) => (
+      claim.createdAt <= observedAt
+      && observedAt - claim.createdAt <= PERMISSION_CLAIM_TTL_MS
+    ));
+    if (loaded.dirty || active.length !== loaded.claims.length) {
+      await writePermissionClaims(active);
+    }
+    if (active.length > 0) requestMaintenance();
+    return active;
+  }
+
+  async function claimHostPermissions(message) {
+    return serialized(async () => {
+      const permissionPatterns = normalizePatterns(message.payload.permissionPatterns);
+      await activePermissionClaims();
+      const stored = await storageLocal.get([
+        OWNED_HOST_PERMISSION_PATTERNS,
+        HOST_PERMISSION_CLAIMS,
+      ]);
+      const owned = stringIndex(stored?.[OWNED_HOST_PERMISSION_PATTERNS])
+        .filter(validPermissionPattern);
+      const rawClaims = Array.isArray(stored?.[HOST_PERMISSION_CLAIMS])
+        ? stored[HOST_PERMISSION_CLAIMS]
+        : [];
+      const claims = rawClaims.filter(validPermissionClaim).map((claim) => ({
+        claimId: claim.claimId,
+        permissionPatterns: normalizePatterns(claim.permissionPatterns),
+        createdAt: claim.createdAt,
+      }));
+      const existing = claims.find(({ claimId }) => claimId === message.payload.claimId);
+      if (existing && !samePatterns(existing.permissionPatterns, permissionPatterns)) {
+        throw new BackgroundError(
+          'BACKGROUND_PERMISSION_CLAIM',
+          'A reserva de permissão não corresponde à solicitação.',
+        );
+      }
+      if (!existing) {
+        if (claims.length >= MAX_PERMISSION_CLAIMS) {
+          throw new BackgroundError(
+            'BACKGROUND_PERMISSION_CLAIM_LIMIT',
+            'Há muitas autorizações temporárias pendentes.',
+          );
+        }
+        claims.push({
+          claimId: message.payload.claimId,
+          permissionPatterns,
+          createdAt: timestamp(),
+        });
+      } else {
+        existing.createdAt = timestamp();
+      }
+      for (const pattern of permissionPatterns) {
+        if (!owned.includes(pattern)) owned.push(pattern);
+      }
+      await storageLocal.set({
+        [OWNED_HOST_PERMISSION_PATTERNS]: owned,
+        [HOST_PERMISSION_CLAIMS]: claims,
+      });
+      requestMaintenance();
+      return { claimId: message.payload.claimId, state: 'claimed' };
+    });
+  }
+
+  async function confirmHostPermissionClaim(message) {
+    return serialized(async () => {
+      const permissionPatterns = normalizePatterns(message.payload.permissionPatterns);
+      if (!(await permissionsContain(permissionPatterns))) {
+        throw new BackgroundError(
+          'BACKGROUND_PERMISSION_CLAIM',
+          'A autorização concedida não está mais disponível.',
+        );
+      }
+      await activePermissionClaims();
+      const stored = await storageLocal.get([
+        OWNED_HOST_PERMISSION_PATTERNS,
+        HOST_PERMISSION_CLAIMS,
+      ]);
+      const owned = stringIndex(stored?.[OWNED_HOST_PERMISSION_PATTERNS])
+        .filter(validPermissionPattern);
+      const rawClaims = Array.isArray(stored?.[HOST_PERMISSION_CLAIMS])
+        ? stored[HOST_PERMISSION_CLAIMS]
+        : [];
+      const claims = rawClaims.filter(validPermissionClaim).map((claim) => ({
+        claimId: claim.claimId,
+        permissionPatterns: normalizePatterns(claim.permissionPatterns),
+        createdAt: claim.createdAt,
+      }));
+      const existingIndex = claims.findIndex(({ claimId }) => (
+        claimId === message.payload.claimId
+      ));
+      if (existingIndex >= 0
+        && !samePatterns(claims[existingIndex].permissionPatterns, permissionPatterns)) {
+        throw new BackgroundError(
+          'BACKGROUND_PERMISSION_CLAIM',
+          'A reserva de permissão não corresponde à autorização.',
+        );
+      }
+      const confirmed = {
+        claimId: message.payload.claimId,
+        permissionPatterns,
+        createdAt: timestamp(),
+      };
+      if (existingIndex >= 0) claims[existingIndex] = confirmed;
+      else {
+        if (claims.length >= MAX_PERMISSION_CLAIMS) {
+          throw new BackgroundError(
+            'BACKGROUND_PERMISSION_CLAIM_LIMIT',
+            'Há muitas autorizações temporárias pendentes.',
+          );
+        }
+        claims.push(confirmed);
+      }
+      for (const pattern of permissionPatterns) {
+        if (!owned.includes(pattern)) owned.push(pattern);
+      }
+      await storageLocal.set({
+        [OWNED_HOST_PERMISSION_PATTERNS]: owned,
+        [HOST_PERMISSION_CLAIMS]: claims,
+      });
+      requestMaintenance();
+      return { claimId: message.payload.claimId, state: 'confirmed' };
+    });
+  }
+
+  async function requirePermissionClaim(claimId, permissionPatterns) {
+    if (claimId === null) return null;
+    const claims = await activePermissionClaims();
+    const claim = claims.find((candidate) => candidate.claimId === claimId);
+    const available = new Set(permissionPatterns);
+    if (!claim || claim.permissionPatterns.some((pattern) => !available.has(pattern))) {
+      throw new BackgroundError(
+        'BACKGROUND_PERMISSION_CLAIM',
+        'A reserva de permissão expirou ou é inválida.',
+      );
+    }
+    return claim;
+  }
+
+  async function deletePermissionClaim(claimId) {
+    if (claimId === null) return;
+    const loaded = await readPermissionClaims();
+    const remaining = loaded.claims.filter((claim) => claim.claimId !== claimId);
+    if (loaded.dirty || remaining.length !== loaded.claims.length) {
+      await writePermissionClaims(remaining);
+    }
+  }
+
+  async function removeUnusedPermissions() {
+    const ownedState = await storageLocal.get(OWNED_HOST_PERMISSION_PATTERNS);
+    const rawCandidates = stringIndex(ownedState?.[OWNED_HOST_PERMISSION_PATTERNS]);
+    const candidates = rawCandidates.filter(validPermissionPattern);
+    const claims = await activePermissionClaims();
     const records = await allRecords();
     const used = new Set();
     for (const record of records) {
@@ -438,8 +710,59 @@ export function createBackgroundHandlers({
       if (lease.state !== 'active') continue;
       for (const pattern of lease.permissionPatterns ?? []) used.add(pattern);
     }
+    for (const claim of claims) {
+      for (const pattern of claim.permissionPatterns) used.add(pattern);
+    }
     const removable = candidates.filter((pattern) => !used.has(pattern));
-    if (removable.length > 0) await permissions.remove({ origins: removable });
+    const cleared = new Set(rawCandidates.filter((pattern) => !validPermissionPattern(pattern)));
+    const present = [];
+    for (const pattern of removable) {
+      if (await permissionsContain([pattern])) present.push(pattern);
+      else cleared.add(pattern);
+    }
+    if (present.length > 0) {
+      if (typeof permissions?.remove !== 'function') {
+        throw new BackgroundError(
+          'BACKGROUND_PERMISSION_RELEASE',
+          'Não foi possível remover a autorização temporária.',
+        );
+      }
+      const removed = await permissions.remove({ origins: present });
+      if (removed === true) {
+        for (const pattern of present) cleared.add(pattern);
+      } else {
+        for (const pattern of present) {
+          if (!(await permissionsContain([pattern]))) cleared.add(pattern);
+        }
+      }
+    }
+    const retained = candidates.filter((pattern) => !cleared.has(pattern));
+    if (retained.length === 0) await storageLocal.remove(OWNED_HOST_PERMISSION_PATTERNS);
+    else if (!samePatterns(retained, rawCandidates)) {
+      await storageLocal.set({ [OWNED_HOST_PERMISSION_PATTERNS]: retained });
+    }
+    const stillGranted = present.filter((pattern) => !cleared.has(pattern));
+    if (stillGranted.length > 0) {
+      requestMaintenance();
+      throw new BackgroundError(
+        'BACKGROUND_PERMISSION_RELEASE',
+        'O navegador ainda mantém uma autorização temporária.',
+      );
+    }
+  }
+
+  async function finishPermissionClaim(claimId) {
+    if (claimId === null) return;
+    await deletePermissionClaim(claimId);
+    await removeUnusedPermissions();
+  }
+
+  async function releaseHostPermissionClaim(message) {
+    return serialized(async () => {
+      await deletePermissionClaim(message.payload.claimId);
+      await removeUnusedPermissions();
+      return { claimId: message.payload.claimId, state: 'released' };
+    });
   }
 
   async function armInspectionCleanup(leaseId) {
@@ -457,34 +780,59 @@ export function createBackgroundHandlers({
   }
 
   async function cleanupInspectionLease(lease) {
-    await removeUnusedPermissions(lease.permissionPatterns ?? []);
+    await removeUnusedPermissions();
     await removeIndexed(HLS_INSPECTION_INDEX, lease.inspectionId, inspectionKey(lease.inspectionId));
     requestMaintenance();
   }
 
   async function inspectHls(message) {
     const patterns = normalizePatterns(message.payload.permissionPatterns);
+    const claimId = message.payload.permissionClaimId;
     const inspectionId = createInspectionId();
     await serialized(async () => {
-      if (!(await permissionsContain(patterns))) {
-        throw new BackgroundError(
-          'BACKGROUND_PERMISSION_BUSY',
-          'A permissão temporária expirou antes do processamento HLS.',
-        );
+      let leasePersisted = false;
+      try {
+        await requirePermissionClaim(claimId, patterns);
+        if (!(await permissionsContain(patterns))) {
+          throw new BackgroundError(
+            'BACKGROUND_PERMISSION_BUSY',
+            'A permissão temporária expirou antes do processamento HLS.',
+          );
+        }
+        await persistLease({
+          inspectionId,
+          permissionPatterns: patterns,
+          state: 'active',
+        });
+        leasePersisted = true;
+        await finishPermissionClaim(claimId);
+      } catch (error) {
+        try {
+          await finishPermissionClaim(claimId);
+        } catch {
+          requestMaintenance();
+        }
+        if (leasePersisted) {
+          try {
+            const releasing = { inspectionId, permissionPatterns: patterns, state: 'releasing' };
+            await persistLease(releasing);
+            await armInspectionCleanup(inspectionId);
+            await cleanupInspectionLease(releasing);
+          } catch {
+            requestMaintenance();
+          }
+        }
+        throw error;
       }
-      await persistLease({
-        inspectionId,
-        permissionPatterns: patterns,
-        state: 'active',
-      });
     });
 
     let operationError;
     let value;
     try {
       value = validateInspection(await sendAndUnwrap(sendOffscreen, {
-        ...message,
         target: 'offscreen',
+        action: ACTIONS.INSPECT_HLS,
+        payload: { url: message.payload.url },
       }));
     } catch (error) {
       operationError = error;
@@ -524,58 +872,79 @@ export function createBackgroundHandlers({
 
   async function startHls(message) {
     return serialized(async () => {
-      const canonicalUrl = canonicalMediaUrl(message.payload.url);
-      const dedupeKey = `${ACTIONS.DOWNLOAD_HLS}:${canonicalUrl}`;
-      const dedupeKeyName = dedupeStorageKey(dedupeKey);
-      const indexed = await storageSession.get(dedupeKeyName);
-      const existingId = safelyRead(indexed, dedupeKeyName);
-      if (typeof existingId === 'string') {
-        let existing = await getRecord(existingId);
-        if (isObject(existing) && ACTIVE_STATES.has(existing.state)) {
-          if (existing.state === 'starting') existing = await sendStartAndMark(existing);
-          return { operationId: existing.operationId, state: existing.state };
+      const claimId = message.payload.permissionClaimId;
+      let durableRecord = false;
+      try {
+        const canonicalUrl = canonicalMediaUrl(message.payload.url);
+        const dedupeKey = `${ACTIONS.DOWNLOAD_HLS}:${canonicalUrl}`;
+        const dedupeKeyName = dedupeStorageKey(dedupeKey);
+        const permissionPatterns = normalizePatterns(message.payload.permissionPatterns);
+        await requirePermissionClaim(claimId, permissionPatterns);
+
+        const indexed = await storageSession.get(dedupeKeyName);
+        const existingId = safelyRead(indexed, dedupeKeyName);
+        if (typeof existingId === 'string') {
+          let existing = await getRecord(existingId);
+          if (isObject(existing) && ACTIVE_STATES.has(existing.state)) {
+            await finishPermissionClaim(claimId);
+            durableRecord = true;
+            if (existing.state === 'starting') existing = await sendStartAndMark(existing);
+            return { operationId: existing.operationId, state: existing.state };
+          }
         }
-      }
 
-      const activeAssembly = (await allRecords()).find((record) => (
-        isObject(record) && ASSEMBLY_STATES.has(record.state)
-      ));
-      if (activeAssembly) {
-        throw new BackgroundError(
-          'HLS_BUSY',
-          'Aguarde a montagem do outro vídeo HLS terminar.',
-        );
-      }
+        const activeAssembly = (await allRecords()).find((record) => (
+          isObject(record) && ASSEMBLY_STATES.has(record.state)
+        ));
+        if (activeAssembly) {
+          throw new BackgroundError(
+            'HLS_BUSY',
+            'Aguarde a montagem do outro vídeo HLS terminar.',
+          );
+        }
 
-      const permissionPatterns = normalizePatterns(message.payload.permissionPatterns);
-      if (!(await permissionsContain(permissionPatterns))) {
-        throw new BackgroundError(
-          'BACKGROUND_PERMISSION_BUSY',
-          'A permissão temporária expirou antes do processamento HLS.',
-        );
+        if (!(await permissionsContain(permissionPatterns))) {
+          throw new BackgroundError(
+            'BACKGROUND_PERMISSION_BUSY',
+            'A permissão temporária expirou antes do processamento HLS.',
+          );
+        }
+        const operationId = createOperationId();
+        let record = {
+          operationId,
+          dedupeKey,
+          url: canonicalUrl,
+          filename: message.payload.filename,
+          allowedOrigins: [...message.payload.allowedOrigins],
+          permissionPatterns,
+          state: 'starting',
+          progress: {
+            completedSegments: 0,
+            totalSegments: 0,
+            bytesReceived: 0,
+            estimatedTotalBytes: null,
+            percent: 0,
+          },
+        };
+        record = await persistRecord(record, {
+          entries: { [dedupeKeyName]: operationId },
+        });
+        durableRecord = true;
+        await finishPermissionClaim(claimId);
+        const assembling = await sendStartAndMark(record);
+        return { operationId, state: assembling.state };
+      } catch (error) {
+        if (!durableRecord) {
+          try {
+            await finishPermissionClaim(claimId);
+          } catch {
+            requestMaintenance();
+          }
+        } else {
+          requestMaintenance();
+        }
+        throw error;
       }
-      const operationId = createOperationId();
-      let record = {
-        operationId,
-        dedupeKey,
-        url: canonicalUrl,
-        filename: message.payload.filename,
-        allowedOrigins: [...message.payload.allowedOrigins],
-        permissionPatterns,
-        state: 'starting',
-        progress: {
-          completedSegments: 0,
-          totalSegments: 0,
-          bytesReceived: 0,
-          estimatedTotalBytes: null,
-          percent: 0,
-        },
-      };
-      record = await persistRecord(record, {
-        entries: { [dedupeKeyName]: operationId },
-      });
-      const assembling = await sendStartAndMark(record);
-      return { operationId, state: assembling.state };
     });
   }
 
@@ -608,7 +977,7 @@ export function createBackgroundHandlers({
 
   async function finalizeTerminal(record) {
     if (!record.permissionsReleased) {
-      await removeUnusedPermissions(record.permissionPatterns ?? []);
+      await removeUnusedPermissions();
     }
     const dedupeKeyName = dedupeStorageKey(record.dedupeKey);
     const indexed = await storageSession.get(dedupeKeyName);
@@ -646,7 +1015,7 @@ export function createBackgroundHandlers({
 
   async function releaseAssemblyPermissions(record) {
     if (record.permissionsReleased) return record;
-    await removeUnusedPermissions(record.permissionPatterns ?? []);
+    await removeUnusedPermissions();
     return persistRecord({ ...record, permissionsReleased: true });
   }
 
@@ -676,24 +1045,46 @@ export function createBackgroundHandlers({
     if (existing) {
       await persistDownloadMapping(record, existing);
       if (target.staging) {
-        await trackRelocation({
-          downloadId: existing.id,
-          operationId: record.operationId,
-          destinationFolder,
-          mediaKind: 'hls',
-          mediaUrl: record.url,
-          displayName: record.filename,
-        });
+        try {
+          await bindRelocationIntent(record.operationId, existing.id, true, {
+            destinationFolder,
+            mediaKind: 'hls',
+            mediaUrl: record.url,
+            displayName: record.filename,
+          });
+        } catch {
+          await trackRelocation({
+            downloadId: existing.id,
+            operationId: record.operationId,
+            destinationFolder,
+            mediaKind: 'hls',
+            mediaUrl: record.url,
+            displayName: record.filename,
+          });
+        }
       }
       return;
     }
     if (Number.isInteger(record.downloadId)) return;
 
-    const downloadId = await downloads.download({
-      url: record.blobUrl,
-      filename: target.filename,
-      saveAs: target.saveAs,
+    const relocationPrepared = target.staging && await createRelocationIntent({
+      operationId: record.operationId,
+      destinationFolder,
+      mediaKind: 'hls',
+      mediaUrl: record.url,
+      displayName: record.filename,
     });
+    let downloadId;
+    try {
+      downloadId = await downloads.download({
+        url: record.blobUrl,
+        filename: target.filename,
+        saveAs: target.saveAs,
+      });
+    } catch (error) {
+      if (relocationPrepared) await relocation.abandonIntent?.(record.operationId);
+      throw error;
+    }
     if (!Number.isInteger(downloadId)) throw new BackgroundError(
       'BACKGROUND_DOWNLOAD',
       'O navegador não iniciou o download HLS.',
@@ -703,16 +1094,12 @@ export function createBackgroundHandlers({
       url: record.blobUrl,
       state: 'in_progress',
     });
-    if (target.staging) {
-      await trackRelocation({
-        downloadId,
-        operationId: record.operationId,
-        destinationFolder,
-        mediaKind: 'hls',
-        mediaUrl: record.url,
-        displayName: record.filename,
-      });
-    }
+    await bindRelocationIntent(record.operationId, downloadId, relocationPrepared, {
+      destinationFolder,
+      mediaKind: 'hls',
+      mediaUrl: record.url,
+      displayName: record.filename,
+    });
   }
 
   async function completeHls(message) {
@@ -839,9 +1226,12 @@ export function createBackgroundHandlers({
           ACTIVE_STATES.has(candidate.state) && candidate.blobUrl === item.url
         ));
         if (!record) return;
+        const recoveredRelocation = typeof relocation?.recoverIntent === 'function'
+          && await relocation.recoverIntent(record.operationId, delta.id);
         const mapped = await persistRecord({ ...record, downloadId: delta.id }, {
           entries: { [key]: { operationId: record.operationId, blobUrl: record.blobUrl } },
         });
+        if (!recoveredRelocation) requestMaintenance();
         await markTerminal(mapped, state);
         return;
       }
@@ -867,6 +1257,7 @@ export function createBackgroundHandlers({
   }
 
   async function reconcileLocked() {
+    await removeUnusedPermissions();
     for (const lease of await allInspectionLeases()) {
       const releasing = { ...lease, state: 'releasing' };
       await persistLease(releasing);
@@ -903,27 +1294,61 @@ export function createBackgroundHandlers({
     handleDownloadChanged,
     async handle(raw) {
       const message = assertBackgroundMessage(raw);
+      if (message.action === ACTIONS.CLAIM_HOST_PERMISSIONS) {
+        return claimHostPermissions(message);
+      }
+      if (message.action === ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM) {
+        return confirmHostPermissionClaim(message);
+      }
+      if (message.action === ACTIONS.RELEASE_HOST_PERMISSION_CLAIM) {
+        return releaseHostPermissionClaim(message);
+      }
       if (message.action === ACTIONS.DOWNLOAD_DIRECT) {
         const operationId = createOperationId();
         const { target, destinationFolder } = await resolveDownloadTarget(
           message.payload.filename,
           operationId,
         );
-        const downloadId = await downloads.download({
-          url: message.payload.url,
-          filename: target.filename,
-          saveAs: target.saveAs,
+        const relocationPrepared = target.staging && await createRelocationIntent({
+          operationId,
+          destinationFolder,
+          mediaKind: 'direct',
+          mediaUrl: message.payload.url,
+          displayName: message.payload.filename,
+          trackBrowser: true,
         });
-        if (target.staging) {
-          await trackRelocation({
-            downloadId,
-            operationId,
-            destinationFolder,
-            mediaKind: 'direct',
-            mediaUrl: message.payload.url,
-            displayName: message.payload.filename,
+        const browserLedgerPrepared = relocationPrepared || await createRelocationIntent({
+          operationId,
+          destinationFolder: null,
+          mediaKind: 'direct',
+          mediaUrl: message.payload.url,
+          displayName: message.payload.filename,
+          trackBrowser: true,
+        });
+        let downloadId;
+        try {
+          downloadId = await downloads.download({
+            url: message.payload.url,
+            filename: target.filename,
+            saveAs: target.saveAs,
           });
+        } catch (error) {
+          if (browserLedgerPrepared) await relocation.abandonIntent?.(operationId);
+          throw error;
         }
+        if (!Number.isSafeInteger(downloadId) || downloadId < 0) {
+          if (browserLedgerPrepared) await relocation.abandonIntent?.(operationId);
+          throw new BackgroundError(
+            'BACKGROUND_DOWNLOAD',
+            'O navegador não iniciou o download direto.',
+          );
+        }
+        await bindRelocationIntent(operationId, downloadId, browserLedgerPrepared, {
+          destinationFolder,
+          mediaKind: 'direct',
+          mediaUrl: message.payload.url,
+          displayName: message.payload.filename,
+        });
         return { downloadId };
       }
       if (message.action === ACTIONS.INSPECT_HLS) return inspectHls(message);

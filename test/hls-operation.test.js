@@ -126,7 +126,7 @@ test('assembleHls preserves playlist order when later segments resolve first', a
   assert.equal(result.size, 6);
   assert.equal(result.blob.size, 6);
   assert.equal(calls.length, 3);
-  for (const [, options] of calls) assert.equal(options.credentials, 'include');
+  for (const [, options] of calls) assert.equal(options.credentials, 'omit');
 });
 
 test('assembleHls composes the final Blob from per-segment Blob parts', async () => {
@@ -548,7 +548,7 @@ test('thrown fetch failures become safe HLS_NETWORK errors without leaking raw e
   );
 });
 
-test('assembleHls passes credentials include to manifest and segment fetches', async () => {
+test('assembleHls omits credentials from manifest and segment fetches', async () => {
   const optionsSeen = [];
   await assembleHls('https://cdn.test/media.m3u8', {
     allowedOrigins: ['https://cdn.test'],
@@ -559,7 +559,7 @@ test('assembleHls passes credentials include to manifest and segment fetches', a
   });
 
   assert.equal(optionsSeen.length, 2);
-  assert.ok(optionsSeen.every(({ credentials }) => credentials === 'include'));
+  assert.ok(optionsSeen.every(({ credentials }) => credentials === 'omit'));
 });
 
 test('assembleHls honors its concurrency limit', async () => {

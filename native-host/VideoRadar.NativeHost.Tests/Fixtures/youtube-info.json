@@ -4,12 +4,18 @@
   "duration": 19,
   "is_live": false,
   "availability": "public",
+  "subtitles": {
+    "pt-BR": [{ "ext": "vtt", "name": "Português (Brasil)" }]
+  },
+  "automatic_captions": {
+    "en": [{ "ext": "vtt", "name": "English (auto)" }]
+  },
   "formats": [
-    { "format_id": "18", "ext": "mp4", "height": 360, "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "filesize": 1024000 },
-    { "format_id": "136", "ext": "mp4", "height": 720, "vcodec": "avc1.4d401f", "acodec": "none", "filesize": 2048000 },
-    { "format_id": "137", "ext": "mp4", "height": 1080, "vcodec": "avc1.640028", "acodec": "none", "filesize": 4096000 },
-    { "format_id": "248", "ext": "webm", "height": 1080, "vcodec": "vp9", "acodec": "none", "filesize": 3584000 },
-    { "format_id": "140", "ext": "m4a", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "filesize": 512000 },
-    { "format_id": "251", "ext": "webm", "height": null, "vcodec": "none", "acodec": "opus", "filesize": 480000 }
+    { "format_id": "18", "ext": "mp4", "height": 360, "fps": 30, "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "tbr": 420.5, "filesize": 1024000, "language": "en" },
+    { "format_id": "136", "ext": "mp4", "height": 720, "fps": 30, "vcodec": "avc1.4d401f", "acodec": "none", "tbr": 1800, "filesize": 2048000 },
+    { "format_id": "137", "ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1.640028", "acodec": "none", "tbr": 4800, "filesize_approx": 4096000 },
+    { "format_id": "248", "ext": "webm", "height": 1080, "fps": 60, "dynamic_range": "HDR10", "color_transfer": "smpte2084", "vcodec": "vp09.02.40.10", "acodec": "none", "tbr": 5200, "filesize": 3584000 },
+    { "format_id": "140", "ext": "m4a", "height": null, "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "filesize": 512000, "language": "en" },
+    { "format_id": "251", "ext": "webm", "height": null, "vcodec": "none", "acodec": "opus", "abr": 160, "filesize": 480000, "language": "pt-BR" }
   ]
 }

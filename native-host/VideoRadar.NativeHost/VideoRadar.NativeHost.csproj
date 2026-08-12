@@ -8,6 +8,7 @@
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
+    <Version>1.2.0</Version>
     <AssemblyName>video-radar-host</AssemblyName>
     <RootNamespace>VideoRadar.NativeHost</RootNamespace>
   </PropertyGroup>

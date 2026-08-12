@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace VideoRadar.NativeHost.Tests;
 
 internal static partial class TestSuite
@@ -17,6 +19,7 @@ internal static partial class TestSuite
         MediaPageTests();
         YouTubeUrlTests();
         FormatCatalogTests();
+        DiagnosticTests();
         DownloadTests();
         ServerTests();
     }
@@ -31,7 +34,18 @@ internal static partial class TestSuite
 
     private static void ProtocolVersionTest()
     {
-        Equal(3, global::VideoRadar.NativeHost.HostInfo.ProtocolVersion);
+        Equal(5, global::VideoRadar.NativeHost.HostInfo.ProtocolVersion);
+        Equal("1.2.0", global::VideoRadar.NativeHost.HostInfo.Version);
+        var informationalVersion = typeof(global::VideoRadar.NativeHost.HostInfo).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+        Equal(
+            global::VideoRadar.NativeHost.HostInfo.Version,
+            informationalVersion?.Split('+', 2)[0]);
+        True(
+            global::VideoRadar.NativeHost.HostInfo.Capabilities.SequenceEqual(
+                ["idempotentStart", "idempotentFileMove", "jobReconciliation", "boundedProcessOutput", "durableQueue", "pauseResume", "restartRecovery", "richMediaCatalog", "ffprobeValidation", "diagnosticsExport", "arm64"]),
+            "Native protocol capabilities changed unexpectedly.");
     }
 
     private static void NativeInvocationParserTest()

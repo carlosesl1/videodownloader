@@ -8,6 +8,8 @@ import { createBackgroundRouter } from './router.js';
 import { createYouTubeCoordinator } from './youtube-coordinator.js';
 import { createDownloadRelocationCoordinator } from './download-relocation.js';
 import { createDiscoveryCoordinator } from './discovery-coordinator.js';
+import { YOUTUBE_ACTIONS } from '../youtube/protocol.js';
+import { createDownloadQueueCoordinator } from './download-queue.js';
 
 export const MAINTENANCE_ALARM = 'videoRadarMaintenance';
 
@@ -81,13 +83,25 @@ function scheduleMaintenance() {
   globalThis.chrome.alarms.create(MAINTENANCE_ALARM, { delayInMinutes: 1 });
 }
 
+async function notifyQueueTerminal(job) {
+  if (typeof globalThis.chrome.notifications?.create !== 'function') return;
+  await globalThis.chrome.notifications.create(`media-job-${job.jobId}`, {
+    type: 'basic',
+    iconUrl: globalThis.chrome.runtime.getURL('assets/icon-128.png'),
+    title: 'Vídeo Radar',
+    message: job.state === 'complete' ? 'Download concluído' : 'Download falhou',
+  });
+}
+
 const sendOffscreen = createOffscreenSender({ scheduleMaintenance });
 let youtubeCoordinator;
+let downloadQueue;
 const nativeClient = createNativePortClient({
   connectNative: (name) => globalThis.chrome.runtime.connectNative(name),
   setTimeoutFn: (callback, delay) => globalThis.setTimeout(callback, delay),
   clearTimeoutFn: (timer) => globalThis.clearTimeout(timer),
   onEvent(event) {
+    if (downloadQueue?.handleHostEvent(event)) return;
     youtubeCoordinator?.handleHostEvent(event).catch(() => {
       // A persisted job is reconciled on the next worker wake-up.
     });
@@ -98,6 +112,7 @@ const relocation = createDownloadRelocationCoordinator({
   downloads: globalThis.chrome.downloads,
   nativeClient,
   now: () => Date.now(),
+  scheduleMaintenance,
 });
 const hlsHandlers = createBackgroundHandlers({
   sendOffscreen,
@@ -106,11 +121,18 @@ const hlsHandlers = createBackgroundHandlers({
   now: () => Date.now(),
   scheduleMaintenance,
 });
+downloadQueue = createDownloadQueueCoordinator({
+  nativeClient,
+  storageLocal: globalThis.chrome.storage.local,
+  scheduleMaintenance,
+  onTerminalJob: notifyQueueTerminal,
+});
 youtubeCoordinator = createYouTubeCoordinator({
   nativeClient,
   storageLocal: globalThis.chrome.storage.local,
   notifications: globalThis.chrome.notifications,
   now: () => Date.now(),
+  onQueueEvent: (event) => downloadQueue.handleHostEvent(event),
 });
 const discoveryCoordinator = createDiscoveryCoordinator({
   tabs: globalThis.chrome.tabs,
@@ -123,6 +145,7 @@ const router = createBackgroundRouter({
   hls: hlsHandlers,
   youtube: youtubeCoordinator,
   discovery: discoveryCoordinator,
+  queue: downloadQueue,
 });
 const handleTerminalDownload = createTerminalDownloadHandler(hlsHandlers);
 
@@ -133,16 +156,30 @@ async function closeOffscreenIfIdle() {
 }
 
 async function runMaintenance() {
-  await Promise.all([hlsHandlers.reconcile(), relocation.reconcile()]);
+  await Promise.all([
+    hlsHandlers.reconcile(),
+    relocation.reconcile(),
+    downloadQueue.reconcile(),
+  ]);
   await closeOffscreenIfIdle();
 }
 
-Promise.all([router.ready, relocation.reconcile()])
+Promise.all([router.ready, downloadQueue.ready, relocation.reconcile()])
   .then(closeOffscreenIfIdle)
   .catch(() => {
     // Durable records remain available for the next alarm or worker wake-up.
     scheduleMaintenance();
   });
+
+chrome.runtime.onStartup?.addListener(() => {
+  downloadQueue.handle({
+    target: 'background',
+    action: YOUTUBE_ACTIONS.GET_QUEUE,
+    payload: {},
+  }).catch(() => {
+    scheduleMaintenance();
+  });
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name !== MAINTENANCE_ALARM) return;

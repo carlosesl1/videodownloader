@@ -11,6 +11,7 @@ public interface IDownloadPaths
     string TempRoot { get; }
     string ReserveStem(string title, string videoId);
     string CreateJobTemp(string jobId);
+    string? FindJobTemp(string jobId);
     bool ContainsFinalPath(string path);
     void ReleaseStem(string stem);
     void DeleteJobTemp(string jobId);
@@ -39,6 +40,8 @@ public sealed partial class DownloadPaths : IDownloadPaths
         TempRoot = NormalizeRoot(tempRoot, nameof(tempRoot));
         Directory.CreateDirectory(Home);
         Directory.CreateDirectory(TempRoot);
+        EnsureRegularDirectory(Home);
+        EnsureRegularDirectory(TempRoot);
     }
 
     public string Home { get; }
@@ -120,6 +123,19 @@ public sealed partial class DownloadPaths : IDownloadPaths
         var path = Path.GetFullPath(Path.Combine(TempRoot, jobId));
         if (!IsStrictChild(TempRoot, path)) throw new ArgumentException("Invalid job id.", nameof(jobId));
         Directory.CreateDirectory(path);
+        EnsureRegularDirectory(TempRoot);
+        EnsureRegularDirectory(path);
+        return path;
+    }
+
+    public string? FindJobTemp(string jobId)
+    {
+        ValidateJobId(jobId);
+        var path = Path.GetFullPath(Path.Combine(TempRoot, jobId));
+        if (!IsStrictChild(TempRoot, path)) throw new ArgumentException("Invalid job id.", nameof(jobId));
+        EnsureRegularDirectory(TempRoot);
+        if (!Directory.Exists(path)) return null;
+        EnsureRegularDirectory(path);
         return path;
     }
 
@@ -135,7 +151,9 @@ public sealed partial class DownloadPaths : IDownloadPaths
         try
         {
             var candidate = Path.GetFullPath(path);
-            return IsStrictChild(Home, candidate) && File.Exists(candidate);
+            if (!IsStrictChild(Home, candidate) || !File.Exists(candidate)) return false;
+            var attributes = File.GetAttributes(candidate);
+            return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -154,7 +172,9 @@ public sealed partial class DownloadPaths : IDownloadPaths
         ValidateJobId(jobId);
         var path = Path.GetFullPath(Path.Combine(TempRoot, jobId));
         if (!IsStrictChild(TempRoot, path)) throw new ArgumentException("Invalid job id.", nameof(jobId));
-        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        EnsureRegularDirectory(TempRoot);
+        if (Directory.Exists(path)) EnsureRegularDirectory(path);
+        if (Directory.Exists(path)) DeleteDirectoryTree(path);
     }
 
     private bool HasExistingFile(string stem) =>
@@ -205,6 +225,8 @@ public sealed partial class DownloadPaths : IDownloadPaths
         return ReservedNames.Contains(deviceName) ? $"_{value}" : value;
     }
 
+    internal static bool IsSafeOutputStem(string stem) => IsSafeStem(stem);
+
     private static bool IsSafeStem(string stem)
     {
         if (string.IsNullOrWhiteSpace(stem)
@@ -243,6 +265,32 @@ public sealed partial class DownloadPaths : IDownloadPaths
     {
         var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
         return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureRegularDirectory(string path)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("Download directories cannot be reparse points.");
+    }
+
+    private static void DeleteDirectoryTree(string path)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path, "*", SearchOption.TopDirectoryOnly))
+        {
+            var attributes = File.GetAttributes(entry);
+            if ((attributes & FileAttributes.Directory) == 0)
+            {
+                File.Delete(entry);
+                continue;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                Directory.Delete(entry, recursive: false);
+            else
+                DeleteDirectoryTree(entry);
+        }
+        Directory.Delete(path, recursive: false);
     }
 
     private static string NormalizeRoot(string path, string parameterName)

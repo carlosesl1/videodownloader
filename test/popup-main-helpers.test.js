@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ACTIONS } from '../src/shared/messages.js';
 
 import {
   buildOriginGrant,
@@ -7,6 +8,9 @@ import {
   canonicalMediaUrl,
   findMatchingOperation,
   permissionOriginsFromError,
+  requestHostOriginGrant,
+  richMediaLabel,
+  runWithHostOriginGrant,
   unwrapDirectResponse,
   unwrapInspectResponse,
   unwrapQueuedResponse,
@@ -28,6 +32,191 @@ test('builds exact safe Chrome origin patterns with ports', () => {
     },
   );
   assert.throws(() => buildOriginGrant(['data:text/plain,no']), /URL de mídia inválida/);
+});
+
+test('claims ownership before requesting a new host permission', async () => {
+  const actions = [];
+  const chromeApi = {
+    permissions: {
+      async contains() { return false; },
+      async request(options) {
+        actions.push(['request', structuredClone(options)]);
+        return true;
+      },
+    },
+    runtime: {
+      async sendMessage(message) {
+        actions.push(['message', structuredClone(message)]);
+        return {
+          ok: true,
+          value: {
+            claimId: message.payload.claimId,
+            state: message.action === ACTIONS.CLAIM_HOST_PERMISSIONS ? 'claimed' : 'confirmed',
+          },
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(await requestHostOriginGrant(['https://cdn.test/master.m3u8'], {
+    chromeApi,
+    createClaimId: () => 'permission-test',
+  }), {
+    origins: ['https://cdn.test'],
+    patterns: ['https://cdn.test/*'],
+    permissionClaimId: 'permission-test',
+  });
+  assert.deepEqual(actions, [
+    ['message', {
+      target: 'background',
+      action: ACTIONS.CLAIM_HOST_PERMISSIONS,
+      payload: {
+        claimId: 'permission-test',
+        permissionPatterns: ['https://cdn.test/*'],
+      },
+    }],
+    ['request', { origins: ['https://cdn.test/*'] }],
+    ['message', {
+      target: 'background',
+      action: ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+      payload: {
+        claimId: 'permission-test',
+        permissionPatterns: ['https://cdn.test/*'],
+      },
+    }],
+  ]);
+});
+
+test('claims and requests only origins not already owned by the user', async () => {
+  const messages = [];
+  const requests = [];
+  const chromeApi = {
+    permissions: {
+      async contains({ origins }) { return origins[0] === 'https://existing.test/*'; },
+      async request(options) { requests.push(structuredClone(options)); return true; },
+    },
+    runtime: {
+      async sendMessage(message) {
+        messages.push(structuredClone(message));
+        return {
+          ok: true,
+          value: {
+            claimId: message.payload.claimId,
+            state: message.action === ACTIONS.CLAIM_HOST_PERMISSIONS ? 'claimed' : 'confirmed',
+          },
+        };
+      },
+    },
+  };
+
+  const grant = await requestHostOriginGrant([
+    'https://existing.test/master.m3u8',
+    'https://new.test/segment.ts',
+  ], {
+    chromeApi,
+    createClaimId: () => 'permission-mixed',
+  });
+
+  assert.deepEqual(grant, {
+    origins: ['https://existing.test', 'https://new.test'],
+    patterns: ['https://existing.test/*', 'https://new.test/*'],
+    permissionClaimId: 'permission-mixed',
+  });
+  assert.deepEqual(messages.map(({ action }) => action), [
+    ACTIONS.CLAIM_HOST_PERMISSIONS,
+    ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+  ]);
+  assert.deepEqual(messages[0].payload.permissionPatterns, ['https://new.test/*']);
+  assert.deepEqual(requests, [{ origins: ['https://new.test/*'] }]);
+});
+
+test('send failure releases the durable host-permission claim', async () => {
+  const actions = [];
+  const chromeApi = {
+    permissions: {
+      async contains() { return false; },
+      async request() { return true; },
+    },
+    runtime: {
+      async sendMessage(message) {
+        actions.push(message.action);
+        if (message.action === ACTIONS.CLAIM_HOST_PERMISSIONS) {
+          return { ok: true, value: { claimId: message.payload.claimId, state: 'claimed' } };
+        }
+        if (message.action === ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM) {
+          return { ok: true, value: { claimId: message.payload.claimId, state: 'confirmed' } };
+        }
+        if (message.action === ACTIONS.RELEASE_HOST_PERMISSION_CLAIM) {
+          return { ok: true, value: { claimId: message.payload.claimId, state: 'released' } };
+        }
+        throw new Error('worker disconnected');
+      },
+    },
+  };
+
+  await assert.rejects(runWithHostOriginGrant({
+    chromeApi,
+    values: ['https://cdn.test/master.m3u8'],
+    createClaimId: () => 'permission-send-failure',
+  }, async () => {
+    await chromeApi.runtime.sendMessage({ action: ACTIONS.DOWNLOAD_HLS });
+  }), /worker disconnected/);
+  assert.deepEqual(actions, [
+    ACTIONS.CLAIM_HOST_PERMISSIONS,
+    ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+    ACTIONS.DOWNLOAD_HLS,
+    ACTIONS.RELEASE_HOST_PERMISSION_CLAIM,
+  ]);
+});
+
+test('aprovação tardia renova a reserva e falha pós-grant remove a permissão concedida', async () => {
+  const actions = [];
+  let removeCalls = 0;
+  let heartbeat;
+  const chromeApi = {
+    permissions: {
+      async contains() { return false; },
+      async request() {
+        actions.push('approved-after-prompt');
+        heartbeat();
+        await new Promise((resolve) => setImmediate(resolve));
+        return true;
+      },
+      async remove({ origins }) {
+        removeCalls += 1;
+        assert.deepEqual(origins, ['https://slow.test/*']);
+        return true;
+      },
+    },
+    runtime: {
+      async sendMessage(message) {
+        actions.push(message.action);
+        if (message.action === ACTIONS.CLAIM_HOST_PERMISSIONS) {
+          return { ok: true, value: { claimId: message.payload.claimId, state: 'claimed' } };
+        }
+        if (message.action === ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM) {
+          throw new Error('worker reiniciado durante confirmação');
+        }
+        throw new Error('worker indisponível para liberar');
+      },
+    },
+  };
+
+  await assert.rejects(requestHostOriginGrant(['https://slow.test/master.m3u8'], {
+    chromeApi,
+    createClaimId: () => 'permission-late',
+    claimHeartbeatMs: 1,
+    setIntervalFn(callback) { heartbeat = callback; return 7; },
+    clearIntervalFn(id) { assert.equal(id, 7); },
+  }), /reiniciado/);
+  assert.deepEqual(actions, [
+    ACTIONS.CLAIM_HOST_PERMISSIONS,
+    'approved-after-prompt',
+    ACTIONS.CLAIM_HOST_PERMISSIONS,
+    ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+    ACTIONS.RELEASE_HOST_PERMISSION_CLAIM,
+  ]);
+  assert.equal(removeCalls, 1);
 });
 
 test('canonicalizes media URLs without discarding query tokens', () => {
@@ -109,6 +298,24 @@ test('matches an active HLS operation after its signed query token rotates', () 
   assert.equal(found.operationId, 'active');
 });
 
+test('prefere URL HLS exata e não usa fallback de query quando ele é ambíguo', () => {
+  const item = {
+    kind: 'hls',
+    variants: [{ url: 'https://cdn.test/playlist.m3u8?token=exact' }],
+  };
+  const exact = findMatchingOperation(item, [
+    { operationId: 'other', url: 'https://cdn.test/playlist.m3u8?token=other', state: 'assembling', updatedAt: 9 },
+    { operationId: 'exact', url: 'https://cdn.test/playlist.m3u8?token=exact', state: 'complete', updatedAt: 1 },
+  ]);
+  assert.equal(exact.operationId, 'exact');
+
+  const ambiguous = findMatchingOperation(item, [
+    { operationId: 'old', url: 'https://cdn.test/playlist.m3u8?token=old', state: 'complete', updatedAt: 1 },
+    { operationId: 'new', url: 'https://cdn.test/playlist.m3u8?token=new', state: 'assembling', updatedAt: 2 },
+  ]);
+  assert.equal(ambiguous, undefined);
+});
+
 test('unwraps only a valid pure YouTube catalog and durable job snapshot', () => {
   const catalog = unwrapYouTubeFormats({ ok: true, value: {
     videoId: 'jNQXAC9IVRw', title: 'Me at the zoo', durationSeconds: 19,
@@ -147,7 +354,36 @@ test('unwraps a TikTok catalog and builds a remote-media item', () => {
   assert.equal(item.id, 'tiktok:7488298911734435077');
 });
 
-test('boots one YouTube recovery request and one shared storage listener', async () => {
+test('somente áudio descreve a faixa M4A realmente priorizada pelo seletor', () => {
+  const item = youtubeItem({
+    platform: 'youtube', videoId: 'jNQXAC9IVRw', title: 'Me at the zoo',
+    durationSeconds: 19,
+    qualities: [{ height: 720, label: '720p', container: 'mp4', combined: true }],
+    formats: [
+      {
+        formatId: '251', height: null, container: 'webm', combined: false,
+        audioOnly: true, fps: null, hdr: false, dynamicRange: null,
+        videoCodec: null, audioCodec: 'opus', bitrateKbps: 192,
+        fileSizeBytes: 5_000_000, fileSizeApproximate: false, language: null,
+      },
+      {
+        formatId: '140', height: null, container: 'm4a', combined: false,
+        audioOnly: true, fps: null, hdr: false, dynamicRange: null,
+        videoCodec: null, audioCodec: 'mp4a.40.2', bitrateKbps: 128,
+        fileSizeBytes: 4_000_000, fileSizeApproximate: true, language: null,
+      },
+    ],
+    subtitles: [], audioLanguages: [],
+  }, 'https://www.youtube.com/watch?v=jNQXAC9IVRw');
+
+  const audio = item.variants.at(-1);
+  assert.equal(audio.selection.audioOnly, true);
+  assert.match(audio.label, /AAC/);
+  assert.match(audio.label, /~3,81 MB/);
+  assert.doesNotMatch(audio.label, /OPUS/);
+});
+
+test('boots YouTube and durable queue recovery with one shared storage listener', async () => {
   class Element {
     constructor() { this.dataset = {}; this.children = []; }
     append(...children) { this.children.push(...children); }
@@ -170,7 +406,10 @@ test('boots one YouTube recovery request and one shared storage listener', async
       },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(messages, [{ target: 'background', action: 'YOUTUBE_GET_JOB', payload: {} }]);
+    assert.deepEqual(messages, [
+      { target: 'background', action: 'YOUTUBE_GET_JOB', payload: {} },
+      { target: 'background', action: 'YOUTUBE_GET_QUEUE', payload: {} },
+    ]);
     assert.equal(listeners.length, 1);
   } finally {
     globalThis.document = previousDocument;
@@ -471,7 +710,7 @@ test('reopening the popup restores a completed relocated download from local sto
   }
 });
 
-test('clicking the rendered cancel control sends the active YouTube job id', async () => {
+test('clicking cancel applies the returned queue job without waiting for a storage event', async () => {
   class InteractiveElement {
     constructor(tagName = 'div') {
       this.tagName = tagName;
@@ -528,6 +767,19 @@ test('clicking the rendered cancel control sends the active YouTube job id', asy
     stage: 'video', percent: 42, downloadedBytes: null, totalBytes: null,
     speedBytesPerSecond: null, etaSeconds: null, path: null, error: null, updatedAt: 1,
   };
+  const cancelled = {
+    jobId: 'youtube-job-1', operationId: 'queue-op-1', videoId: 'jNQXAC9IVRw',
+    title: 'Me at the zoo', url: snapshot.url, height: 720,
+    selection: {
+      height: 720, audioOnly: false, subtitleLanguage: null,
+      includeAutomaticSubtitles: false,
+    },
+    state: 'cancelled', stage: 'cancelled', percent: 42,
+    downloadedBytes: null, totalBytes: null, speedBytesPerSecond: null,
+    etaSeconds: null, path: null, error: null, position: null,
+    resumePartial: false, attemptCount: 0,
+    createdAt: '2026-08-12T12:00:00Z', updatedAt: '2026-08-12T12:01:00Z',
+  };
   const root = new InteractiveElement();
   const announcer = new InteractiveElement();
   const previousDocument = globalThis.document;
@@ -542,7 +794,11 @@ test('clicking the rendered cancel control sends the active YouTube job id', asy
           sendMessage: async (message) => {
             messages.push(message);
             if (message.action === 'YOUTUBE_GET_JOB') return { ok: true, value: snapshot };
-            return { ok: true, value: { requested: true, requestId: 'cancel-1' } };
+            if (message.action === 'YOUTUBE_GET_QUEUE') return { ok: true, value: [] };
+            if (message.action === 'YOUTUBE_CANCEL_DOWNLOAD') {
+              return { ok: true, value: cancelled };
+            }
+            throw new Error(`unexpected action ${message.action}`);
           },
         },
         storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
@@ -560,26 +816,23 @@ test('clicking the rendered cancel control sends the active YouTube job id', asy
       target: 'background', action: 'YOUTUBE_CANCEL_DOWNLOAD', payload: { jobId: 'youtube-job-1' },
     });
     assert.equal(listeners.length, 1);
-
-    const completed = {
-      ...snapshot,
-      stage: 'complete',
-      percent: 100,
-      path: String.raw`C:\Users\Carlos\Downloads\Video Radar\video.mp4`,
-      updatedAt: 2,
-    };
-    listeners[0]({ youtubeJob: { newValue: completed } }, 'local');
-    const reveal = find(root, (element) => Object.hasOwn(element.dataset, 'reveal'));
-    assert.ok(reveal, 'completed YouTube job did not render the Explorer control');
-    root.listeners.get('click')({ target: reveal });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    assert.deepEqual(messages.at(-1), {
-      target: 'background',
-      action: 'YOUTUBE_REVEAL_DOWNLOADED_FILE',
-      payload: { path: completed.path },
-    });
+    assert.ok(
+      find(root, (element) => element.dataset.itemId === 'media-job:youtube-job-1'),
+      'cancel response was not rendered as the durable queue job',
+    );
+    assert.equal(find(root, (element) => Object.hasOwn(element.dataset, 'cancel')), null);
   } finally {
     globalThis.document = previousDocument;
   }
+});
+
+test('rich labels expose video codec, audio codec and bitrate together', () => {
+  const label = richMediaLabel({
+    label: '1080p', fps: 60, hdr: true, dynamicRange: 'HDR10',
+    videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2', bitrateKbps: 2_500,
+  });
+
+  assert.match(label, /H\.264/);
+  assert.match(label, /AAC/);
+  assert.match(label, /2500 kb\/s/);
 });

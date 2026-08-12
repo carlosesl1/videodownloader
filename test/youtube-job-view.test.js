@@ -27,3 +27,11 @@ test('preserva desconhecidos, limita percent confiável e nunca publica download
   assert.throws(() => assertJobSnapshot({ ...job, videoId: '' }), /Mensagem inválida/);
   assert.deepEqual(assertJobSnapshot({ ...job, videoId: '', title: '', stage: 'preparing', percent: null }), { ...job, videoId: '', title: '', stage: 'preparing', percent: null });
 });
+
+test('não aceita IDs numéricos por coerção de expressão regular', () => {
+  assert.throws(() => assertJobSnapshot({ ...job, jobId: 123 }), /Mensagem inválida/);
+  assert.throws(
+    () => assertJobSnapshot({ ...job, operationId: 123 }),
+    /Mensagem inválida/,
+  );
+});

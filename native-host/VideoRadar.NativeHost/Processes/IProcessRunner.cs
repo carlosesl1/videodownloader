@@ -1,6 +1,11 @@
 namespace VideoRadar.NativeHost.Processes;
 
-public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+public sealed record ProcessResult(
+    int ExitCode,
+    string StandardOutput,
+    string StandardError,
+    bool StandardOutputTruncated = false,
+    bool StandardErrorTruncated = false);
 
 public interface IProcessRunner
 {

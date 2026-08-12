@@ -25,15 +25,25 @@ function directMessage() {
   };
 }
 
-function inspectMessage(patterns = ['https://cdn.test/*']) {
+function inspectMessage(
+  patterns = ['https://cdn.test/*'],
+  permissionClaimId = null,
+) {
   return {
     target: 'background',
     action: ACTIONS.INSPECT_HLS,
-    payload: { url: 'https://cdn.test/master.m3u8', permissionPatterns: patterns },
+    payload: {
+      url: 'https://cdn.test/master.m3u8',
+      permissionPatterns: patterns,
+      permissionClaimId,
+    },
   };
 }
 
-function downloadMessage(url = 'https://cdn.test/video.m3u8#player') {
+function downloadMessage(
+  url = 'https://cdn.test/video.m3u8#player',
+  permissionClaimId = null,
+) {
   return {
     target: 'background',
     action: ACTIONS.DOWNLOAD_HLS,
@@ -42,8 +52,32 @@ function downloadMessage(url = 'https://cdn.test/video.m3u8#player') {
       filename: 'aula.ts',
       allowedOrigins: ['https://cdn.test'],
       permissionPatterns: ['https://cdn.test/*'],
+      permissionClaimId,
     },
   };
+}
+
+function permissionClaimMessage(
+  claimId = 'permission-1',
+  permissionPatterns = ['https://cdn.test/*'],
+) {
+  return {
+    target: 'background',
+    action: ACTIONS.CLAIM_HOST_PERMISSIONS,
+    payload: { claimId, permissionPatterns },
+  };
+}
+
+async function claimPermissions(
+  handlers,
+  claimId = 'permission-1',
+  permissionPatterns = ['https://cdn.test/*'],
+) {
+  assert.deepEqual(await handlers.handle(permissionClaimMessage(claimId, permissionPatterns)), {
+    claimId,
+    state: 'claimed',
+  });
+  return claimId;
 }
 
 function completion(operationId, blobUrl = `blob:extension.test/${operationId}`) {
@@ -131,7 +165,9 @@ function defaultDependencies(overrides = {}) {
   const downloadItems = [];
   const downloadSearches = [];
   const nativeRequests = [];
-  const relocationCalls = { track: [], deliver: [] };
+  const relocationCalls = {
+    track: [], intent: [], bind: [], recover: [], abandon: [], deliver: [],
+  };
   return {
     session,
     local,
@@ -175,14 +211,25 @@ function defaultDependencies(overrides = {}) {
           return {
             type: 'ready',
             requestId: 'ping-1',
-            protocolVersion: 3,
+            protocolVersion: 5,
             nativeName: 'com.videoradar.helper',
+            hostVersion: '1.1.0',
+            capabilities: ['idempotentStart', 'idempotentMove'],
             defaultFolder: String.raw`C:\Downloads\Video Radar`,
           };
         },
       },
       relocation: {
         async track(record) { relocationCalls.track.push(structuredClone(record)); },
+        async createIntent(record) { relocationCalls.intent.push(structuredClone(record)); },
+        async bindIntent(operationId, downloadId) {
+          relocationCalls.bind.push({ operationId, downloadId });
+        },
+        async recoverIntent(operationId, downloadId) {
+          relocationCalls.recover.push({ operationId, downloadId });
+          return true;
+        },
+        async abandonIntent(operationId) { relocationCalls.abandon.push(operationId); },
         async deliver(downloadId) { relocationCalls.deliver.push(downloadId); },
       },
       sendOffscreen: async (message) => {
@@ -219,14 +266,15 @@ test('download preferences use automatic staging or restore Save As prompts', as
     saveAs: false,
   });
   assert.equal(automatic.nativeRequests.length, 1);
-  assert.deepEqual(automatic.relocationCalls.track, [{
-    downloadId: 41,
+  assert.deepEqual(automatic.relocationCalls.intent, [{
+    downloadId: null,
     operationId: 'operation-1',
     destinationFolder: String.raw`C:\Downloads\Video Radar`,
     mediaKind: 'direct',
     mediaUrl: 'https://cdn.test/aula.mp4',
     displayName: 'aula.mp4',
   }]);
+  assert.deepEqual(automatic.relocationCalls.bind, [{ operationId: 'operation-1', downloadId: 41 }]);
   assert.deepEqual(automatic.relocationCalls.deliver, [41]);
 
   const prompted = defaultDependencies({
@@ -240,6 +288,16 @@ test('download preferences use automatic staging or restore Save As prompts', as
     filename: 'aula.mp4',
     saveAs: true,
   });
+  assert.deepEqual(prompted.relocationCalls.intent, [{
+    downloadId: null,
+    operationId: 'operation-1',
+    destinationFolder: null,
+    mediaKind: 'direct',
+    mediaUrl: 'https://cdn.test/aula.mp4',
+    displayName: 'aula.mp4',
+  }]);
+  assert.deepEqual(prompted.relocationCalls.bind, [{ operationId: 'operation-1', downloadId: 41 }]);
+  assert.deepEqual(prompted.relocationCalls.deliver, [41]);
 });
 
 test('DOWNLOAD_HLS persists then returns an acknowledged operation without waiting for assembly', async () => {
@@ -491,10 +549,40 @@ test('storage failure after Chrome starts downloading keeps the blob and reconci
   )));
 });
 
+test('completion antecipado recupera e vincula a intenção HLS antes do terminal', async () => {
+  const env = defaultDependencies();
+  env.local.values.downloadPreferences = { subfolder: 'Cursos', automatic: true };
+  env.dependencies.downloads = {
+    async search({ id }) {
+      return [{
+        id,
+        url: 'blob:extension.test/operation-1',
+        state: 'complete',
+        filename: String.raw`C:\Downloads\Video Radar\.staging\operation-1\aula.ts`,
+      }];
+    },
+    async download(options) {
+      env.downloadsStarted.push(options);
+      return 77;
+    },
+  };
+  const handlers = createBackgroundHandlers(env.dependencies);
+  const started = await handlers.handle(downloadMessage());
+
+  await handlers.handle(completion(started.operationId));
+  delete env.session.values['hlsDownloadBlob:77'];
+  await handlers.handleDownloadChanged({ id: 77, state: { current: 'complete' } });
+
+  assert.deepEqual(env.relocationCalls.recover, [{ operationId: started.operationId, downloadId: 77 }]);
+  assert.equal(env.session.values[`hlsOperation:${started.operationId}`].state, 'complete');
+  assert.equal(env.downloadsStarted.length, 1);
+});
+
 test('assembly completion durably releases host permissions before terminal browser state', async () => {
   const env = defaultDependencies();
   const handlers = createBackgroundHandlers(env.dependencies);
-  const started = await handlers.handle(downloadMessage());
+  const claimId = await claimPermissions(handlers);
+  const started = await handlers.handle(downloadMessage(undefined, claimId));
 
   await handlers.handle(completion(started.operationId));
   const record = Object.values(env.session.values).find(
@@ -509,7 +597,8 @@ test('assembly completion durably releases host permissions before terminal brow
 test('terminal recovery still removes permissions when no assembly-release marker exists', async () => {
   const env = defaultDependencies();
   const handlers = createBackgroundHandlers(env.dependencies);
-  const started = await handlers.handle(downloadMessage());
+  const claimId = await claimPermissions(handlers);
+  const started = await handlers.handle(downloadMessage(undefined, claimId));
 
   await handlers.handle(failedCompletion(started.operationId));
   const record = env.session.values[`hlsOperation:${started.operationId}`];
@@ -528,7 +617,8 @@ test('terminal cleanup keeps publishable status and finalizes only after durable
   let nextId = 0;
   env.dependencies.createOperationId = () => `operation-${++nextId}`;
   const handlers = createBackgroundHandlers(env.dependencies);
-  const started = await handlers.handle(downloadMessage());
+  const claimId = await claimPermissions(handlers);
+  const started = await handlers.handle(downloadMessage(undefined, claimId));
   const blobUrl = `blob:extension.test/${started.operationId}`;
   await handlers.handle(completion(started.operationId, blobUrl));
   await handlers.handleDownloadChanged({ id: 41, state: { current: 'complete' } });
@@ -624,8 +714,10 @@ test('offscreen cleanup wake recovers a failed inspection permission removal aft
     }
     throw new Error(`unexpected ${message.action}`);
   };
+  const local = memorySession();
   const dependencies = {
     storageSession: session,
+    storageLocal: local,
     downloads: { async search() { return []; }, async download() { return 1; } },
     createOperationId: () => 'active-operation',
     createInspectionId: () => 'inspection-retry',
@@ -641,15 +733,22 @@ test('offscreen cleanup wake recovers a failed inspection permission removal aft
     },
   };
   const first = createBackgroundHandlers(dependencies);
+  await first.ready;
+  await claimPermissions(first, 'video-claim', ['https://video.test/*']);
   await first.handle({
     ...downloadMessage('https://video.test/live.m3u8'),
     payload: {
       ...downloadMessage('https://video.test/live.m3u8').payload,
       allowedOrigins: ['https://video.test'],
       permissionPatterns: ['https://video.test/*'],
+      permissionClaimId: 'video-claim',
     },
   });
-  await assert.rejects(first.handle(inspectMessage(['https://inspect.test/*'])), /transitória/);
+  await claimPermissions(first, 'inspection-claim', ['https://inspect.test/*']);
+  await assert.rejects(
+    first.handle(inspectMessage(['https://inspect.test/*'], 'inspection-claim')),
+    /transitória/,
+  );
   assert.equal(session.values['hlsInspection:inspection-retry'].state, 'releasing');
   assert.ok(cleanupWake);
 
@@ -675,8 +774,31 @@ test('permission removal serialized ahead of a new start makes it fail before ST
       return true;
     },
   };
+  env.dependencies.sendOffscreen = async (message) => {
+    env.sent.push(message);
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
+    if (message.action === ACTIONS.START_HLS) {
+      return {
+        ok: true,
+        value: { operationId: message.payload.operationId, state: 'assembling' },
+      };
+    }
+    return {
+      ok: true,
+      value: {
+        kind: 'media',
+        variants: [{
+          url: 'https://cdn.test/master.m3u8', label: 'Qualidade única',
+          width: 0, height: 0, bandwidth: 0, codecs: '',
+        }],
+      },
+    };
+  };
   const handlers = createBackgroundHandlers(env.dependencies);
-  const started = await handlers.handle(downloadMessage());
+  const claimId = await claimPermissions(handlers);
+  const started = await handlers.handle(downloadMessage(undefined, claimId));
   await handlers.handle(completion(started.operationId));
 
   await assert.rejects(
@@ -684,6 +806,118 @@ test('permission removal serialized ahead of a new start makes it fail before ST
     (error) => error.code === 'BACKGROUND_PERMISSION_BUSY',
   );
   assert.equal(env.sent.filter(({ action }) => action === ACTIONS.START_HLS).length, 1);
+});
+
+test('HLS_BUSY releases a newly claimed origin without revoking the active origin', async () => {
+  const granted = new Set(['https://first.test/*', 'https://second.test/*']);
+  const env = defaultDependencies();
+  let operation = 0;
+  env.dependencies.createOperationId = () => `operation-${++operation}`;
+  env.dependencies.permissions = {
+    async contains({ origins }) { return origins.every((origin) => granted.has(origin)); },
+    async remove({ origins }) {
+      env.removed.push({ origins: [...origins] });
+      for (const origin of origins) granted.delete(origin);
+      return true;
+    },
+  };
+  const handlers = createBackgroundHandlers(env.dependencies);
+  await claimPermissions(handlers, 'claim-first', ['https://first.test/*']);
+  await handlers.handle({
+    ...downloadMessage('https://first.test/live.m3u8', 'claim-first'),
+    payload: {
+      ...downloadMessage('https://first.test/live.m3u8', 'claim-first').payload,
+      allowedOrigins: ['https://first.test'],
+      permissionPatterns: ['https://first.test/*'],
+    },
+  });
+  await claimPermissions(handlers, 'claim-second', ['https://second.test/*']);
+
+  await assert.rejects(handlers.handle({
+    ...downloadMessage('https://second.test/live.m3u8', 'claim-second'),
+    payload: {
+      ...downloadMessage('https://second.test/live.m3u8', 'claim-second').payload,
+      allowedOrigins: ['https://second.test'],
+      permissionPatterns: ['https://second.test/*'],
+    },
+  }), (error) => error.code === 'HLS_BUSY');
+
+  assert.deepEqual(env.removed, [{ origins: ['https://second.test/*'] }]);
+  assert.equal(granted.has('https://first.test/*'), true);
+  assert.deepEqual(env.local.values.ownedHostPermissionPatterns, ['https://first.test/*']);
+  assert.equal(Object.hasOwn(env.local.values, 'hostPermissionClaims'), false);
+});
+
+test('restart expires an orphan permission claim and removes its grant', async () => {
+  let clock = 100;
+  const env = defaultDependencies();
+  env.dependencies.now = () => clock;
+  const first = createBackgroundHandlers(env.dependencies);
+  await first.ready;
+  await claimPermissions(first, 'orphan-claim');
+  assert.deepEqual(env.local.values.ownedHostPermissionPatterns, ['https://cdn.test/*']);
+  assert.equal(env.local.values.hostPermissionClaims.length, 1);
+
+  clock += 10 * 60_000 + 1;
+  const recreated = createBackgroundHandlers(env.dependencies);
+  await recreated.ready;
+
+  assert.deepEqual(env.removed, [{ origins: ['https://cdn.test/*'] }]);
+  assert.equal(Object.hasOwn(env.local.values, 'ownedHostPermissionPatterns'), false);
+  assert.equal(Object.hasOwn(env.local.values, 'hostPermissionClaims'), false);
+});
+
+test('confirmação após prompt tardio renova a reserva antes do consumo', async () => {
+  let clock = 100;
+  const env = defaultDependencies();
+  env.dependencies.now = () => clock;
+  const handlers = createBackgroundHandlers(env.dependencies);
+  await claimPermissions(handlers, 'slow-claim');
+  clock += 10 * 60_000 - 1;
+  await claimPermissions(handlers, 'slow-claim');
+  assert.equal(env.local.values.hostPermissionClaims[0].createdAt, clock);
+  clock += 10 * 60_000 - 1;
+
+  assert.deepEqual(await handlers.handle({
+    target: 'background',
+    action: ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+    payload: {
+      claimId: 'slow-claim',
+      permissionPatterns: ['https://cdn.test/*'],
+    },
+  }), { claimId: 'slow-claim', state: 'confirmed' });
+  assert.equal(env.local.values.hostPermissionClaims[0].createdAt, clock);
+
+  const started = await handlers.handle(downloadMessage(undefined, 'slow-claim'));
+  assert.equal(started.state, 'assembling');
+  assert.equal(Object.hasOwn(env.local.values, 'hostPermissionClaims'), false);
+});
+
+test('remove false keeps ownership until contains confirms the grant is absent', async () => {
+  let permissionPresent = true;
+  let removeCalls = 0;
+  const env = defaultDependencies();
+  env.dependencies.permissions = {
+    async contains() { return permissionPresent; },
+    async remove() { removeCalls += 1; return false; },
+  };
+  const handlers = createBackgroundHandlers(env.dependencies);
+  await claimPermissions(handlers, 'release-retry');
+
+  await assert.rejects(handlers.handle({
+    target: 'background',
+    action: ACTIONS.RELEASE_HOST_PERMISSION_CLAIM,
+    payload: { claimId: 'release-retry' },
+  }), (error) => error.code === 'BACKGROUND_PERMISSION_RELEASE');
+  assert.equal(removeCalls, 1);
+  assert.deepEqual(env.local.values.ownedHostPermissionPatterns, ['https://cdn.test/*']);
+  assert.equal(Object.hasOwn(env.local.values, 'hostPermissionClaims'), false);
+
+  permissionPresent = false;
+  const recreated = createBackgroundHandlers(env.dependencies);
+  await recreated.ready;
+  assert.equal(removeCalls, 1);
+  assert.equal(Object.hasOwn(env.local.values, 'ownedHostPermissionPatterns'), false);
 });
 
 test('inspection validates the complete result before returning and releases permissions', async () => {
@@ -704,11 +938,72 @@ test('inspection validates the complete result before returning and releases per
     };
   };
   const handlers = createBackgroundHandlers(env.dependencies);
+  const claimId = await claimPermissions(handlers);
 
-  await assert.rejects(handlers.handle(inspectMessage()), (error) => (
+  await assert.rejects(handlers.handle(inspectMessage(undefined, claimId)), (error) => (
     error.code === 'BACKGROUND_OFFSCREEN_RESPONSE'
   ));
   assert.deepEqual(env.removed, [{ origins: ['https://cdn.test/*'] }]);
+});
+
+test('inspection setup failure does not strand an active lease before offscreen work starts', async () => {
+  const env = defaultDependencies();
+  const removeLocal = env.local.remove.bind(env.local);
+  env.local.remove = async (keys) => {
+    if (keys === 'hostPermissionClaims') throw new Error('claim storage unavailable');
+    return removeLocal(keys);
+  };
+  env.dependencies.sendOffscreen = async (message) => {
+    env.sent.push(message);
+    if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
+      return { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } };
+    }
+    throw new Error(`unexpected ${message.action}`);
+  };
+  const handlers = createBackgroundHandlers(env.dependencies);
+  await handlers.ready;
+  await claimPermissions(handlers, 'inspection-setup-failure');
+
+  await assert.rejects(
+    handlers.handle(inspectMessage(undefined, 'inspection-setup-failure')),
+    /claim storage unavailable/,
+  );
+
+  assert.equal(
+    Object.keys(env.session.values).some((key) => key.startsWith('hlsInspection:')),
+    false,
+  );
+  assert.equal(
+    env.sent.some(({ action }) => action === ACTIONS.INSPECT_HLS),
+    false,
+  );
+  assert.equal(env.local.values.hostPermissionClaims.length, 1);
+  assert.deepEqual(env.local.values.ownedHostPermissionPatterns, ['https://cdn.test/*']);
+});
+
+test('inspection never revokes a permission that already belonged to the user', async () => {
+  const env = defaultDependencies();
+  env.dependencies.permissions = {
+    contains: async () => true,
+    remove: async (options) => { env.removed.push(options); return true; },
+  };
+  env.dependencies.sendOffscreen = async (message) => (
+    message.action === ACTIONS.ARM_INSPECTION_CLEANUP
+      ? { ok: true, value: { leaseId: message.payload.leaseId, state: 'armed' } }
+      : { ok: true, value: {
+          kind: 'media',
+          variants: [{
+            url: 'https://cdn.test/master.m3u8', label: 'Qualidade única',
+            width: 0, height: 0, bandwidth: 0, codecs: '',
+          }],
+        } }
+  );
+  const handlers = createBackgroundHandlers(env.dependencies);
+
+  await handlers.handle(inspectMessage(['https://cdn.test/*'], null));
+
+  assert.deepEqual(env.removed, []);
+  assert.deepEqual(env.local.values.ownedHostPermissionPatterns, undefined);
 });
 
 test('inspection accepts a parser variant whose optional codecs metadata is null', async () => {

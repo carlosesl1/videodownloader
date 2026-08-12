@@ -7,8 +7,33 @@ function fakeView() {
   return {
     rendered: [],
     statuses: [],
+    diagnostics: [],
+    diagnosticStatuses: [],
+    diagnosticPaths: [],
     render(value) { this.rendered.push(structuredClone(value)); },
     status(message, error = false) { this.statuses.push({ message, error }); },
+    renderDiagnostics(value) { this.diagnostics.push(structuredClone(value)); },
+    diagnosticStatus(message, error = false) {
+      this.diagnosticStatuses.push({ message, error });
+    },
+    renderDiagnosticPath(value) { this.diagnosticPaths.push(value); },
+  };
+}
+
+function diagnosticsEvent(overrides = {}) {
+  return {
+    type: 'diagnostics',
+    requestId: 'diagnostics-1',
+    generatedAt: '2026-08-12T12:00:00Z',
+    hostVersion: '1.2.0',
+    protocolVersion: 5,
+    architecture: 'x64',
+    operatingSystem: 'Microsoft Windows 11',
+    availableBytes: 1000,
+    loggingEnabled: false,
+    logFileCount: 0,
+    tools: [],
+    ...overrides,
   };
 }
 
@@ -41,18 +66,24 @@ test('mostra pasta atual e persiste o checkbox', async () => {
     askEveryTime: true,
     defaultFolder: String.raw`D:\Vídeos`,
   });
-  const nativeClient = fakeNative([{
-    type: 'ready',
-    requestId: 'ping-1',
-    protocolVersion: 3,
-    nativeName: 'com.videoradar.helper',
-    defaultFolder: String.raw`C:\Users\Carlos\Downloads\Video Radar`,
-  }]);
+  const nativeClient = fakeNative([
+    {
+      type: 'ready',
+      requestId: 'ping-1',
+      protocolVersion: 5,
+      nativeName: 'com.videoradar.helper',
+      hostVersion: '1.1.0',
+      capabilities: ['idempotentStart', 'idempotentMove'],
+      defaultFolder: String.raw`C:\Users\Carlos\Downloads\Video Radar`,
+    },
+    diagnosticsEvent(),
+  ]);
   const controller = createOptionsController({ view, storageLocal, nativeClient });
 
   await controller.load();
   assert.equal(view.rendered.at(-1).effectiveFolder, String.raw`D:\Vídeos`);
   assert.equal(view.rendered.at(-1).askEveryTime, true);
+  assert.equal(view.diagnostics.at(-1).hostVersion, '1.2.0');
 
   await controller.setAskEveryTime(false);
   assert.deepEqual(storageLocal.preferences, {
@@ -61,6 +92,41 @@ test('mostra pasta atual e persiste o checkbox', async () => {
     defaultFolder: String.raw`D:\Vídeos`,
   });
   assert.equal(view.statuses.at(-1).message, 'Configuração salva.');
+});
+
+test('ativa, exporta e limpa diagnósticos somente por ação explícita', async () => {
+  const view = fakeView();
+  const storageLocal = fakeStorage({
+    schemaVersion: 2,
+    askEveryTime: false,
+    defaultFolder: null,
+  });
+  const exportPath = String.raw`D:\Suporte\VideoRadar-Diagnostics-20260812.zip`;
+  const nativeClient = fakeNative([
+    diagnosticsEvent({ loggingEnabled: true }),
+    { type: 'folderSelected', requestId: 'folder-1', path: String.raw`D:\Suporte` },
+    { type: 'diagnosticsExported', requestId: 'export-1', path: exportPath },
+    { type: 'diagnosticsCleared', requestId: 'clear-1' },
+    diagnosticsEvent({ loggingEnabled: true, logFileCount: 0 }),
+  ]);
+  const controller = createOptionsController({ view, storageLocal, nativeClient });
+
+  await controller.setDiagnosticsEnabled(true);
+  assert.equal(view.diagnostics.at(-1).loggingEnabled, true);
+  assert.equal(view.diagnosticStatuses.at(-1).message, 'Registro local ativado.');
+
+  assert.equal(await controller.exportDiagnostics(), exportPath);
+  assert.equal(view.diagnosticPaths.at(-1), exportPath);
+
+  await controller.clearDiagnostics();
+  assert.equal(view.diagnosticPaths.at(-1), null);
+  assert.deepEqual(nativeClient.requests.map(({ type }) => type), [
+    'setDiagnostics',
+    'chooseDownloadFolder',
+    'exportDiagnostics',
+    'clearDiagnostics',
+    'getDiagnostics',
+  ]);
 });
 
 test('altera pasta somente quando o seletor confirma', async () => {

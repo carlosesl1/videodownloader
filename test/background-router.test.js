@@ -20,14 +20,23 @@ test('encaminha descoberta, YouTube e mídia aos coordenadores corretos', async 
     ready: Promise.resolve(),
     async handle(message) { calls.push(['discovery', message.action]); return 'discovery'; },
   };
-  const router = createBackgroundRouter({ hls, youtube, discovery });
+  const queue = {
+    async handle(message) { calls.push(['queue', message.action]); return 'queue'; },
+  };
+  const router = createBackgroundRouter({ hls, youtube, discovery, queue });
 
   await router.ready;
   for (const action of Object.values(DISCOVERY_ACTIONS)) {
     assert.equal(await router.handle({ action }), 'discovery');
   }
   for (const action of Object.values(YOUTUBE_ACTIONS)) {
-    assert.equal(await router.handle({ action }), 'youtube');
+    const queueAction = [
+      YOUTUBE_ACTIONS.GET_QUEUE,
+      YOUTUBE_ACTIONS.CANCEL_DOWNLOAD,
+      YOUTUBE_ACTIONS.PAUSE_DOWNLOAD,
+      YOUTUBE_ACTIONS.RESUME_DOWNLOAD,
+    ].includes(action);
+    assert.equal(await router.handle({ action }), queueAction ? 'queue' : 'youtube');
   }
   for (const action of [ACTIONS.DOWNLOAD_DIRECT, ACTIONS.DOWNLOAD_HLS, 'UNKNOWN']) {
     assert.equal(await router.handle({ action }), 'hls');
@@ -35,7 +44,12 @@ test('encaminha descoberta, YouTube e mídia aos coordenadores corretos', async 
 
   assert.deepEqual(calls, [
     ...Object.values(DISCOVERY_ACTIONS).map((action) => ['discovery', action]),
-    ...Object.values(YOUTUBE_ACTIONS).map((action) => ['youtube', action]),
+    ...Object.values(YOUTUBE_ACTIONS).map((action) => ([
+      [YOUTUBE_ACTIONS.GET_QUEUE, YOUTUBE_ACTIONS.CANCEL_DOWNLOAD,
+        YOUTUBE_ACTIONS.PAUSE_DOWNLOAD, YOUTUBE_ACTIONS.RESUME_DOWNLOAD]
+        .includes(action) ? 'queue' : 'youtube',
+      action,
+    ])),
     ['hls', ACTIONS.DOWNLOAD_DIRECT],
     ['hls', ACTIONS.DOWNLOAD_HLS],
     ['hls', 'UNKNOWN'],

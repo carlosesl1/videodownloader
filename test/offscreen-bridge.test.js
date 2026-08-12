@@ -37,7 +37,7 @@ test('inspects HLS synchronously and rejects the removed legacy DOWNLOAD_HLS pat
   assert.deepEqual(await bridge.handle({
     target: 'offscreen',
     action: ACTIONS.INSPECT_HLS,
-    payload: { url: 'https://cdn.test/video.m3u8', permissionPatterns: ['https://cdn.test/*'] },
+    payload: { url: 'https://cdn.test/video.m3u8' },
   }), { kind: 'media', variants: [] });
   await assert.rejects(bridge.handle({
     target: 'offscreen',

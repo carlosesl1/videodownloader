@@ -30,7 +30,8 @@ function assert(condition, message) {
 
 const required = [
   'manifest.json', 'popup.html', 'options.html', 'offscreen.html',
-  'styles/popup.css', 'styles/options.css', 'assets/icon-128.png',
+  'styles/popup.css', 'styles/options.css',
+  'assets/icon-16.png', 'assets/icon-32.png', 'assets/icon-48.png', 'assets/icon-128.png',
   'src/popup/main.js', 'src/options/main.js', 'src/offscreen/main.js', 'src/background/main.js',
   'README.md', 'Instalar-Video-Radar.cmd',
   'scripts/dotnet.ps1', 'scripts/fetch-native-tools.ps1', 'scripts/install-native-host.ps1',
@@ -46,12 +47,23 @@ sameSet(manifest.permissions ?? [], [
 assert(manifest.permissions.includes('nativeMessaging'), 'manifest must allow native messaging');
 assert(manifest.permissions.includes('downloads'), 'manifest must allow browser downloads');
 assert(manifest.options_ui?.page === 'options.html', 'manifest must expose options.html');
-assert(MIN_NATIVE_PROTOCOL_VERSION === 3, 'native protocol version must remain 3');
+assert(MIN_NATIVE_PROTOCOL_VERSION === 5, 'native protocol version must remain 5');
 assert(!manifest.host_permissions?.length, 'host_permissions must remain absent or empty');
 assert(JSON.stringify(manifest.optional_host_permissions) === JSON.stringify(['http://*/*', 'https://*/*']),
   'optional_host_permissions must be the approved HTTP(S) pair');
-assert(manifest.icons?.['128'] === 'assets/icon-128.png', 'manifest must point at the 128px icon');
-await access(fromRoot(manifest.icons['128']));
+assert(manifest.incognito === 'not_allowed', 'incognito must remain explicitly disabled');
+assert(manifest.content_security_policy?.extension_pages ===
+  "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';",
+'extension pages must use the approved explicit CSP');
+const expectedIcons = {
+  16: 'assets/icon-16.png',
+  32: 'assets/icon-32.png',
+  48: 'assets/icon-48.png',
+  128: 'assets/icon-128.png',
+};
+assert(JSON.stringify(manifest.icons) === JSON.stringify(expectedIcons), 'manifest icons must contain every approved size');
+assert(JSON.stringify(manifest.action?.default_icon) === JSON.stringify(expectedIcons), 'action icons must contain every approved size');
+await Promise.all(Object.values(expectedIcons).map((icon) => access(fromRoot(icon))));
 assert(typeof manifest.key === 'string' && manifest.key.length > 0, 'manifest.key must be non-empty');
 
 let publicKey;
@@ -67,11 +79,13 @@ const extensionId = [...createHash('sha256').update(publicKey).digest().subarray
   .join('');
 assert(extensionId === 'cakpfifpfmbdcilimpedanglnopnmckg', 'manifest.key derives an unexpected extension ID');
 
-const packagedId = fromRoot('dist/video-radar-helper/extension-id.txt');
-try {
-  assert((await readFile(packagedId, 'utf8')).trim() === extensionId, 'packaged extension-id does not match manifest.key');
-} catch (error) {
-  if (error?.code !== 'ENOENT') throw error;
+for (const rid of ['win-x64', 'win-arm64']) {
+  const packagedId = fromRoot(`dist/video-radar-helper-${rid}/extension-id.txt`);
+  try {
+    assert((await readFile(packagedId, 'utf8')).trim() === extensionId, `${rid} packaged extension-id does not match manifest.key`);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
 }
 
 const htmlFiles = ['popup.html', 'options.html', 'offscreen.html'];
@@ -123,18 +137,22 @@ for (const file of textFiles) {
 }
 
 const lock = JSON.parse(await readFile(fromRoot('native-host/tool-lock.json'), 'utf8'));
-assert(lock.schemaVersion === 1 && Array.isArray(lock.sources) && lock.sources.length === 3,
-  'tool lock must use schema 1 with exactly three sources');
+assert(lock.schemaVersion === 2 && Array.isArray(lock.targets) && lock.targets.length === 2,
+  'tool lock must use schema 2 with exactly two targets');
+assert(lock.targets[0]?.rid === 'win-x64' && lock.targets[0]?.architecture === 'x64' &&
+  lock.targets[1]?.rid === 'win-arm64' && lock.targets[1]?.architecture === 'arm64',
+  'tool lock target order or architecture differs');
 const expectedSources = {
   deno: { repository: 'denoland/deno', outputs: ['deno.exe'], license: 'deno-LICENSE.md' },
   ffmpeg: { repository: 'yt-dlp/FFmpeg-Builds', outputs: ['ffmpeg.exe', 'ffprobe.exe'], license: 'ffmpeg-builds-LICENSE.txt' },
   'yt-dlp': { repository: 'yt-dlp/yt-dlp', outputs: ['yt-dlp.exe'], license: 'yt-dlp-LICENSE.txt' },
 };
-sameSet(lock.sources.map((source) => source.name), Object.keys(expectedSources), 'tool lock sources');
 const assetBase = ['https:', '', 'api.github.com', 'repos'].join('/');
 const rawBase = ['https:', '', 'raw.githubusercontent.com'].join('/');
 const forbiddenUrlFragments = [['lat', 'est'].join(''), ['down', 'load'].join(''), ['mir', 'ror'].join('')];
-for (const source of lock.sources) {
+for (const target of lock.targets) {
+sameSet(target.sources.map((source) => source.name), Object.keys(expectedSources), `${target.rid} tool lock sources`);
+for (const source of target.sources) {
   const expected = expectedSources[source.name];
   assert(source.repository === expected.repository, `unexpected repository for ${source.name}`);
   assert(typeof source.version === 'string' && source.version.length > 0, `missing version for ${source.name}`);
@@ -159,7 +177,11 @@ for (const source of lock.sources) {
   assert(source.license?.fileName === expected.license, `unexpected license for ${source.name}`);
   assert(Array.isArray(source.archiveLicenses), `archive licenses missing for ${source.name}`);
 }
-const licenseNames = lock.sources.flatMap((source) => [source.license.fileName, ...(source.archiveLicenses ?? []).map((license) => license.fileName)]);
+}
+const licenseNames = [...new Set(lock.targets.flatMap(({ sources }) => sources.flatMap((source) => [
+  source.license.fileName,
+  ...(source.archiveLicenses ?? []).map((license) => license.fileName),
+])))];
 sameSet(licenseNames, ['deno-LICENSE.md', 'ffmpeg-builds-LICENSE.txt', 'ffmpeg-GPL-LICENSE.txt', 'yt-dlp-LICENSE.txt'], 'tool licenses');
 
 const csproj = await readFile(fromRoot('native-host/VideoRadar.NativeHost/VideoRadar.NativeHost.csproj'), 'utf8');
@@ -168,6 +190,7 @@ for (const property of ['<TargetFramework>net10.0</TargetFramework>', '<SelfCont
 }
 
 const packageJson = JSON.parse(await readFile(fromRoot('package.json'), 'utf8'));
+assert(packageJson.version === manifest.version, 'package.json and manifest.json versions must match');
 for (const script of ['test', 'check']) {
   assert(typeof packageJson.scripts?.[script] === 'string', `package script ${script} is missing`);
   assert(!/(?:fetch|package-native|lock-native|youtube|https?:\/\/)/i.test(packageJson.scripts[script]), `${script} must stay offline`);

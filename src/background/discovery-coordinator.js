@@ -2,6 +2,7 @@ import { scanPage } from '../detection/scan-page.js';
 import {
   DISCOVERY_ACTIONS,
   DISCOVERY_PREFIX,
+  MAX_DISCOVERY_SNAPSHOT_BYTES,
   assertDiscoveryMessage,
   sanitizeDiscoverySnapshot,
   sanitizePageScanResult,
@@ -11,6 +12,8 @@ import {
 import { canonicalMediaPage } from '../media/page-url.js';
 
 export { DISCOVERY_ACTIONS };
+
+export const DISCOVERY_STORAGE_BUDGET_BYTES = 2 * MAX_DISCOVERY_SNAPSHOT_BYTES;
 
 const SAFE_ERROR = /^[A-Z0-9_]{1,64}$/;
 const ACTIONABLE_MEDIA_ERRORS = new Set([
@@ -47,12 +50,27 @@ function errorCode(error) {
     : 'SCAN_FAILED';
 }
 
+function storedEntryBytes(key, value) {
+  const serialized = JSON.stringify({ [key]: value });
+  if (typeof serialized !== 'string') throw new Error('Estado de descoberta inválido');
+  let bytes = 0;
+  for (const character of serialized) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0x7F) bytes += 1;
+    else if (codePoint <= 0x7FF) bytes += 2;
+    else if (codePoint <= 0xFFFF) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
 export function createDiscoveryCoordinator({
   tabs,
   scripting,
   storageSession,
   youtube,
   now,
+  snapshotBudgetBytes = DISCOVERY_STORAGE_BUDGET_BYTES,
 }) {
   if (typeof tabs?.get !== 'function'
     || typeof scripting?.executeScript !== 'function'
@@ -60,11 +78,20 @@ export function createDiscoveryCoordinator({
     || typeof storageSession?.set !== 'function'
     || typeof storageSession?.remove !== 'function'
     || typeof youtube?.handle !== 'function'
-    || typeof now !== 'function') {
+    || typeof now !== 'function'
+    || !Number.isSafeInteger(snapshotBudgetBytes)
+    || snapshotBudgetBytes < 1_024) {
     throw new TypeError('Dependências inválidas do coordenador de descoberta.');
   }
 
   const inFlight = new Map();
+  let storageQueue = Promise.resolve();
+
+  function queueStorage(operation) {
+    const queued = storageQueue.then(operation);
+    storageQueue = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
 
   function timestamp() {
     const value = now();
@@ -72,22 +99,68 @@ export function createDiscoveryCoordinator({
     return value;
   }
 
-  async function read(tabId) {
-    const key = storageKey(tabId);
-    const stored = await storageSession.get(key);
-    if (!stored || !Object.hasOwn(stored, key)) return null;
-    try {
-      return sanitizeDiscoverySnapshot(stored[key]);
-    } catch {
-      await storageSession.remove(key);
-      return null;
-    }
+  function read(tabId) {
+    return queueStorage(async () => {
+      const key = storageKey(tabId);
+      const stored = await storageSession.get(key);
+      if (!stored || !Object.hasOwn(stored, key)) return null;
+      try {
+        return sanitizeDiscoverySnapshot(stored[key]);
+      } catch {
+        await storageSession.remove(key);
+        return null;
+      }
+    });
   }
 
-  async function persist(snapshot) {
+  function persist(snapshot) {
     const sanitized = sanitizeDiscoverySnapshot(snapshot);
-    await storageSession.set({ [storageKey(sanitized.tabId)]: sanitized });
-    return sanitized;
+    return queueStorage(async () => {
+      const key = storageKey(sanitized.tabId);
+      const stored = await storageSession.get(null);
+      const retained = [];
+      const invalidKeys = [];
+      let totalBytes = storedEntryBytes(key, sanitized);
+
+      if (stored && typeof stored === 'object') {
+        for (const [storedKey, storedValue] of Object.entries(stored)) {
+          if (!storedKey.startsWith(DISCOVERY_PREFIX) || storedKey === key) continue;
+          try {
+            const retainedSnapshot = sanitizeDiscoverySnapshot(storedValue);
+            if (storageKey(retainedSnapshot.tabId) !== storedKey) {
+              throw new Error('Estado de descoberta inválido');
+            }
+            const bytes = storedEntryBytes(storedKey, retainedSnapshot);
+            totalBytes += bytes;
+            retained.push({
+              key: storedKey,
+              bytes,
+              updatedAt: retainedSnapshot.updatedAt,
+            });
+          } catch {
+            invalidKeys.push(storedKey);
+          }
+        }
+      }
+
+      const protectedKeys = new Set([...inFlight.keys()].map(storageKey));
+      retained.sort((left, right) => left.updatedAt - right.updatedAt
+        || left.key.localeCompare(right.key));
+      const removals = [...invalidKeys];
+      for (const entry of retained) {
+        if (totalBytes <= snapshotBudgetBytes) break;
+        if (protectedKeys.has(entry.key)) continue;
+        removals.push(entry.key);
+        totalBytes -= entry.bytes;
+      }
+      for (const staleKey of removals) await storageSession.remove(staleKey);
+      await storageSession.set({ [key]: sanitized });
+      return sanitized;
+    });
+  }
+
+  function removeSnapshot(tabId) {
+    return queueStorage(() => storageSession.remove(storageKey(tabId)));
   }
 
   async function currentTab(tabId) {
@@ -168,7 +241,7 @@ export function createDiscoveryCoordinator({
       }
 
       if (!await stillOnPage(tabId, page.pageUrl)) {
-        await storageSession.remove(storageKey(tabId));
+        await removeSnapshot(tabId);
         return null;
       }
       return persist({
@@ -180,7 +253,7 @@ export function createDiscoveryCoordinator({
       });
     } catch (error) {
       if (!await stillOnPage(tabId, page.pageUrl)) {
-        await storageSession.remove(storageKey(tabId));
+        await removeSnapshot(tabId);
         return null;
       }
       return persist({
@@ -210,11 +283,11 @@ export function createDiscoveryCoordinator({
     try {
       page = await currentTab(tabId);
     } catch {
-      await storageSession.remove(storageKey(tabId));
+      await removeSnapshot(tabId);
       return null;
     }
     if (page.pageUrl !== snapshot.pageUrl) {
-      await storageSession.remove(storageKey(tabId));
+      await removeSnapshot(tabId);
       return null;
     }
     if (snapshot.status === 'scanning' && !inFlight.has(tabId)) {
@@ -241,7 +314,7 @@ export function createDiscoveryCoordinator({
 
   async function discard(tabId) {
     if (!Number.isSafeInteger(tabId) || tabId < 0) return;
-    await storageSession.remove(storageKey(tabId));
+    await removeSnapshot(tabId);
   }
 
   return Object.freeze({
