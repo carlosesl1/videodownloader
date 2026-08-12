@@ -78,9 +78,18 @@ function Assert-PackagePayload {
     [Parameter(Mandatory = $true)]$PayloadManifest
   )
 
-  Assert-PropertySet -Value $PayloadManifest -Expected @('schemaVersion', 'generatedAt', 'files') -Label 'package-manifest.json'
-  if ([int]$PayloadManifest.schemaVersion -ne 1) {
+  Assert-PropertySet -Value $PayloadManifest -Expected @(
+    'schemaVersion', 'generatedAt', 'targetRid', 'architecture', 'files'
+  ) -Label 'package-manifest.json'
+  if ([int]$PayloadManifest.schemaVersion -ne 2) {
     throw 'Versão incompatível de package-manifest.json.'
+  }
+
+  $targetRid = [string]$PayloadManifest.targetRid
+  $architecture = [string]$PayloadManifest.architecture
+  if (($targetRid -cne 'win-x64' -or $architecture -cne 'x64') -and
+      ($targetRid -cne 'win-arm64' -or $architecture -cne 'arm64')) {
+    throw 'Target ou arquitetura inválida em package-manifest.json.'
   }
 
   $expectedPaths = @(
@@ -162,6 +171,46 @@ function Assert-PackagePayload {
   return $validated
 }
 
+function Get-NativeWindowsArchitecture {
+  foreach ($value in @($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE)) {
+    if ([string]$value -ceq 'ARM64') { return 'arm64' }
+    if ([string]$value -ceq 'AMD64') { return 'x64' }
+  }
+  throw 'A arquitetura nativa do Windows não é suportada.'
+}
+
+function Assert-PeArchitecture {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Architecture
+  )
+
+  $expectedMachine = if ($Architecture -ceq 'arm64') { 0xaa64 } else { 0x8664 }
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $reader = [IO.BinaryReader]::new($stream)
+  try {
+    if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5a4d) {
+      throw "Executável PE inválido: $Path"
+    }
+    $stream.Position = 0x3c
+    $peOffset = $reader.ReadInt32()
+    if ($peOffset -lt 64 -or ($peOffset + 6) -gt $stream.Length) {
+      throw "Cabeçalho PE fora dos limites: $Path"
+    }
+    $stream.Position = $peOffset
+    if ($reader.ReadUInt32() -ne 0x00004550) {
+      throw "Assinatura PE inválida: $Path"
+    }
+    if ($reader.ReadUInt16() -ne $expectedMachine) {
+      throw "O pacote contém executável de arquitetura diferente de $Architecture."
+    }
+  }
+  finally {
+    $reader.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Copy-PackagePayload {
   param(
     [Parameter(Mandatory = $true)][object[]]$Payload,
@@ -195,7 +244,18 @@ function Invoke-InstalledPing {
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    $process.WaitForExit()
+    $pingTimeoutMilliseconds = 30000
+    if (-not $process.WaitForExit($pingTimeoutMilliseconds)) {
+      try {
+        $process.Kill()
+      }
+      catch [System.InvalidOperationException] {
+        # O processo encerrou entre o timeout e o Kill().
+      }
+      # WaitForExit(Int32) e Kill() existem no .NET Framework do PowerShell 5.1.
+      [void]$process.WaitForExit(5000)
+      throw 'O diagnóstico do auxiliar excedeu o limite de 30 segundos.'
+    }
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     [void]$stderrTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
@@ -268,13 +328,166 @@ function Restore-RegistrySnapshot {
   }
 }
 
+function Enter-InstallationLock {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  try {
+    $stream = [IO.File]::Open(
+      $Path,
+      [IO.FileMode]::OpenOrCreate,
+      [IO.FileAccess]::ReadWrite,
+      [IO.FileShare]::None)
+  }
+  catch [IO.IOException] {
+    throw 'Outra instalação ou atualização do Vídeo Radar já está em andamento.'
+  }
+
+  try {
+    $stream.SetLength(0)
+    $content = [Text.Encoding]::UTF8.GetBytes(
+      "process=$PID`nstartedAt=$([DateTimeOffset]::UtcNow.ToString('O'))`n")
+    $stream.Write($content, 0, $content.Length)
+    $stream.Flush($true)
+    return $stream
+  }
+  catch {
+    $stream.Dispose()
+    throw
+  }
+}
+
+function Enter-SetupMutex {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $createdNew = $false
+  try {
+    $mutex = [Threading.Mutex]::new($false, $Name, [ref]$createdNew)
+  }
+  catch {
+    throw 'Não foi possível criar o lock compartilhado da instalação.'
+  }
+  if (-not $createdNew) {
+    $mutex.Dispose()
+    throw 'Outra instalação ou atualização do Vídeo Radar já está em andamento.'
+  }
+  return $mutex
+}
+
+function Assert-ExistingRuntimeComponents {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string[]]$RelativePaths
+  )
+
+  foreach ($relativePath in $RelativePaths) {
+    $path = Join-Path $Root $relativePath
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "O componente instalado $relativePath não pode ser um link."
+    }
+    $mustBeDirectory = $relativePath -cne 'extension-id.txt'
+    if ($mustBeDirectory -and -not $item.PSIsContainer) {
+      throw "O componente instalado $relativePath deveria ser um diretório."
+    }
+    if (-not $mustBeDirectory -and $item.PSIsContainer) {
+      throw "O componente instalado $relativePath deveria ser um arquivo."
+    }
+  }
+}
+
+function Move-RuntimeComponents {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceRoot,
+    [Parameter(Mandatory = $true)][string]$DestinationRoot,
+    [Parameter(Mandatory = $true)][string[]]$RelativePaths,
+    [Parameter(Mandatory = $true)][Collections.Generic.List[string]]$Moved,
+    [switch]$RequireAll
+  )
+
+  foreach ($relativePath in $RelativePaths) {
+    $sourcePath = Join-Path $SourceRoot $relativePath
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+      if ($RequireAll) { throw "Componente de runtime ausente: $relativePath" }
+      continue
+    }
+    $destinationPath = Join-Path $DestinationRoot $relativePath
+    if (Test-Path -LiteralPath $destinationPath) {
+      throw "O destino da troca de runtime já existe: $relativePath"
+    }
+    if (-not (Test-Path -LiteralPath $DestinationRoot)) {
+      New-Item -ItemType Directory -Path $DestinationRoot | Out-Null
+    }
+    Move-Item -LiteralPath $sourcePath -Destination $destinationPath
+    $Moved.Add($relativePath)
+  }
+}
+
+function Remove-DirectoryWithoutFollowingReparsePoints {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $rootItem = Get-Item -LiteralPath $Path -Force
+  if (-not $rootItem.PSIsContainer -or
+      ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'A raiz do backup desta transação não é um diretório físico.'
+  }
+
+  foreach ($entryPath in @([IO.Directory]::EnumerateFileSystemEntries($Path))) {
+    $attributes = [IO.File]::GetAttributes($entryPath)
+    $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+    $isReparsePoint = ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    if ($isDirectory -and -not $isReparsePoint) {
+      Remove-DirectoryWithoutFollowingReparsePoints -Path $entryPath
+    }
+    elseif ($isDirectory) {
+      # Exclui somente o link/junction, sem percorrer o destino.
+      [IO.Directory]::Delete($entryPath, $false)
+    }
+    else {
+      if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+        [IO.File]::SetAttributes(
+          $entryPath,
+          $attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+        )
+      }
+      [IO.File]::Delete($entryPath)
+    }
+  }
+  [IO.Directory]::Delete($Path, $false)
+}
+
+function Remove-TransactionBackup {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ExpectedParent
+  )
+
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $fullParent = [IO.Path]::GetFullPath($ExpectedParent).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar
+  )
+  if ([IO.Path]::GetDirectoryName($fullPath) -cne $fullParent -or
+      [IO.Path]::GetFileName($fullPath) -cnotmatch
+        '^VideoRadar\.runtime-backup-[0-9a-f]{32}$') {
+    throw 'O caminho do backup desta transação não é seguro para remoção.'
+  }
+  Remove-DirectoryWithoutFollowingReparsePoints -Path $fullPath
+}
+
 $installRoot = $null
 $installStaging = $null
 $installBackup = $null
-$oldInstallMoved = $false
-$newInstallMoved = $false
+$installLock = $null
+$installLockPath = $null
+$setupMutex = $null
+$setupMutexName = 'Local\VideoRadarInstall-7A5C59C3-0DCE-4D0C-9BE1-5621E2AA4EA4'
+$runtimeComponents = @('host', 'licenses', 'extension-id.txt', 'native-host')
+$movedOldRuntime = [Collections.Generic.List[string]]::new()
+$movedNewRuntime = [Collections.Generic.List[string]]::new()
 $registryTouched = $false
 $registrySnapshot = @()
+$transactionCommitted = $false
 
 try {
   if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or
@@ -298,8 +511,26 @@ try {
   }
   $packageManifest = Get-Content -LiteralPath $packageManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
+  $nativeArchitecture = Get-NativeWindowsArchitecture
+  if ([string]$packageManifest.architecture -cne $nativeArchitecture) {
+    throw "Este pacote é $($packageManifest.architecture), mas o Windows é $nativeArchitecture. Baixe o pacote correto."
+  }
+
   # Esta chamada termina a validação de todos os hashes antes da primeira cópia.
   $payload = @(Assert-PackagePayload -Root $PackageRoot -PayloadManifest $packageManifest)
+  foreach ($relativePath in @(
+    'host/video-radar-host.exe',
+    'host/tools/deno.exe',
+    'host/tools/ffmpeg.exe',
+    'host/tools/ffprobe.exe',
+    'host/tools/yt-dlp.exe'
+  )) {
+    $entry = @($payload | Where-Object { $_.relativePath -ceq $relativePath })
+    if ($entry.Count -ne 1) {
+      throw "Executável ausente no payload: $relativePath"
+    }
+    Assert-PeArchitecture -Path $entry[0].sourcePath -Architecture $nativeArchitecture
+  }
   $extensionEntry = @($payload | Where-Object { $_.relativePath -ceq 'extension-id.txt' })
   if ($extensionEntry.Count -ne 1) {
     throw 'extension-id.txt não está no payload verificado.'
@@ -309,25 +540,26 @@ try {
     throw 'O ID da extensão no pacote é inválido.'
   }
 
-  $installStaging = Join-Path $localAppData ('VideoRadar.installing-' + [Guid]::NewGuid().ToString('N'))
-  $installBackup = Join-Path $localAppData ('VideoRadar.backup-' + [Guid]::NewGuid().ToString('N'))
+  # Inno Setup creates the same named mutex for its complete lifetime. Holding
+  # this handle prevents the two installers from exchanging the runtime at once.
+  $setupMutex = Enter-SetupMutex -Name $setupMutexName
+  $installLockPath = Join-Path $localAppData 'VideoRadar.install.lock'
+  $installLock = Enter-InstallationLock -Path $installLockPath
+  $pendingSetupBackup = "$installRoot.runtime-backup"
+  if (Test-Path -LiteralPath $pendingSetupBackup) {
+    throw "Existe um rollback pendente do instalador em $pendingSetupBackup. Preserve-o para recuperação antes de continuar."
+  }
+  $installStaging = Join-Path $localAppData ('VideoRadar.runtime-installing-' + [Guid]::NewGuid().ToString('N'))
+  $installBackup = Join-Path $localAppData ('VideoRadar.runtime-backup-' + [Guid]::NewGuid().ToString('N'))
   Copy-PackagePayload -Payload $payload -DestinationRoot $installStaging
 
-  # A cópia em staging é verificada novamente antes da troca atômica.
+  # A cópia em staging é verificada novamente antes de tocar no runtime ativo.
   [void]@(Assert-PackagePayload -Root $installStaging -PayloadManifest $packageManifest)
 
-  if (Test-Path -LiteralPath $installRoot) {
-    if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
-      throw 'A raiz de instalação existente não é um diretório.'
-    }
-    Move-Item -LiteralPath $installRoot -Destination $installBackup
-    $oldInstallMoved = $true
-  }
-  Move-Item -LiteralPath $installStaging -Destination $installRoot
-  $newInstallMoved = $true
-
-  $nativeManifestDirectory = Join-Path $installRoot 'native-host'
+  $nativeManifestDirectory = Join-Path $installStaging 'native-host'
   New-Item -ItemType Directory -Path $nativeManifestDirectory -Force | Out-Null
+  $expectedHostPath = Join-Path $installRoot 'host\video-radar-host.exe'
+  $expectedOrigin = "chrome-extension://$extensionId/"
   $hostManifest = [ordered]@{
     name = 'com.videoradar.helper'
     description = 'Auxiliar local do Vídeo Radar'
@@ -335,7 +567,7 @@ try {
     type = 'stdio'
     allowed_origins = @("chrome-extension://$extensionId/")
   }
-  $manifestPath = Join-Path $installRoot 'native-host\com.videoradar.helper.json'
+  $manifestPath = Join-Path $installStaging 'native-host\com.videoradar.helper.json'
   $manifestJson = $hostManifest | ConvertTo-Json -Depth 4
   [IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
 
@@ -347,9 +579,56 @@ try {
   $installedManifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
   Assert-PropertySet -Value $installedManifest -Expected @(
     'name', 'description', 'path', 'type', 'allowed_origins'
+  ) -Label 'Manifesto nativo preparado'
+  if ([string]$installedManifest.name -cne 'com.videoradar.helper' -or
+      [string]$installedManifest.description -cne 'Auxiliar local do Vídeo Radar' -or
+      [string]$installedManifest.path -cne $expectedHostPath -or
+      [string]$installedManifest.type -cne 'stdio' -or
+      @($installedManifest.allowed_origins).Count -ne 1 -or
+      [string]$installedManifest.allowed_origins[0] -cne $expectedOrigin) {
+    throw 'O manifesto nativo preparado não corresponde ao contrato esperado.'
+  }
+  Invoke-InstalledPing -HostPath (Join-Path $installStaging 'host\video-radar-host.exe')
+
+  if (Test-Path -LiteralPath $installRoot) {
+    if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) {
+      throw 'A raiz de instalação existente não é um diretório.'
+    }
+    $installRootItem = Get-Item -LiteralPath $installRoot -Force
+    if (($installRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw 'A raiz de instalação existente não pode ser um link.'
+    }
+    Assert-ExistingRuntimeComponents -Root $installRoot -RelativePaths $runtimeComponents
+  }
+  else {
+    New-Item -ItemType Directory -Path $installRoot | Out-Null
+  }
+
+  # Somente estes quatro componentes são imutáveis. Fila, temporários, journals,
+  # diagnósticos, Extension, conteúdo legal, onboarding e uninstaller nunca saem
+  # de $installRoot durante um upgrade.
+  Move-RuntimeComponents `
+    -SourceRoot $installRoot `
+    -DestinationRoot $installBackup `
+    -RelativePaths $runtimeComponents `
+    -Moved $movedOldRuntime
+  Move-RuntimeComponents `
+    -SourceRoot $installStaging `
+    -DestinationRoot $installRoot `
+    -RelativePaths $runtimeComponents `
+    -Moved $movedNewRuntime `
+    -RequireAll
+
+  $manifestPath = Join-Path $installRoot 'native-host\com.videoradar.helper.json'
+  $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+  if ($manifestBytes.Length -ge 3 -and
+      $manifestBytes[0] -eq 0xef -and $manifestBytes[1] -eq 0xbb -and $manifestBytes[2] -eq 0xbf) {
+    throw 'O manifesto nativo foi gravado com BOM inesperado.'
+  }
+  $installedManifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+  Assert-PropertySet -Value $installedManifest -Expected @(
+    'name', 'description', 'path', 'type', 'allowed_origins'
   ) -Label 'Manifesto nativo instalado'
-  $expectedHostPath = Join-Path $installRoot 'host\video-radar-host.exe'
-  $expectedOrigin = "chrome-extension://$extensionId/"
   if ([string]$installedManifest.name -cne 'com.videoradar.helper' -or
       [string]$installedManifest.description -cne 'Auxiliar local do Vídeo Radar' -or
       [string]$installedManifest.path -cne $expectedHostPath -or
@@ -360,6 +639,10 @@ try {
   }
 
   Invoke-InstalledPing -HostPath $expectedHostPath
+
+  # Todos os itens válidos de staging foram movidos; a pasta deve estar vazia.
+  [IO.Directory]::Delete($installStaging, $false)
+  $installStaging = $null
 
   $registryKeys = @(
     'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.videoradar.helper',
@@ -374,15 +657,31 @@ try {
     Set-Item -Path $key -Value $manifestPath
   }
 
+  # O runtime novo já passou no ping e os quatro registros foram gravados. A
+  # partir daqui a transação está confirmada e o backup desta execução pode ser
+  # removido; uma falha de cleanup não deve tentar um rollback parcial.
+  $transactionCommitted = $true
+  if (Test-Path -LiteralPath $installBackup) {
+    try {
+      Remove-TransactionBackup -Path $installBackup -ExpectedParent $localAppData
+      $movedOldRuntime.Clear()
+      $installBackup = $null
+    }
+    catch {
+      Write-Warning "A instalação foi concluída, mas o backup desta transação não pôde ser removido: $installBackup"
+    }
+  }
+
   Write-Host 'Vídeo Radar instalado com sucesso para Chrome, Edge, Brave e Vivaldi.'
   Write-Host "Manifesto nativo: $manifestPath"
-  if ($oldInstallMoved) {
-    Write-Host "Cópia anterior preservada em: $installBackup"
-  }
   exit 0
 }
 catch {
   $failureMessage = $_.Exception.Message
+  if ($transactionCommitted) {
+    Write-Error "A instalação foi concluída, mas a finalização falhou. $failureMessage"
+    exit 1
+  }
   if ($registryTouched -and $registrySnapshot.Count -gt 0) {
     try {
       Restore-RegistrySnapshot -Snapshot $registrySnapshot
@@ -392,23 +691,60 @@ catch {
     }
   }
 
-  try {
-    if ($newInstallMoved -and $null -ne $installRoot -and (Test-Path -LiteralPath $installRoot)) {
-      $failedRoot = Join-Path ([IO.Path]::GetDirectoryName($installRoot)) ('VideoRadar.failed-' + [Guid]::NewGuid().ToString('N'))
-      Move-Item -LiteralPath $installRoot -Destination $failedRoot
+  $rollbackErrors = [Collections.Generic.List[string]]::new()
+  $failedRoot = if ($null -ne $installRoot) {
+    Join-Path ([IO.Path]::GetDirectoryName($installRoot)) ('VideoRadar.runtime-failed-' + [Guid]::NewGuid().ToString('N'))
+  } else { $null }
+  foreach ($relativePath in $movedNewRuntime) {
+    try {
+      $newPath = Join-Path $installRoot $relativePath
+      if (Test-Path -LiteralPath $newPath) {
+        if (-not (Test-Path -LiteralPath $failedRoot)) {
+          New-Item -ItemType Directory -Path $failedRoot | Out-Null
+        }
+        Move-Item -LiteralPath $newPath -Destination (Join-Path $failedRoot $relativePath)
+      }
     }
-    elseif ($null -ne $installStaging -and (Test-Path -LiteralPath $installStaging)) {
-      $failedStaging = Join-Path ([IO.Path]::GetDirectoryName($installStaging)) ('VideoRadar.failed-' + [Guid]::NewGuid().ToString('N'))
-      Move-Item -LiteralPath $installStaging -Destination $failedStaging
-    }
-    if ($oldInstallMoved -and $null -ne $installBackup -and (Test-Path -LiteralPath $installBackup)) {
-      Move-Item -LiteralPath $installBackup -Destination $installRoot
+    catch {
+      $rollbackErrors.Add("não foi possível isolar $relativePath")
     }
   }
-  catch {
-    $failureMessage = "$failureMessage A cópia anterior permanece preservada para recuperação."
+  foreach ($relativePath in $movedOldRuntime) {
+    try {
+      $backupPath = Join-Path $installBackup $relativePath
+      $activePath = Join-Path $installRoot $relativePath
+      if ((Test-Path -LiteralPath $backupPath) -and -not (Test-Path -LiteralPath $activePath)) {
+        Move-Item -LiteralPath $backupPath -Destination $activePath
+      }
+      elseif (Test-Path -LiteralPath $backupPath) {
+        $rollbackErrors.Add("o runtime anterior de $relativePath permanece no backup")
+      }
+    }
+    catch {
+      $rollbackErrors.Add("não foi possível restaurar $relativePath")
+    }
+  }
+  if ($null -ne $installStaging -and (Test-Path -LiteralPath $installStaging)) {
+    try {
+      $failedStaging = Join-Path ([IO.Path]::GetDirectoryName($installStaging)) ('VideoRadar.runtime-staging-failed-' + [Guid]::NewGuid().ToString('N'))
+      Move-Item -LiteralPath $installStaging -Destination $failedStaging
+    }
+    catch {
+      $rollbackErrors.Add('o staging validado não pôde ser isolado')
+    }
+  }
+  if ($rollbackErrors.Count -gt 0) {
+    $failureMessage = "$failureMessage O runtime anterior permanece preservado para recuperação: $($rollbackErrors -join '; ')."
   }
 
   Write-Error "A instalação não foi concluída. $failureMessage"
   exit 1
+}
+finally {
+  if ($null -ne $installLock) {
+    $installLock.Dispose()
+  }
+  if ($null -ne $setupMutex) {
+    $setupMutex.Dispose()
+  }
 }

@@ -3,6 +3,7 @@ param(
   [string]$LockPath,
   [string]$CacheRoot,
   [string]$ReadyRoot,
+  [string]$ValidateCompilerPath,
   [switch]$Force
 )
 
@@ -62,6 +63,28 @@ function Assert-LockedInstaller {
   }
 }
 
+function Assert-ReadyCompiler {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)]$Lock
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw 'The Inno Setup compiler does not exist at the requested path.'
+  }
+  $signature = Get-AuthenticodeSignature -LiteralPath $Path
+  if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+      $null -eq $signature.SignerCertificate -or
+      $signature.SignerCertificate.Subject -cne [string]$Lock.publisher) {
+    throw 'The Inno Setup compiler is not signed by the locked publisher.'
+  }
+  $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion
+  if ([string]::IsNullOrWhiteSpace($version) -or
+      $version -cnotmatch ('^' + [regex]::Escape([string]$Lock.version) + '(?:\D|$)')) {
+    throw 'The Inno Setup compiler version differs from the lock.'
+  }
+}
+
 $lock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $expectedProperties = @('fileName', 'publisher', 'schemaVersion', 'sha256', 'size', 'url', 'version')
 $actualProperties = @($lock.PSObject.Properties.Name | Sort-Object)
@@ -77,6 +100,13 @@ if ([int]$lock.schemaVersion -ne 1 -or
   throw 'installer/inno-tool-lock.json is invalid.'
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ValidateCompilerPath)) {
+  $validatedCompilerPath = [IO.Path]::GetFullPath($ValidateCompilerPath)
+  Assert-ReadyCompiler -Path $validatedCompilerPath -Lock $lock
+  Write-Output $validatedCompilerPath
+  exit 0
+}
+
 if ([string]::IsNullOrWhiteSpace($ReadyRoot)) {
   $ReadyRoot = Join-Path $toolsRoot "inno-ready\$($lock.version)"
 }
@@ -86,13 +116,24 @@ Assert-ProjectToolPath -Path $ReadyRoot -Label 'ReadyRoot'
 
 $isccPath = Join-Path $ReadyRoot 'ISCC.exe'
 if (-not $Force -and (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
-  Write-Output $isccPath
-  exit 0
+  try {
+    Assert-ReadyCompiler -Path $isccPath -Lock $lock
+    Write-Output $isccPath
+    exit 0
+  }
+  catch {
+    # Build a verified replacement beside the cache; the existing compiler is
+    # preserved until the replacement has passed every check.
+  }
 }
 
 New-Item -ItemType Directory -Path $CacheRoot -Force | Out-Null
 $installerPath = Join-Path $CacheRoot ([string]$lock.fileName)
 $downloadPath = "$installerPath.download-$([Guid]::NewGuid().ToString('N'))"
+$readyStaging = "$ReadyRoot.installing-$([Guid]::NewGuid().ToString('N'))"
+$readyBackup = "$ReadyRoot.backup-$([Guid]::NewGuid().ToString('N'))"
+$oldReadyMoved = $false
+$newReadyMoved = $false
 try {
   $needsDownload = $true
   if (Test-Path -LiteralPath $installerPath -PathType Leaf) {
@@ -114,30 +155,52 @@ try {
   }
 
   Assert-LockedInstaller -Path $installerPath -Lock $lock
-  if (Test-Path -LiteralPath $ReadyRoot) {
-    Remove-Item -LiteralPath $ReadyRoot -Recurse -Force
-  }
-  New-Item -ItemType Directory -Path $ReadyRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path $readyStaging -Force | Out-Null
 
   $arguments = @(
     '/PORTABLE=1',
     '/VERYSILENT',
     '/SUPPRESSMSGBOXES',
     '/NORESTART',
-    "/DIR=`"$ReadyRoot`""
+    "/DIR=`"$readyStaging`""
   )
   $process = Start-Process -FilePath $installerPath -ArgumentList $arguments `
     -Wait -PassThru -WindowStyle Hidden
   if ($process.ExitCode -ne 0) {
     throw "Portable Inno Setup failed with exit code $($process.ExitCode)."
   }
-  if (-not (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
-    throw 'ISCC.exe was not produced by the portable bootstrap.'
+  $stagingIsccPath = Join-Path $readyStaging 'ISCC.exe'
+  Assert-ReadyCompiler -Path $stagingIsccPath -Lock $lock
+
+  if (Test-Path -LiteralPath $ReadyRoot) {
+    Move-Item -LiteralPath $ReadyRoot -Destination $readyBackup
+    $oldReadyMoved = $true
+  }
+  Move-Item -LiteralPath $readyStaging -Destination $ReadyRoot
+  $newReadyMoved = $true
+  Assert-ReadyCompiler -Path $isccPath -Lock $lock
+  if ($oldReadyMoved) {
+    Remove-Item -LiteralPath $readyBackup -Recurse -Force
+    $oldReadyMoved = $false
   }
   Write-Output $isccPath
+}
+catch {
+  if ($newReadyMoved -and (Test-Path -LiteralPath $ReadyRoot)) {
+    Move-Item -LiteralPath $ReadyRoot -Destination "$ReadyRoot.failed-$([Guid]::NewGuid().ToString('N'))"
+  }
+  if ($oldReadyMoved -and (Test-Path -LiteralPath $readyBackup)) {
+    Move-Item -LiteralPath $readyBackup -Destination $ReadyRoot
+    $oldReadyMoved = $false
+  }
+  throw
 }
 finally {
   if (Test-Path -LiteralPath $downloadPath) {
     Remove-Item -LiteralPath $downloadPath -Force
   }
+  if (Test-Path -LiteralPath $readyStaging) {
+    Remove-Item -LiteralPath $readyStaging -Recurse -Force
+  }
+  # Preserve readyBackup if a rollback operation itself fails.
 }

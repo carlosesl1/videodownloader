@@ -137,7 +137,7 @@ async function requestResource(url, fetchImpl, signal, timeoutMs, consume) {
   const operation = (async () => {
     try {
       const response = await fetchImpl(url, {
-        credentials: 'include',
+        credentials: 'omit',
         signal: requestController.signal,
       });
       if (!response?.ok) throw networkError(url, response?.status);

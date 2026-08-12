@@ -5,8 +5,7 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,25 +14,31 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
+    outputs:
+      release_artifact_id: ${{ steps.upload_release.outputs.artifact-id }}
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
+          global-json-file: global.json
 
       - name: Run complete verification
         shell: pwsh
-        run: npm run check:all
+        run: |
+          npm run check:all
+          npm run check:release
 
       - name: Bootstrap pinned Inno Setup
         shell: pwsh
@@ -41,28 +46,274 @@ jobs:
 
       - name: Build release artifacts
         shell: pwsh
+        env:
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
         run: |
           $package = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
-          $expectedTag = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}"
+          $expectedTag = if ($env:RELEASE_REF_TYPE -eq "tag") {
+            $env:RELEASE_REF_NAME
           } else {
             "v$($package.version)"
           }
           npm run build:release -- -ExpectedTag $expectedTag
 
+      - name: Verify the exact release contract
+        shell: pwsh
+        run: npm run verify:release
+
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        id: upload_release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: video-radar-${{ github.ref_name }}
-          path: dist/release/*
+          name: video-radar-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/release/VideoRadar-Setup-*-Windows-*.exe
+            dist/release/VideoRadar-*-Developer-Windows-*.zip
+            dist/release/SBOM.spdx.json
+            dist/release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish stable tag
-        if: startsWith(github.ref, 'refs/tags/v')
+  x64_smoke:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Download the exact release artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_artifact_id }}
+          path: dist/release
+
+      - name: Verify the downloaded release contract
+        run: npm run verify:release
+
+      - name: Smoke the exact x64 ZIP and installer
         shell: pwsh
+        run: |
+          scripts/smoke-release-windows.ps1 `
+            -ArtifactRoot dist/release `
+            -Architecture x64
+
+  arm64_smoke:
+    needs: build
+    runs-on: windows-11-arm
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Download the exact release artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_artifact_id }}
+          path: dist/release
+
+      - name: Verify the downloaded release contract
+        run: npm run verify:release
+
+      - name: Smoke the exact ARM64 ZIP and installer
+        shell: pwsh
+        run: |
+          scripts/smoke-release-windows.ps1 `
+            -ArtifactRoot dist/release `
+            -Architecture arm64
+
+  attest:
+    needs: [build, x64_smoke, arm64_smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      artifact-metadata: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_artifact_id }}
+          path: dist/release
+
+      - name: Verify downloaded release artifacts
+        run: npm run verify:release
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/release/VideoRadar-Setup-*-Windows-*.exe
+            dist/release/VideoRadar-*-Developer-Windows-*.zip
+            dist/release/SBOM.spdx.json
+
+      - name: Attest the release SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/release/VideoRadar-Setup-*-Windows-*.exe
+            dist/release/VideoRadar-*-Developer-Windows-*.zip
+          sbom-path: dist/release/SBOM.spdx.json
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Download attested release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.release_artifact_id }}
+          path: dist/release
+
+      - name: Verify artifacts immediately before publication
+        run: npm run verify:release
+
+      - name: Publish stable tag
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
-          $artifacts = @(Get-ChildItem -LiteralPath dist/release -File | Sort-Object Name | ForEach-Object { $_.FullName })
-          gh release create "${{ github.ref_name }}" $artifacts --verify-tag --generate-notes --title "Video Radar ${{ github.ref_name }}"
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          artifacts=(
+            "dist/release/VideoRadar-Setup-${version}-Windows-x64.exe"
+            "dist/release/VideoRadar-Setup-${version}-Windows-arm64.exe"
+            "dist/release/VideoRadar-${version}-Developer-Windows-x64.zip"
+            "dist/release/VideoRadar-${version}-Developer-Windows-arm64.zip"
+            "dist/release/SBOM.spdx.json"
+            "dist/release/SHA256SUMS.txt"
+          )
+
+          expected_assets_json="$(
+            for artifact in "${artifacts[@]}"; do
+              name="${artifact##*/}"
+              size="$(stat -c '%s' "$artifact")"
+              digest="sha256:$(sha256sum "$artifact" | awk '{print $1}')"
+              jq -cn \
+                --arg name "$name" \
+                --argjson size "$size" \
+                --arg digest "$digest" \
+                '{name: $name, size: $size, digest: $digest, state: "uploaded"}'
+            done | jq -cs 'sort_by(.name)'
+          )"
+
+          actual_assets_json='[]'
+          verify_release_assets() {
+            local release_id
+            if ! release_id="$(
+              gh release view "$RELEASE_TAG" --json databaseId --jq '.databaseId'
+            )"; then
+              return 1
+            fi
+            if ! actual_assets_json="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+                --jq '[.[] | {name, size, digest, state}] | sort_by(.name)'
+            )"; then
+              return 1
+            fi
+            [[ "$(jq -cS . <<<"$actual_assets_json")" == \
+              "$(jq -cS . <<<"$expected_assets_json")" ]]
+          }
+
+          if release_state_json="$(
+            gh release view "$RELEASE_TAG" --json isDraft,tagName 2>/dev/null
+          )"; then
+            if [[ "$(jq -r '.tagName' <<<"$release_state_json")" != "$RELEASE_TAG" ]]; then
+              echo 'The existing release points to an unexpected tag.' >&2
+              exit 1
+            fi
+            if [[ "$(jq -r '.isDraft' <<<"$release_state_json")" != 'true' ]]; then
+              if ! verify_release_assets; then
+                echo 'The published release exists but its assets differ from this build.' >&2
+                echo "Expected: $(jq -cS . <<<"$expected_assets_json")" >&2
+                echo "Actual:   $(jq -cS . <<<"$actual_assets_json")" >&2
+                exit 1
+              fi
+              echo "Release $RELEASE_TAG is already published with the exact artifacts."
+              exit 0
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft --verify-tag --generate-notes --title "Video Radar $RELEASE_TAG"
+          fi
+
+          if [[ "$(
+            gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'
+          )" != 'true' ]]; then
+            echo 'Refusing to upload assets to a non-draft release.' >&2
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
+
+          assets_verified=false
+          for attempt in 1 2 3 4 5; do
+            if verify_release_assets; then
+              assets_verified=true
+              break
+            fi
+            if [[ "$attempt" -lt 5 ]]; then
+              sleep $((attempt * 2))
+            fi
+          done
+          if [[ "$assets_verified" != 'true' ]]; then
+            echo 'The draft assets differ from the local release contract.' >&2
+            echo "Expected: $(jq -cS . <<<"$expected_assets_json")" >&2
+            echo "Actual:   $(jq -cS . <<<"$actual_assets_json")" >&2
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest --verify-tag
+          if [[ "$(
+            gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'
+          )" != 'false' ]]; then
+            echo 'The verified draft was not published.' >&2
+            exit 1
+          fi
+          if ! verify_release_assets; then
+            echo 'Published release assets changed during promotion.' >&2
+            exit 1
+          fi

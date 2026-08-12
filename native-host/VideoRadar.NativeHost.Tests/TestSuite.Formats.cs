@@ -1,6 +1,9 @@
+using System.Text.Json;
 using VideoRadar.NativeHost.Files;
+using VideoRadar.NativeHost.Media;
 using VideoRadar.NativeHost.Processes;
 using VideoRadar.NativeHost.YouTube;
+using NativeProcessResult = VideoRadar.NativeHost.Processes.ProcessResult;
 
 namespace VideoRadar.NativeHost.Tests;
 
@@ -9,22 +12,31 @@ internal static partial class TestSuite
     private static void FormatCatalogTests()
     {
         FormatCatalogReducesFixtureToDistinctQualities();
+        FormatCatalogExposesRichBoundedMetadata();
+        FormatCatalogNormalizesPublicTextControls();
+        FormatCatalogBoundsProtocolCollections();
         FormatCatalogRejectsUnavailableOrIncompleteMetadata();
         FormatCatalogRejectsMissingPositiveHeights();
         FormatCatalogRequiresAudioForSeparateYouTubeVideo();
         FormatCatalogAcceptsSeparateInstagramVideoWithM4aAudio();
         FormatCatalogAcceptsPublicSocialMetadataWithoutAvailability();
         FormatCatalogFiltersSocialQualitiesToCombinedFormats();
+        FormatCatalogFiltersUnsupportedQualityContainers();
         FormatCatalogRejectsExplicitlyRestrictedSocialMetadata();
         MetadataArgumentsAreHardenedAndCanonical();
         DownloadArgumentsUsePlatformSpecificSelectors();
         DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio();
+        DownloadArgumentsSupportAudioSubtitlesAndResumeSafely();
+        FfprobeValidatorAcceptsExpectedBoundedMedia();
+        FfprobeValidatorRejectsMalformedOrImplausibleMedia();
         YouTubeServiceCanonicalizesBeforeCallingRunner();
         YouTubeServiceAcceptsAllowlistedSocialPages();
         YouTubeServiceCachesSuccessfulCatalogsAndRetriesFailures();
         YouTubeServiceExpiresCatalogsByPlatform();
         YouTubeServiceBoundsCatalogCacheByCountAndBytes();
         YouTubeServiceCancellationDoesNotCancelSharedLookup();
+        YouTubeServiceCancelsLookupAfterLastObserverLeaves();
+        YouTubeServiceRejectsTruncatedMetadata();
         YouTubeServiceDoesNotRunForInvalidUrl();
         YouTubeServiceDoesNotLeakYtDlpStandardError();
     }
@@ -43,6 +55,100 @@ internal static partial class TestSuite
         Equal("MP4", catalog.Qualities[0].Container);
         True(catalog.Qualities[2].Combined, "360p should be a combined stream.");
         Equal("1080p", catalog.Qualities[0].Label);
+    }
+
+    private static void FormatCatalogExposesRichBoundedMetadata()
+    {
+        var catalog = FormatCatalog.Parse(ReadFixture());
+        var quality = catalog.Qualities[0];
+
+        Equal(60d, quality.Fps);
+        True(!quality.Hdr, "The MP4 selector inherited HDR metadata from an unselected WebM stream.");
+        Equal<string?>(null, quality.DynamicRange);
+        Equal("avc1.640028", quality.VideoCodec);
+        Equal("mp4a.40.2", quality.AudioCodec);
+        Equal(4800d, quality.BitrateKbps);
+        Equal(4_608_000L, quality.EstimatedSizeBytes);
+        True(quality.EstimatedSizeApproximate, "filesize_approx was reported as exact.");
+
+        Equal(6, catalog.Formats.Count);
+        var audio = catalog.Formats.Single(format => format.FormatId == "140");
+        True(audio.AudioOnly, "The audio-only stream was not identified.");
+        Equal("en", audio.Language);
+        Equal(128d, audio.BitrateKbps);
+        Equal(2, catalog.AudioLanguages.Count);
+        True(catalog.AudioLanguages.SequenceEqual(["en", "pt-BR"]), "Audio languages were not normalized and sorted.");
+
+        Equal(2, catalog.Subtitles.Count);
+        var manual = catalog.Subtitles.Single(track => track.Language == "pt-BR");
+        True(!manual.Automatic, "Manual subtitles were marked automatic.");
+        Equal("Português (Brasil)", manual.Label);
+        True(manual.Containers.SequenceEqual(["VTT"]), "Subtitle containers changed unexpectedly.");
+        True(catalog.Subtitles.Single(track => track.Language == "en").Automatic, "Automatic captions were not exposed.");
+    }
+
+    private static void FormatCatalogNormalizesPublicTextControls()
+    {
+        const string json = """
+            {"id":"safe-id","title":"Linha 1\nLinha 2\tfinal","formats":[
+              {"height":720,"vcodec":"avc1\nunsafe","acodec":"aac\tunsafe","ext":"mp4"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(json);
+
+        Equal("Linha 1 Linha 2 final", catalog.Title);
+        True(!catalog.Title.Any(char.IsControl), "The public title retained control characters.");
+        True(catalog.Formats.All(format =>
+                format.VideoCodec is null || !format.VideoCodec.Any(char.IsControl)),
+            "A public codec retained control characters.");
+        True(catalog.Formats.All(format =>
+                format.AudioCodec is null || !format.AudioCodec.Any(char.IsControl)),
+            "A public audio codec retained control characters.");
+    }
+
+    private static void FormatCatalogBoundsProtocolCollections()
+    {
+        var formats = new List<Dictionary<string, object?>>();
+        for (var index = 0; index < 100; index++)
+        {
+            formats.Add(new Dictionary<string, object?>
+            {
+                ["format_id"] = $"audio-{index}",
+                ["ext"] = "m4a",
+                ["vcodec"] = "none",
+                ["acodec"] = "aac",
+                ["language"] = $"l{index}"
+            });
+        }
+        for (var index = 0; index < 300; index++)
+        {
+            formats.Add(new Dictionary<string, object?>
+            {
+                ["format_id"] = $"video-{index}",
+                ["ext"] = "mp4",
+                ["height"] = 144 + index,
+                ["vcodec"] = "h264",
+                ["acodec"] = "aac"
+            });
+        }
+        var subtitles = Enumerable.Range(0, 140).ToDictionary(
+            index => $"s{index}",
+            _ => new[] { new { ext = "vtt", name = "Track" } });
+        var json = JsonSerializer.Serialize(new
+        {
+            id = "bounded-id",
+            title = "Bounded metadata",
+            formats,
+            subtitles
+        });
+
+        var catalog = FormatCatalog.Parse(json);
+
+        Equal(32, catalog.Qualities.Count);
+        Equal(256, catalog.Formats.Count);
+        Equal(64, catalog.AudioLanguages.Count);
+        Equal(128, catalog.Subtitles.Count);
     }
 
     private static void FormatCatalogRejectsUnavailableOrIncompleteMetadata()
@@ -122,7 +228,8 @@ internal static partial class TestSuite
         const string tiktok = """
             {"id":"social-id","title":"Public TikTok","extractor_key":"TikTok","formats":[
               {"height":1080,"vcodec":"h264","acodec":"none","ext":"mp4"},
-              {"height":720,"vcodec":"h264","acodec":"aac","ext":"mp4"},
+              {"height":720,"vcodec":"h264","acodec":"aac","ext":"mp4","tbr":1200},
+              {"height":720,"vcodec":"h265","acodec":"aac","ext":"mp4","tbr":2400},
               {"height":480,"vcodec":"vp9","acodec":"opus","ext":"webm"}
             ]}
             """;
@@ -133,8 +240,26 @@ internal static partial class TestSuite
         Equal(720, catalog.Qualities[0].Height);
         Equal("MP4", catalog.Qualities[0].Container);
         True(catalog.Qualities[0].Combined, "Social qualities must be combined streams.");
+        Equal("h264", catalog.Qualities[0].VideoCodec);
         Equal(480, catalog.Qualities[1].Height);
         Equal("WebM", catalog.Qualities[1].Container);
+    }
+
+    private static void FormatCatalogFiltersUnsupportedQualityContainers()
+    {
+        const string json = """
+            {"id":"container-id","title":"Container filter","extractor_key":"TikTok","formats":[
+              {"height":1080,"vcodec":"h264","acodec":"aac","ext":"3gp"},
+              {"height":720,"vcodec":"h264","acodec":"aac","ext":"mp4"},
+              {"height":480,"vcodec":"vp9","acodec":"opus","ext":"webm"}
+            ]}
+            """;
+
+        var catalog = FormatCatalog.Parse(json);
+
+        Equal(2, catalog.Qualities.Count);
+        True(catalog.Qualities.All(quality => quality.Container is "MP4" or "WEBM" or "WebM"),
+            "A quality container outside the Native Messaging contract was exposed.");
     }
 
     private static void FormatCatalogRejectsExplicitlyRestrictedSocialMetadata()
@@ -157,25 +282,28 @@ internal static partial class TestSuite
         var arguments = YtDlpArguments.Metadata(tools, canonical);
         var expected = new[]
         {
-            "--ignore-config", "--no-playlist", "--no-plugin-dirs", "--no-remote-components",
+            "--ignore-config", "--no-config-locations", "--no-update", "--no-playlist",
+            "--no-plugin-dirs", "--no-remote-components", "--no-js-runtimes",
             "--js-runtimes", $"deno:{Path.Combine(tools, "deno.exe")}",
             "--ffmpeg-location", tools,
+            "--socket-timeout", "30", "--retries", "5", "--extractor-retries", "3",
+            "--retry-sleep", "http:exp=1:10:2", "--retry-sleep", "extractor:exp=1:10:2",
             "--dump-single-json", "--skip-download", "--no-warnings", canonical
         };
 
         Equal(expected.Length, arguments.Count);
         for (var index = 0; index < expected.Length; index++) Equal(expected[index], arguments[index]);
         True(!arguments.Any(argument => argument.Contains("cookie", StringComparison.OrdinalIgnoreCase)), "Metadata args should not use cookies.");
-        True(!arguments.Any(argument => argument.Contains("config-location", StringComparison.OrdinalIgnoreCase)), "Metadata args should not use external config.");
+        True(!arguments.Contains("--config-locations"), "Metadata args should not use external config.");
         Equal(canonical, arguments[^1]);
     }
 
     private static void DownloadArgumentsUsePlatformSpecificSelectors()
     {
         var tiktok = YtDlpArguments.Download(
-            "tools",
-            "home",
-            "temp",
+            @"C:\video-radar-tools",
+            @"C:\Users\Alice\Downloads\Video Radar",
+            @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
             "stem",
             "https://www.tiktok.com/@video.radar/video/7488298911734435077",
             720);
@@ -190,9 +318,9 @@ internal static partial class TestSuite
     private static void DownloadArgumentsMergeSeparateInstagramVideoAndM4aAudio()
     {
         var arguments = YtDlpArguments.Download(
-            "tools",
-            "home",
-            "temp",
+            @"C:\video-radar-tools",
+            @"C:\Users\Alice\Downloads\Video Radar",
+            @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
             "stem",
             "https://www.instagram.com/reel/DbdpUhpg1bx/",
             1920);
@@ -202,6 +330,126 @@ internal static partial class TestSuite
         Equal(
             "b[height=1920][ext=mp4]/bv[height=1920][ext=mp4]+ba[ext=m4a]/b[height=1920]",
             selector);
+    }
+
+    private static void DownloadArgumentsSupportAudioSubtitlesAndResumeSafely()
+    {
+        var selection = DownloadSelection.Audio("pt-BR", includeAutomaticSubtitles: true);
+        var arguments = YtDlpArguments.Download(
+            @"C:\video-radar-tools",
+            @"C:\Users\Alice\Downloads\Video Radar",
+            @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
+            "stem",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            selection,
+            new DownloadRunOptions(ResumePartial: true, PreservePartialOnCancellation: true));
+
+        var selectorIndex = arguments.ToList().IndexOf("--format");
+        Equal("ba[ext=m4a]/ba", arguments[selectorIndex + 1]);
+        foreach (var required in new[]
+        {
+            "--extract-audio", "--audio-format", "--write-auto-subs",
+            "--sub-langs", "pt-BR", "--sub-format", "--convert-subs", "--continue", "--part"
+        })
+        {
+            True(arguments.Contains(required), $"Missing safe audio/subtitle/resume argument: {required}");
+        }
+        True(!arguments.Contains("--write-subs"), "Automatic captions also requested the manual track.");
+        True(!arguments.Contains("--merge-output-format"), "Audio-only download retained video merge settings.");
+        True(!arguments.Any(argument => argument.Contains("cookie", StringComparison.OrdinalIgnoreCase)), "Rich download selection introduced cookies.");
+
+        var manualSubtitleArguments = YtDlpArguments.Download(
+            @"C:\video-radar-tools",
+            @"C:\Users\Alice\Downloads\Video Radar",
+            @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job-manual",
+            "stem-manual",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            new DownloadSelection(720, SubtitleLanguage: "pt-BR"),
+            new DownloadRunOptions());
+        True(manualSubtitleArguments.Contains("--write-subs"), "Manual subtitles were not requested.");
+        True(!manualSubtitleArguments.Contains("--write-auto-subs"), "Manual subtitles also requested automatic captions.");
+
+        foreach (var unsafeLanguage in new[] { "all,-live_chat", "../pt", "pt,en", "pt BR", new string('a', 64) })
+        {
+            Throws<ArgumentException>(() => YtDlpArguments.Download(
+                @"C:\video-radar-tools",
+                @"C:\Users\Alice\Downloads\Video Radar",
+                @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
+                "stem",
+                "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                DownloadSelection.Audio(unsafeLanguage),
+                new DownloadRunOptions()));
+        }
+
+        Throws<ArgumentException>(() => YtDlpArguments.Download(
+            @"C:\video-radar-tools",
+            @"C:\Users\Alice\Downloads\Video Radar",
+            @"C:\Users\Alice\AppData\Local\VideoRadar\temp\job",
+            "stem",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            new DownloadSelection(720, AudioOnly: true),
+            new DownloadRunOptions()));
+    }
+
+    private static void FfprobeValidatorAcceptsExpectedBoundedMedia()
+    {
+        using var scope = new DownloadTestScope();
+        var path = Path.Combine(scope.Root, "validated.mp4");
+        File.WriteAllBytes(path, new byte[19_000]);
+        const string output = """
+            {"streams":[
+              {"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+              {"codec_type":"audio","codec_name":"aac"}
+            ],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"19.000000","size":"19000"}}
+            """;
+        var runner = new FakeProcessRunner(new NativeProcessResult(0, output, string.Empty));
+        var validator = new FfprobeMediaValidator("ffprobe.exe", runner);
+
+        var result = validator.ValidateAsync(
+            path,
+            new MediaValidationRequest(true, true, 19, 20_000),
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Equal(19d, result.DurationSeconds);
+        Equal(19_000L, result.SizeBytes);
+        Equal(1, result.VideoStreamCount);
+        Equal(1, result.AudioStreamCount);
+        Equal("ffprobe.exe", runner.Executable);
+        True(runner.Arguments.SequenceEqual(FfprobeMediaValidator.Arguments(path)), "ffprobe received unexpected arguments.");
+        True(!runner.Arguments.Any(argument => argument.Contains("http", StringComparison.OrdinalIgnoreCase)), "ffprobe was given a remote source.");
+    }
+
+    private static void FfprobeValidatorRejectsMalformedOrImplausibleMedia()
+    {
+        using var scope = new DownloadTestScope();
+        var path = Path.Combine(scope.Root, "invalid.mp4");
+        File.WriteAllBytes(path, new byte[19_000]);
+        var invalidOutputs = new[]
+        {
+            "{not-json",
+            "{\"streams\":[],\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"19\",\"size\":\"19000\"}}",
+            "{\"streams\":[{\"codec_type\":\"audio\",\"codec_name\":\"aac\"}],\"format\":{\"format_name\":\"matroska,webm\",\"duration\":\"19\",\"size\":\"19000\"}}",
+            "{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\"},{\"codec_type\":\"audio\",\"codec_name\":\"aac\"}],\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"999\",\"size\":\"19000\"}}"
+        };
+
+        foreach (var output in invalidOutputs)
+        {
+            var validator = new FfprobeMediaValidator(
+                "ffprobe.exe",
+                new FakeProcessRunner(new NativeProcessResult(0, output, string.Empty)));
+            Throws<MediaValidationException>(() => validator.ValidateAsync(
+                path,
+                new MediaValidationRequest(true, true, 19),
+                CancellationToken.None).GetAwaiter().GetResult());
+        }
+
+        var truncated = new FfprobeMediaValidator(
+            "ffprobe.exe",
+            new FakeProcessRunner(new NativeProcessResult(0, "{}", string.Empty, StandardOutputTruncated: true)));
+        Throws<MediaValidationException>(() => truncated.ValidateAsync(
+            path,
+            new MediaValidationRequest(true, true),
+            CancellationToken.None).GetAwaiter().GetResult());
     }
 
     private static void YouTubeServiceCanonicalizesBeforeCallingRunner()
@@ -367,7 +615,7 @@ internal static partial class TestSuite
             TaskCreationOptions.RunContinuationsAsynchronously);
         var runner = new ScriptedProcessRunner(call =>
         {
-            True(!call.CancellationToken.CanBeCanceled, "Shared metadata lookup captured an observer token.");
+            True(call.CancellationToken.CanBeCanceled, "Shared metadata lookup is not cancellable.");
             started.TrySetResult();
             return completed.Task;
         });
@@ -388,10 +636,77 @@ internal static partial class TestSuite
         cancellation.Cancel();
 
         Throws<OperationCanceledException>(() => cancelledObserver.GetAwaiter().GetResult());
+        True(!runner.Calls[0].CancellationToken.IsCancellationRequested,
+            "Cancelling one observer cancelled a lookup that still had an observer.");
         True(!survivingObserver.IsCompleted, "Cancelling one observer completed the shared lookup.");
         completed.SetResult(new VideoRadar.NativeHost.Processes.ProcessResult(0, ReadFixture(), string.Empty));
         Equal("jNQXAC9IVRw", survivingObserver.GetAwaiter().GetResult().VideoId);
         Equal(1, runner.Calls.Count);
+    }
+
+    private static void YouTubeServiceCancelsLookupAfterLastObserverLeaves()
+    {
+        using var scope = new DownloadTestScope();
+        var paths = scope.CreatePaths();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new ScriptedProcessRunner(
+            async call =>
+            {
+                True(call.CancellationToken.CanBeCanceled, "Metadata runner did not receive a cancellable lookup token.");
+                started.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, call.CancellationToken);
+                }
+                catch (OperationCanceledException) when (call.CancellationToken.IsCancellationRequested)
+                {
+                    cancellationObserved.TrySetResult();
+                    throw;
+                }
+
+                throw new InvalidOperationException("Unreachable metadata continuation.");
+            },
+            _ => Task.FromResult(new VideoRadar.NativeHost.Processes.ProcessResult(
+                0,
+                ReadFixture(),
+                string.Empty)));
+        var service = new YouTubeService(
+            "tools",
+            runner,
+            new DownloadPathsFactory(paths.Home, paths.TempRoot),
+            TimeProvider.System);
+        using var cancellation = new CancellationTokenSource();
+
+        var abandoned = service.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            cancellation.Token);
+        True(started.Task.Wait(TimeSpan.FromSeconds(5)), "Metadata lookup did not start.");
+        cancellation.Cancel();
+
+        Throws<OperationCanceledException>(() => abandoned.GetAwaiter().GetResult());
+        True(cancellationObserved.Task.Wait(TimeSpan.FromSeconds(5)),
+            "The metadata subprocess token was not cancelled after its final observer left.");
+        var recovered = service.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult();
+        Equal("jNQXAC9IVRw", recovered.VideoId);
+        Equal(2, runner.Calls.Count);
+    }
+
+    private static void YouTubeServiceRejectsTruncatedMetadata()
+    {
+        var runner = new FakeProcessRunner(new VideoRadar.NativeHost.Processes.ProcessResult(
+            0,
+            ReadFixture(),
+            string.Empty,
+            StandardOutputTruncated: true));
+        var service = new YouTubeService("tools", runner);
+
+        Throws<InvalidOperationException>(() => service.ListFormatsAsync(
+            "https://youtu.be/jNQXAC9IVRw",
+            CancellationToken.None).GetAwaiter().GetResult());
+        Equal(1, runner.CallCount);
     }
 
     private static void YouTubeServiceDoesNotLeakYtDlpStandardError()

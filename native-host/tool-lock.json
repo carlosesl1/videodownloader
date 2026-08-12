@@ -1,94 +1,168 @@
 {
-    "schemaVersion":  1,
-    "generatedAt":  "2026-07-22T21:47:33Z",
-    "sources":  [
-                    {
-                        "name":  "deno",
-                        "repository":  "denoland/deno",
-                        "version":  "v2.9.3",
-                        "assetName":  "deno-x86_64-pc-windows-msvc.zip",
-                        "assetId":  478036058,
-                        "url":  "https://api.github.com/repos/denoland/deno/releases/assets/478036058",
-                        "sha256":  "60343461ac5fe3a31f4ef12667f2946bb852e20655c8610aeb7e751e87f7df3a",
-                        "size":  42726295,
-                        "archive":  "zip",
-                        "outputs":  [
-                                        "deno.exe"
-                                    ],
-                        "archiveLicenses":  [
-
-                                            ],
-                        "checksum":  {
-                                         "assetName":  "deno-x86_64-pc-windows-msvc.zip.sha256sum",
-                                         "assetId":  478036057,
-                                         "url":  "https://api.github.com/repos/denoland/deno/releases/assets/478036057",
-                                         "sha256":  "6113245d27815c2223f69a8bbea96aa3a6a55d4cb8b5467cc4f8b98c81b26346"
-                                     },
-                        "license":  {
-                                        "fileName":  "deno-LICENSE.md",
-                                        "url":  "https://raw.githubusercontent.com/denoland/deno/f39575ecd50602a5b42b1ba8e93849460de9fcf4/LICENSE.md",
-                                        "sha256":  "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588"
-                                    }
-                    },
-                    {
-                        "name":  "ffmpeg",
-                        "repository":  "yt-dlp/FFmpeg-Builds",
-                        "version":  "latest",
-                        "assetName":  "ffmpeg-master-latest-win64-gpl.zip",
-                        "assetId":  486135048,
-                        "url":  "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/486135048",
-                        "sha256":  "947e0b71638a8071a5d045e26a331a81f952d2d96e162d3ea88d2a9b879b7dfc",
-                        "size":  168734864,
-                        "archive":  "zip",
-                        "outputs":  [
-                                        "ffmpeg.exe",
-                                        "ffprobe.exe"
-                                    ],
-                        "archiveLicenses":  [
-                                                {
-                                                    "archivePath":  "ffmpeg-master-latest-win64-gpl/LICENSE.txt",
-                                                    "fileName":  "ffmpeg-GPL-LICENSE.txt"
-                                                }
-                                            ],
-                        "checksum":  {
-                                         "assetName":  "checksums.sha256",
-                                         "assetId":  486134981,
-                                         "url":  "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/486134981",
-                                         "sha256":  "fc835d8e1c82148be088d77c6c1ab9640a24eafe77c2d500bfefa32f5f7624b7"
-                                     },
-                        "license":  {
-                                        "fileName":  "ffmpeg-builds-LICENSE.txt",
-                                        "url":  "https://raw.githubusercontent.com/yt-dlp/FFmpeg-Builds/9216a213a275553d76c7bd287d9af2a637c4cd16/LICENSE",
-                                        "sha256":  "c1b3cc7eec42bd9c4f6247169bb887b4a9bc904abfd2a7f7f9231ed357844993"
-                                    }
-                    },
-                    {
-                        "name":  "yt-dlp",
-                        "repository":  "yt-dlp/yt-dlp",
-                        "version":  "2026.07.04",
-                        "assetName":  "yt-dlp.exe",
-                        "assetId":  466665334,
-                        "url":  "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665334",
-                        "sha256":  "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
-                        "size":  18226085,
-                        "archive":  "file",
-                        "outputs":  [
-                                        "yt-dlp.exe"
-                                    ],
-                        "archiveLicenses":  [
-
-                                            ],
-                        "checksum":  {
-                                         "assetName":  "SHA2-256SUMS",
-                                         "assetId":  466665331,
-                                         "url":  "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665331",
-                                         "sha256":  "eca42575010efc77b8dc1e263c57e19c4bddc42d3e08ba789ccde72c97d48c64"
-                                     },
-                        "license":  {
-                                        "fileName":  "yt-dlp-LICENSE.txt",
-                                        "url":  "https://raw.githubusercontent.com/yt-dlp/yt-dlp/fdec00e0bf530dc6c3cc7b1dd780e95d9ae460e9/LICENSE",
-                                        "sha256":  "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
-                                    }
-                    }
-                ]
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-12T18:00:00Z",
+  "targets": [
+    {
+      "rid": "win-x64",
+      "architecture": "x64",
+      "sources": [
+        {
+          "name": "deno",
+          "repository": "denoland/deno",
+          "version": "v2.9.3",
+          "assetName": "deno-x86_64-pc-windows-msvc.zip",
+          "assetId": 478036058,
+          "url": "https://api.github.com/repos/denoland/deno/releases/assets/478036058",
+          "sha256": "60343461ac5fe3a31f4ef12667f2946bb852e20655c8610aeb7e751e87f7df3a",
+          "size": 42726295,
+          "archive": "zip",
+          "outputs": ["deno.exe"],
+          "archiveLicenses": [],
+          "checksum": {
+            "assetName": "deno-x86_64-pc-windows-msvc.zip.sha256sum",
+            "assetId": 478036057,
+            "url": "https://api.github.com/repos/denoland/deno/releases/assets/478036057",
+            "sha256": "6113245d27815c2223f69a8bbea96aa3a6a55d4cb8b5467cc4f8b98c81b26346"
+          },
+          "license": {
+            "fileName": "deno-LICENSE.md",
+            "url": "https://raw.githubusercontent.com/denoland/deno/f39575ecd50602a5b42b1ba8e93849460de9fcf4/LICENSE.md",
+            "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588"
+          }
+        },
+        {
+          "name": "ffmpeg",
+          "repository": "yt-dlp/FFmpeg-Builds",
+          "version": "autobuild-2026-07-31-16-16",
+          "assetName": "ffmpeg-N-125875-g5d4d3bdc61-win64-gpl.zip",
+          "assetId": 496889267,
+          "url": "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/496889267",
+          "sha256": "47f131b7a83c9ddc5f25d50e890f2a40201a5402b8fdb8cb31f5dd6bd8e51e45",
+          "size": 169718040,
+          "archive": "zip",
+          "outputs": ["ffmpeg.exe", "ffprobe.exe"],
+          "archiveLicenses": [{
+            "archivePath": "ffmpeg-N-125875-g5d4d3bdc61-win64-gpl/LICENSE.txt",
+            "fileName": "ffmpeg-GPL-LICENSE.txt"
+          }],
+          "checksum": {
+            "assetName": "checksums.sha256",
+            "assetId": 496889311,
+            "url": "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/496889311",
+            "sha256": "883484b0c42a6ee16030071820e747f50e14f65026bf2003480824402f3123ed"
+          },
+          "license": {
+            "fileName": "ffmpeg-builds-LICENSE.txt",
+            "url": "https://raw.githubusercontent.com/yt-dlp/FFmpeg-Builds/f523eabde4d012ad85cd75e9a3cd6bc619f868c6/LICENSE",
+            "sha256": "c1b3cc7eec42bd9c4f6247169bb887b4a9bc904abfd2a7f7f9231ed357844993"
+          }
+        },
+        {
+          "name": "yt-dlp",
+          "repository": "yt-dlp/yt-dlp",
+          "version": "2026.07.04",
+          "assetName": "yt-dlp.exe",
+          "assetId": 466665334,
+          "url": "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665334",
+          "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8",
+          "size": 18226085,
+          "archive": "file",
+          "outputs": ["yt-dlp.exe"],
+          "archiveLicenses": [],
+          "checksum": {
+            "assetName": "SHA2-256SUMS",
+            "assetId": 466665331,
+            "url": "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665331",
+            "sha256": "eca42575010efc77b8dc1e263c57e19c4bddc42d3e08ba789ccde72c97d48c64"
+          },
+          "license": {
+            "fileName": "yt-dlp-LICENSE.txt",
+            "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/fdec00e0bf530dc6c3cc7b1dd780e95d9ae460e9/LICENSE",
+            "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+          }
+        }
+      ]
+    },
+    {
+      "rid": "win-arm64",
+      "architecture": "arm64",
+      "sources": [
+        {
+          "name": "deno",
+          "repository": "denoland/deno",
+          "version": "v2.9.3",
+          "assetName": "deno-aarch64-pc-windows-msvc.zip",
+          "assetId": 478046934,
+          "url": "https://api.github.com/repos/denoland/deno/releases/assets/478046934",
+          "sha256": "bc668f199e4892f4447661f253178af007a4d715b0ff67493573b0e0216389ae",
+          "size": 40952687,
+          "archive": "zip",
+          "outputs": ["deno.exe"],
+          "archiveLicenses": [],
+          "checksum": {
+            "assetName": "deno-aarch64-pc-windows-msvc.zip.sha256sum",
+            "assetId": 478046929,
+            "url": "https://api.github.com/repos/denoland/deno/releases/assets/478046929",
+            "sha256": "1d10ce0fb300352ceb9868aaadcb5bdd19a6e576f4f5b091caf0eae59ded0c99"
+          },
+          "license": {
+            "fileName": "deno-LICENSE.md",
+            "url": "https://raw.githubusercontent.com/denoland/deno/f39575ecd50602a5b42b1ba8e93849460de9fcf4/LICENSE.md",
+            "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588"
+          }
+        },
+        {
+          "name": "ffmpeg",
+          "repository": "yt-dlp/FFmpeg-Builds",
+          "version": "autobuild-2026-07-31-16-16",
+          "assetName": "ffmpeg-N-125875-g5d4d3bdc61-winarm64-gpl.zip",
+          "assetId": 496889295,
+          "url": "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/496889295",
+          "sha256": "0038a5884e68423d202ae99a6624ad375a15a15eec112d6b6a1f9889a1a2f095",
+          "size": 114801767,
+          "archive": "zip",
+          "outputs": ["ffmpeg.exe", "ffprobe.exe"],
+          "archiveLicenses": [{
+            "archivePath": "ffmpeg-N-125875-g5d4d3bdc61-winarm64-gpl/LICENSE.txt",
+            "fileName": "ffmpeg-GPL-LICENSE.txt"
+          }],
+          "checksum": {
+            "assetName": "checksums.sha256",
+            "assetId": 496889311,
+            "url": "https://api.github.com/repos/yt-dlp/FFmpeg-Builds/releases/assets/496889311",
+            "sha256": "883484b0c42a6ee16030071820e747f50e14f65026bf2003480824402f3123ed"
+          },
+          "license": {
+            "fileName": "ffmpeg-builds-LICENSE.txt",
+            "url": "https://raw.githubusercontent.com/yt-dlp/FFmpeg-Builds/f523eabde4d012ad85cd75e9a3cd6bc619f868c6/LICENSE",
+            "sha256": "c1b3cc7eec42bd9c4f6247169bb887b4a9bc904abfd2a7f7f9231ed357844993"
+          }
+        },
+        {
+          "name": "yt-dlp",
+          "repository": "yt-dlp/yt-dlp",
+          "version": "2026.07.04",
+          "assetName": "yt-dlp_arm64.exe",
+          "assetId": 466665338,
+          "url": "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665338",
+          "sha256": "1525690b037ecc0bb677e38e7147b0025179cbc9a8d0c57264e3100b18099280",
+          "size": 22250288,
+          "archive": "file",
+          "outputs": ["yt-dlp.exe"],
+          "archiveLicenses": [],
+          "checksum": {
+            "assetName": "SHA2-256SUMS",
+            "assetId": 466665331,
+            "url": "https://api.github.com/repos/yt-dlp/yt-dlp/releases/assets/466665331",
+            "sha256": "eca42575010efc77b8dc1e263c57e19c4bddc42d3e08ba789ccde72c97d48c64"
+          },
+          "license": {
+            "fileName": "yt-dlp-LICENSE.txt",
+            "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/fdec00e0bf530dc6c3cc7b1dd780e95d9ae460e9/LICENSE",
+            "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+          }
+        }
+      ]
+    }
+  ]
 }

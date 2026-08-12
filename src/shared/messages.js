@@ -1,3 +1,5 @@
+import { isValidDownloadFilename } from './filename.js';
+
 export const ACTIONS = Object.freeze({
   DOWNLOAD_DIRECT: 'DOWNLOAD_DIRECT',
   INSPECT_HLS: 'INSPECT_HLS',
@@ -9,6 +11,9 @@ export const ACTIONS = Object.freeze({
   ARM_INSPECTION_CLEANUP: 'ARM_INSPECTION_CLEANUP',
   INSPECTION_CLEANUP: 'INSPECTION_CLEANUP',
   RELEASE_BLOB: 'RELEASE_BLOB',
+  CLAIM_HOST_PERMISSIONS: 'CLAIM_HOST_PERMISSIONS',
+  CONFIRM_HOST_PERMISSION_CLAIM: 'CONFIRM_HOST_PERMISSION_CLAIM',
+  RELEASE_HOST_PERMISSION_CLAIM: 'RELEASE_HOST_PERMISSION_CLAIM',
 });
 
 const BACKGROUND_ACTIONS = new Set([
@@ -19,6 +24,9 @@ const BACKGROUND_ACTIONS = new Set([
   ACTIONS.HLS_COMPLETED,
   ACTIONS.HLS_RELEASED,
   ACTIONS.INSPECTION_CLEANUP,
+  ACTIONS.CLAIM_HOST_PERMISSIONS,
+  ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+  ACTIONS.RELEASE_HOST_PERMISSION_CLAIM,
 ]);
 const OFFSCREEN_ACTIONS = new Set([
   ACTIONS.INSPECT_HLS,
@@ -82,6 +90,10 @@ export function assertOffscreenMessage(message) {
     assertStartHls(message.payload);
   } else if (message.action === ACTIONS.ARM_INSPECTION_CLEANUP) {
     assertInspectionCleanup(message.payload);
+  } else if (message.action === ACTIONS.INSPECT_HLS) {
+    if (!isObject(message.payload)
+      || !hasOnlyKeys(message.payload, ['url'])) throw new Error('Mensagem inválida');
+    assertMediaUrl(message.payload.url);
   } else {
     assertPayloadForAction(message.action, message.payload);
   }
@@ -111,7 +123,7 @@ function assertStartHls(payload) {
   if (
     !isObject(payload)
     || !isOperationId(payload.operationId)
-    || !isNonEmptyStringArray(payload.allowedOrigins)
+    || !isOriginArray(payload.allowedOrigins)
     || !hasOnlyKeys(payload, ['operationId', 'url', 'allowedOrigins'])
   ) {
     throw new Error('Mensagem inválida');
@@ -185,25 +197,51 @@ function assertPayloadForAction(action, payload) {
   if (!isObject(payload)) throw new Error('Mensagem inválida');
 
   if (action === ACTIONS.DOWNLOAD_DIRECT) {
+    if (!hasOnlyKeys(payload, ['url', 'filename'])) throw new Error('Mensagem inválida');
     assertMediaUrl(payload.url);
-    if (typeof payload.filename !== 'string' || !payload.filename) throw new Error('Mensagem inválida');
+    if (!isValidDownloadFilename(payload.filename)) throw new Error('Mensagem inválida');
     return;
   }
 
   if (action === ACTIONS.INSPECT_HLS) {
+    if (!hasOnlyKeys(payload, ['url', 'permissionPatterns', 'permissionClaimId'])) {
+      throw new Error('Mensagem inválida');
+    }
     assertMediaUrl(payload.url);
-    if (!isNonEmptyStringArray(payload.permissionPatterns)) throw new Error('Mensagem inválida');
+    if (!isPermissionPatternArray(payload.permissionPatterns)
+      || !isNullableOperationId(payload.permissionClaimId)) {
+      throw new Error('Mensagem inválida');
+    }
     return;
   }
 
   if (action === ACTIONS.DOWNLOAD_HLS) {
+    if (!hasOnlyKeys(payload, [
+      'url', 'filename', 'allowedOrigins', 'permissionPatterns', 'permissionClaimId',
+    ])) throw new Error('Mensagem inválida');
     assertMediaUrl(payload.url);
     if (
-      typeof payload.filename !== 'string' ||
-      !payload.filename ||
-      !isNonEmptyStringArray(payload.allowedOrigins) ||
-      !isNonEmptyStringArray(payload.permissionPatterns)
+      !isValidDownloadFilename(payload.filename) ||
+      !isOriginArray(payload.allowedOrigins) ||
+      !isPermissionPatternArray(payload.permissionPatterns) ||
+      !isNullableOperationId(payload.permissionClaimId)
     ) {
+      throw new Error('Mensagem inválida');
+    }
+    return;
+  }
+
+  if (action === ACTIONS.CLAIM_HOST_PERMISSIONS
+    || action === ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM) {
+    if (!hasOnlyKeys(payload, ['claimId', 'permissionPatterns'])
+      || !isOperationId(payload.claimId)
+      || !isPermissionPatternArray(payload.permissionPatterns)
+      || payload.permissionPatterns.length === 0) throw new Error('Mensagem inválida');
+    return;
+  }
+
+  if (action === ACTIONS.RELEASE_HOST_PERMISSION_CLAIM) {
+    if (!hasOnlyKeys(payload, ['claimId']) || !isOperationId(payload.claimId)) {
       throw new Error('Mensagem inválida');
     }
   }
@@ -226,6 +264,36 @@ function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isNonEmptyStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0);
+function isBoundedArray(value, predicate) {
+  return Array.isArray(value) && value.length <= 50 && value.every(predicate);
+}
+
+function isOriginArray(value) {
+  return isBoundedArray(value, (item) => {
+    if (typeof item !== 'string' || item.length > 2_048) return false;
+    try {
+      const parsed = new URL(item);
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+        && parsed.origin === item;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isPermissionPatternArray(value) {
+  return isBoundedArray(value, (item) => {
+    if (typeof item !== 'string' || item.length > 2_052 || !item.endsWith('/*')) return false;
+    try {
+      const parsed = new URL(item.slice(0, -2));
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+        && `${parsed.origin}/*` === item;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isNullableOperationId(value) {
+  return value === null || isOperationId(value);
 }

@@ -28,11 +28,32 @@ test('rejects malformed actions and non-http media URLs', () => {
   );
 });
 
+test('rejects unsafe, non-normalized, and oversized download filenames', () => {
+  for (const filename of [
+    '../aula.mp4',
+    'Cafe\u0301.mp4',
+    `${'🚀'.repeat(100)}.mp4`,
+  ]) {
+    assert.throws(
+      () => assertBackgroundMessage({
+        target: 'background',
+        action: ACTIONS.DOWNLOAD_DIRECT,
+        payload: { url: 'https://cdn.test/aula.mp4', filename },
+      }),
+      /Mensagem inválida/,
+    );
+  }
+});
+
 test('accepts complete HLS background and offscreen messages', () => {
   const inspect = {
     target: 'background',
     action: ACTIONS.INSPECT_HLS,
-    payload: { url: 'https://cdn.test/master.m3u8', permissionPatterns: ['https://cdn.test/*'] },
+    payload: {
+      url: 'https://cdn.test/master.m3u8',
+      permissionPatterns: ['https://cdn.test/*'],
+      permissionClaimId: 'permission-1',
+    },
   };
   const download = {
     target: 'background',
@@ -42,12 +63,16 @@ test('accepts complete HLS background and offscreen messages', () => {
       filename: 'aula.ts',
       allowedOrigins: ['https://cdn.test'],
       permissionPatterns: ['https://cdn.test/*'],
+      permissionClaimId: 'permission-1',
     },
   };
 
   assert.equal(assertBackgroundMessage(inspect), inspect);
   assert.equal(assertBackgroundMessage(download), download);
-  assert.equal(assertOffscreenMessage({ ...inspect, target: 'offscreen' }).target, 'offscreen');
+  assert.equal(assertOffscreenMessage({
+    target: 'offscreen', action: ACTIONS.INSPECT_HLS,
+    payload: { url: inspect.payload.url },
+  }).target, 'offscreen');
   assert.throws(() => assertOffscreenMessage({ ...download, target: 'offscreen' }), /Mensagem inválida/);
   assert.equal(
     assertOffscreenMessage({
@@ -65,7 +90,11 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
       assertBackgroundMessage({
         target: 'background',
         action: ACTIONS.INSPECT_HLS,
-        payload: { url: ['https://cdn.test/master.m3u8'], permissionPatterns: ['https://cdn.test/*'] },
+        payload: {
+          url: ['https://cdn.test/master.m3u8'],
+          permissionPatterns: ['https://cdn.test/*'],
+          permissionClaimId: null,
+        },
       }),
     /URL inválida/,
   );
@@ -74,8 +103,26 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
       assertBackgroundMessage({
         target: 'background',
         action: ACTIONS.INSPECT_HLS,
-        payload: { url: 'https://cdn.test/master.m3u8', permissionPatterns: [''] },
+        payload: {
+          url: 'https://cdn.test/master.m3u8',
+          permissionPatterns: [''],
+          permissionClaimId: null,
+        },
       }),
+    /Mensagem inválida/,
+  );
+  assert.throws(
+    () => assertBackgroundMessage({
+      target: 'background',
+      action: ACTIONS.DOWNLOAD_HLS,
+      payload: {
+        url: 'https://cdn.test/master.m3u8',
+        filename: 'aula.ts',
+        allowedOrigins: ['https://cdn.test'],
+        permissionPatterns: ['https://cdn.test/*'],
+        permissionClaimId: '<invalid>',
+      },
+    }),
     /Mensagem inválida/,
   );
   assert.throws(
@@ -88,6 +135,7 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
           filename: 'aula.ts',
           allowedOrigins: ['https://cdn.test', null],
           permissionPatterns: ['https://cdn.test/*'],
+          permissionClaimId: null,
         },
       }),
     /Mensagem inválida/,
@@ -101,6 +149,40 @@ test('rejects malformed HLS arrays, coerced URLs, and blob releases', () => {
       }),
     /Mensagem inválida/,
   );
+});
+
+test('validates transactional host-permission claim messages', () => {
+  const claim = {
+    target: 'background',
+    action: ACTIONS.CLAIM_HOST_PERMISSIONS,
+    payload: {
+      claimId: 'permission-1',
+      permissionPatterns: ['https://cdn.test/*'],
+    },
+  };
+  const release = {
+    target: 'background',
+    action: ACTIONS.RELEASE_HOST_PERMISSION_CLAIM,
+    payload: { claimId: 'permission-1' },
+  };
+  const confirm = {
+    target: 'background',
+    action: ACTIONS.CONFIRM_HOST_PERMISSION_CLAIM,
+    payload: {
+      claimId: 'permission-1',
+      permissionPatterns: ['https://cdn.test/*'],
+    },
+  };
+  assert.equal(assertBackgroundMessage(claim), claim);
+  assert.equal(assertBackgroundMessage(confirm), confirm);
+  assert.equal(assertBackgroundMessage(release), release);
+  for (const payload of [
+    { claimId: 'permission-1', permissionPatterns: [] },
+    { claimId: 'permission-1', permissionPatterns: ['https://cdn.test/*'], extra: true },
+    { claimId: '<invalid>', permissionPatterns: ['https://cdn.test/*'] },
+  ]) {
+    assert.throws(() => assertBackgroundMessage({ ...claim, payload }), /Mensagem inválida/);
+  }
 });
 
 test('accepts internal acknowledged HLS operation messages', () => {

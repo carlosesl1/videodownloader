@@ -128,6 +128,31 @@ function appendQualityControl(row, item) {
   row.append(label);
 }
 
+function appendSubtitleControl(row, item) {
+  const subtitles = item.subtitles ?? [];
+  const selectedVariant = item.variants?.[item.selectedIndex ?? 0];
+  if (subtitles.length === 0 || selectedVariant?.audioOnly) return;
+  const label = node('label', 'quality subtitle');
+  const labelText = node('span', 'quality__label', 'Legenda');
+  const select = node('select', 'quality__select');
+  select.dataset.subtitle = item.id;
+  select.setAttribute('aria-label', `Legenda de ${item.filename}`);
+  select.disabled = Boolean(item.active || ['permission', 'preparing', 'sent'].includes(item.phase));
+  const none = node('option', '', 'Sem legendas');
+  none.value = '-1';
+  none.selected = (item.selectedSubtitleIndex ?? -1) === -1;
+  select.append(none);
+  subtitles.forEach((subtitle, index) => {
+    const automatic = subtitle.automatic ? ' · automática' : '';
+    const option = node('option', '', `${subtitle.label || subtitle.language}${automatic}`);
+    option.value = String(index);
+    option.selected = index === item.selectedSubtitleIndex;
+    select.append(option);
+  });
+  label.append(labelText, select);
+  row.append(label);
+}
+
 function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   const row = node('li', 'media-row');
   row.dataset.itemId = item.id;
@@ -146,20 +171,36 @@ function appendMediaItem(list, item, pendingPermission, hlsBusy) {
   row.append(heading);
 
   appendQualityControl(row, item);
+  appendSubtitleControl(row, item);
 
   const needsInspection = item.kind === 'hls' && !item.inspected;
   const blockedByHls = item.kind === 'hls'
     && item.inspected
     && hlsBusy
     && item.phase !== 'preparing';
-  const activeYoutube = ['youtube', 'remote-media'].includes(item.kind) && item.active;
+  const queueControllable = item.isQueueJob
+    && ['queued', 'running', 'paused'].includes(item.queueState);
+  const activeYoutube = ['youtube', 'remote-media'].includes(item.kind)
+    && (item.active || queueControllable);
   if (item.action === 'open-download-settings') {
     row.append(button('Configurar downloads', 'button button--download', 'settings'));
   } else if (activeYoutube) {
     const hasJobId = typeof item.jobId === 'string' && item.jobId.trim().length > 0;
-    const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.id : '');
-    cancel.disabled = !hasJobId;
-    row.append(cancel);
+    if (queueControllable) {
+      const actions = node('div', 'media-row__actions');
+      const control = item.queueState === 'paused'
+        ? button('Retomar', 'button button--queue', 'resume', hasJobId ? item.id : '')
+        : button('Pausar', 'button button--queue', 'pause', hasJobId ? item.id : '');
+      const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.id : '');
+      control.disabled = !hasJobId;
+      cancel.disabled = !hasJobId;
+      actions.append(control, cancel);
+      row.append(actions);
+    } else {
+      const cancel = button('Cancelar', 'button button--cancel', 'cancel', hasJobId ? item.id : '');
+      cancel.disabled = !hasJobId;
+      row.append(cancel);
+    }
   } else {
     const action = button(actionLabel(item, blockedByHls), 'button button--download');
     action.dataset[needsInspection ? 'inspect' : 'download'] = item.id;

@@ -6,7 +6,7 @@ namespace VideoRadar.NativeHost.Protocol;
 public sealed record HostCommand(string Type, string RequestId, JsonElement Payload)
 {
     private static readonly HashSet<string> Types =
-        ["ping", "listFormats", "startDownload", "cancelDownload", "getJob", "chooseDownloadFolder", "moveDownloadedFile", "revealDownloadedFile"];
+        ["ping", "listFormats", "startDownload", "cancelDownload", "pauseDownload", "resumeDownload", "listQueue", "getJob", "chooseDownloadFolder", "moveDownloadedFile", "revealDownloadedFile", "getDiagnostics", "setDiagnostics", "exportDiagnostics", "clearDiagnostics"];
     private static readonly Regex SafeId = new("^[A-Za-z0-9._:-]{1,128}$", RegexOptions.CultureInvariant);
 
     public static HostCommand Parse(JsonElement root)

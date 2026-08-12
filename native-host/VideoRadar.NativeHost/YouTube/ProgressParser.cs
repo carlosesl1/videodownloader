@@ -4,6 +4,7 @@ namespace VideoRadar.NativeHost.YouTube;
 
 public static class ProgressParser
 {
+    private const long MaximumJavaScriptSafeInteger = 9_007_199_254_740_991;
     private const string ProgressPrefix = "VR_PROGRESS:";
     private const string PostprocessPrefix = "VR_POSTPROCESS:";
     private const string FilePrefix = "VR_FILE:";
@@ -84,7 +85,13 @@ public static class ProgressParser
     {
         result = null;
         if (!element.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return true;
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var number) || number < 0) return false;
+        if (value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out var number)
+            || number < 0
+            || number > MaximumJavaScriptSafeInteger)
+        {
+            return false;
+        }
         if (number != 0 || !allowZeroAsNull) result = number;
         return true;
     }
@@ -105,7 +112,7 @@ public static class ProgressParser
         if (value.ValueKind != JsonValueKind.Number
             || !value.TryGetDecimal(out var number)
             || number < 0
-            || number > long.MaxValue)
+            || number > MaximumJavaScriptSafeInteger)
         {
             return false;
         }

@@ -249,6 +249,25 @@ test('renders a known active YouTube job as one announced stage with cancellable
   assert.equal(one(missingJob, '[data-cancel]').disabled, true);
 });
 
+test('renderiza controles de pausar e retomar para jobs duráveis', () => {
+  const running = renderItem(youtubeItem({
+    id: 'media-job:job-queue', isQueueJob: true, queueState: 'running',
+    phase: 'video', active: true, jobId: 'job-queue', progress: 12,
+    statusLabel: 'Baixando vídeo…',
+  }));
+  assert.equal(one(running, '[data-pause]').getAttribute('data-pause'), 'media-job:job-queue');
+  assert.equal(one(running, '[data-cancel]').getAttribute('data-cancel'), 'media-job:job-queue');
+  assert.equal(running.querySelectorAll('[data-resume]').length, 0);
+
+  const paused = renderItem(youtubeItem({
+    id: 'media-job:job-queue', isQueueJob: true, queueState: 'paused',
+    phase: 'paused', active: true, jobId: 'job-queue', progress: 12,
+    statusLabel: 'Pausado · progresso preservado',
+  }));
+  assert.equal(one(paused, '[data-resume]').textContent, 'Retomar');
+  assert.equal(paused.querySelectorAll('[data-pause]').length, 0);
+});
+
 test('keeps active YouTube progress indeterminate when its percentage is unknown', () => {
   const root = renderItem(youtubeItem({
     phase: 'merge', active: true, jobId: 'job-43', progress: null, statusLabel: 'Combinando…',

@@ -96,6 +96,39 @@ test('accepts positive resolution components with leading zeros', () => {
   });
 });
 
+test('accepts a master variant without optional RESOLUTION metadata', () => {
+  const result = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXT-X-STREAM-INF:BANDWIDTH=2500000,CODECS="avc1.4d401f,mp4a.40.2"',
+    'variant.m3u8',
+  ].join('\n'), 'https://cdn.test/master.m3u8');
+
+  assert.deepEqual(result.variants[0], {
+    url: 'https://cdn.test/variant.m3u8', width: 0, height: 0,
+    bandwidth: 2500000, codecs: 'avc1.4d401f,mp4a.40.2', label: '2.5 Mbps',
+  });
+});
+
+test('accepts an in-band audio group but rejects external audio before producing a silent file', () => {
+  const inBand = parseHlsPlaylist([
+    '#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Muxed",DEFAULT=YES',
+    '#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio"',
+    'variant.m3u8',
+  ].join('\n'), 'https://cdn.test/master.m3u8');
+  assert.equal(inBand.variants[0].label, '720p');
+
+  assert.throws(
+    () => parseHlsPlaylist([
+      '#EXTM3U',
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Português",URI="audio.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio"',
+      'video.m3u8',
+    ].join('\n'), 'https://cdn.test/master.m3u8'),
+    (error) => error instanceof HlsError && error.code === 'HLS_SEPARATE_AUDIO',
+  );
+});
+
 for (const [name, playlist, expectedCode] of [
   ['encrypted AES-128', '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.key"\n#EXT-X-ENDLIST', 'HLS_ENCRYPTED'],
   ['fMP4 initialization map', '#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXT-X-ENDLIST', 'HLS_FMP4'],

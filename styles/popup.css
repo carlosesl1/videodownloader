@@ -331,6 +331,10 @@ h2 {
   gap: 4px;
 }
 
+.subtitle {
+  grid-column: 1 / -1;
+}
+
 .quality__select {
   width: 100%;
   min-height: 42px;
@@ -372,6 +376,26 @@ h2 {
 .button--cancel:hover {
   color: #fff;
   background: var(--danger);
+}
+
+.media-row__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.button--queue {
+  min-height: 42px;
+  min-width: 104px;
+  color: var(--blue-dark);
+  background: #e8eefc;
+}
+
+.button--queue:hover {
+  color: #fff;
+  background: var(--blue);
 }
 
 .media-row__status {

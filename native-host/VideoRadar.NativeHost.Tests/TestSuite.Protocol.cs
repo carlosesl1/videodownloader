@@ -15,6 +15,7 @@ internal static partial class TestSuite
         NativeMessageChannelRejectsIncompleteHeader();
         NativeMessageChannelRejectsInvalidMessageLengths();
         NativeMessageChannelRequiresCompleteBody();
+        NativeMessageChannelFinishesAFrameAfterWriteStarts();
         HostCommandAcceptsAllowedTypesAndClonesPayload();
         HostCommandRejectsMalformedCommands();
     }
@@ -47,7 +48,7 @@ internal static partial class TestSuite
         using var output = new MemoryStream();
         var channel = new NativeMessageChannel(input, output);
 
-        Throws<InvalidDataException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
+        Throws<NativeMessageFramingException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
     }
 
     private static void NativeMessageChannelRejectsInvalidMessageLengths()
@@ -60,14 +61,14 @@ internal static partial class TestSuite
         using (var output = new MemoryStream())
         {
             var channel = new NativeMessageChannel(input, output);
-            Throws<InvalidDataException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
+            Throws<NativeMessageFramingException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
         }
 
         using (var input = new MemoryStream(oversized))
         using (var output = new MemoryStream())
         {
             var channel = new NativeMessageChannel(input, output);
-            Throws<InvalidDataException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
+            Throws<NativeMessageFramingException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
         }
     }
 
@@ -81,7 +82,24 @@ internal static partial class TestSuite
         using var output = new MemoryStream();
         var channel = new NativeMessageChannel(input, output);
 
-        Throws<EndOfStreamException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
+        Throws<NativeMessageFramingException>(() => channel.ReadAsync(CancellationToken.None).GetAwaiter().GetResult());
+    }
+
+    private static void NativeMessageChannelFinishesAFrameAfterWriteStarts()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var input = new MemoryStream();
+        using var output = new CancellingMemoryStream(cancellation);
+        var channel = new NativeMessageChannel(input, output);
+
+        channel.WriteAsync(
+            new { type = "ready", requestId = "r-atomic" },
+            cancellation.Token).GetAwaiter().GetResult();
+
+        output.Position = 0;
+        var reader = new NativeMessageChannel(output, Stream.Null);
+        using var document = reader.ReadAsync(CancellationToken.None).GetAwaiter().GetResult();
+        Equal("r-atomic", document!.RootElement.GetProperty("requestId").GetString());
     }
 
     private static void HostCommandAcceptsAllowedTypesAndClonesPayload()
@@ -92,6 +110,9 @@ internal static partial class TestSuite
             "listFormats",
             "startDownload",
             "cancelDownload",
+            "pauseDownload",
+            "resumeDownload",
+            "listQueue",
             "getJob",
             "chooseDownloadFolder",
             "moveDownloadedFile",
@@ -136,6 +157,20 @@ internal static partial class TestSuite
         {
             using var document = JsonDocument.Parse(json);
             Throws<InvalidDataException>(() => HostCommand.Parse(document.RootElement));
+        }
+    }
+
+    private sealed class CancellingMemoryStream(CancellationTokenSource cancellation) : MemoryStream
+    {
+        private int writeCount;
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            var write = base.WriteAsync(buffer, cancellationToken);
+            if (Interlocked.Increment(ref writeCount) == 1) cancellation.Cancel();
+            return write;
         }
     }
 

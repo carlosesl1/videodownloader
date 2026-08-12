@@ -64,7 +64,7 @@ export function normalizeCandidates(candidates) {
     if (kind !== 'direct' && kind !== 'hls') continue;
 
     const normalized = { ...candidate, url: parsed.href, kind };
-    const identity = kind === 'hls' ? `${parsed.origin}${parsed.pathname}` : parsed.href;
+    const identity = parsed.href;
     const existing = byIdentity.get(identity);
     byIdentity.set(identity, existing ? mergeCandidate(existing, normalized) : normalized);
   }

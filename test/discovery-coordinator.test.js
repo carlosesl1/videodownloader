@@ -18,6 +18,7 @@ function memorySession(initial = {}) {
     calls,
     async get(key) {
       calls.get.push(key);
+      if (key === null) return clone(values);
       return Object.hasOwn(values, key) ? { [key]: clone(values[key]) } : {};
     },
     async set(entries) {
@@ -441,4 +442,43 @@ test('persists quality selection and inspected HLS variants without rescanning',
     updated.view,
   );
   assert.equal(scans, 1);
+});
+
+test('evicts the least-recently-updated discovery snapshots within a global byte budget', async () => {
+  const { createDiscoveryCoordinator, DISCOVERY_ACTIONS } = await loadCoordinator();
+  const storageSession = memorySession();
+  const coordinator = createDiscoveryCoordinator({
+    tabs: {
+      async get(tabId) {
+        return { id: tabId, url: `https://escola.test/aula/${tabId}` };
+      },
+    },
+    scripting: {
+      async executeScript({ target }) {
+        return [{ result: {
+          pageTitle: `Aula ${target.tabId}`,
+          candidates: [{
+            url: `https://cdn.test/video-${target.tabId}.mp4?padding=${'a'.repeat(650)}`,
+            kind: 'direct',
+          }],
+        } }];
+      },
+    },
+    storageSession,
+    youtube: { async handle() { throw new Error('not used'); } },
+    now: (() => { let tick = 500; return () => tick++; })(),
+    snapshotBudgetBytes: 2_500,
+  });
+
+  await coordinator.handle(message(DISCOVERY_ACTIONS.START, 1));
+  await coordinator.handle(message(DISCOVERY_ACTIONS.START, 2));
+  assert.ok(storageSession.values['discovery:1']);
+  assert.ok(storageSession.values['discovery:2']);
+
+  await coordinator.handle(message(DISCOVERY_ACTIONS.START, 3));
+
+  assert.equal(storageSession.values['discovery:1'], undefined);
+  assert.ok(storageSession.values['discovery:2']);
+  assert.ok(storageSession.values['discovery:3']);
+  assert.ok(storageSession.calls.remove.includes('discovery:1'));
 });

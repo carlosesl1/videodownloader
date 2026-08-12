@@ -10,8 +10,8 @@
     <main class="settings-shell">
       <header class="settings-header">
         <span class="eyebrow">VÍDEO RADAR / PREFERÊNCIAS</span>
-        <h1>Destino dos downloads</h1>
-        <p>Use a mesma pasta para vídeos diretos, HLS e YouTube.</p>
+        <h1>Preferências e suporte</h1>
+        <p>Configure o destino, verifique o auxiliar e exporte diagnósticos privados.</p>
       </header>
 
       <section class="settings-card" aria-labelledby="destination-title">
@@ -40,6 +40,40 @@
         </label>
 
         <p id="save-status" class="save-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="settings-card settings-card--divided" aria-labelledby="diagnostics-title">
+        <div class="section-heading">
+          <span class="section-index">02</span>
+          <div>
+            <p class="eyebrow">DIAGNÓSTICO LOCAL</p>
+            <h2 id="diagnostics-title">Saúde do Video Radar Helper</h2>
+          </div>
+        </div>
+
+        <div id="diagnostics-summary" class="diagnostics-summary" aria-live="polite">
+          <div><span class="field-label">Auxiliar</span><strong id="diagnostics-host">Carregando…</strong></div>
+          <div><span class="field-label">Arquitetura</span><strong id="diagnostics-architecture">—</strong></div>
+          <div><span class="field-label">Espaço disponível</span><strong id="diagnostics-space">—</strong></div>
+          <div><span class="field-label">Registros locais</span><strong id="diagnostics-log-count">—</strong></div>
+        </div>
+
+        <ul id="diagnostics-tools" class="tool-health" aria-label="Ferramentas do auxiliar"></ul>
+
+        <label class="switch-row switch-row--compact">
+          <input id="diagnostics-enabled" type="checkbox" />
+          <span>
+            <strong>Registrar diagnóstico local</strong>
+            <small>Desativado por padrão. Nunca registra URLs, cookies, caminhos da mídia ou stderr.</small>
+          </span>
+        </label>
+
+        <div class="diagnostics-actions">
+          <button id="export-diagnostics" class="primary-action" type="button">Exportar pacote…</button>
+          <button id="clear-diagnostics" class="secondary-action" type="button">Apagar registros</button>
+        </div>
+        <output id="diagnostics-path" class="diagnostics-path"></output>
+        <p id="diagnostics-status" class="save-status" role="status" aria-live="polite"></p>
       </section>
     </main>
     <script type="module" src="src/options/main.js"></script>

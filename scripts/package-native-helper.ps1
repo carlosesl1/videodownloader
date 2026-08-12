@@ -1,9 +1,12 @@
 ﻿[CmdletBinding()]
 param(
+  [ValidateSet('win-x64', 'win-arm64')]
+  [string]$RuntimeIdentifier = 'win-x64',
   [string]$LockPath,
   [string]$CacheRoot,
   [string]$ReadyRoot,
-  [string]$OutputRoot
+  [string]$OutputRoot,
+  [switch]$AllowCrossArchitecturePackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,10 +20,10 @@ if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
   $CacheRoot = Join-Path $projectRoot '.tools\native-cache'
 }
 if ([string]::IsNullOrWhiteSpace($ReadyRoot)) {
-  $ReadyRoot = Join-Path $projectRoot '.tools\native-ready'
+  $ReadyRoot = Join-Path $projectRoot ".tools\native-ready\$RuntimeIdentifier"
 }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
-  $OutputRoot = Join-Path $projectRoot 'dist\video-radar-helper'
+  $OutputRoot = Join-Path $projectRoot "dist\video-radar-helper-$RuntimeIdentifier"
 }
 $LockPath = [IO.Path]::GetFullPath($LockPath)
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot)
@@ -181,6 +184,47 @@ function Invoke-PingDiagnostic {
   }
 }
 
+function Get-NativeWindowsArchitecture {
+  foreach ($value in @($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE)) {
+    if ([string]$value -ceq 'ARM64') { return 'arm64' }
+    if ([string]$value -ceq 'AMD64') { return 'x64' }
+  }
+  throw 'A arquitetura nativa do Windows não é x64 nem ARM64.'
+}
+
+function Assert-PeArchitecture {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Architecture
+  )
+
+  $expectedMachine = if ($Architecture -ceq 'arm64') { 0xaa64 } else { 0x8664 }
+  $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  $reader = [IO.BinaryReader]::new($stream)
+  try {
+    if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5a4d) {
+      throw "Executável PE inválido: $Path"
+    }
+    $stream.Position = 0x3c
+    $peOffset = $reader.ReadInt32()
+    if ($peOffset -lt 64 -or ($peOffset + 6) -gt $stream.Length) {
+      throw "Cabeçalho PE fora dos limites: $Path"
+    }
+    $stream.Position = $peOffset
+    if ($reader.ReadUInt32() -ne 0x00004550) {
+      throw "Assinatura PE inválida: $Path"
+    }
+    $actualMachine = $reader.ReadUInt16()
+    if ($actualMachine -ne $expectedMachine) {
+      throw "Arquitetura PE incompatível em $Path. Esperado $Architecture."
+    }
+  }
+  finally {
+    $reader.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function New-PayloadEntry {
   param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
@@ -204,9 +248,15 @@ Assert-SafeDirectoryTarget -Path $ReadyRoot -Label 'ReadyRoot'
 Assert-SafeDirectoryTarget -Path $OutputRoot -Label 'OutputRoot'
 
 $fetchScript = Join-Path $projectRoot 'scripts\fetch-native-tools.ps1'
-& $fetchScript -LockPath $LockPath -CacheRoot $CacheRoot -ReadyRoot $ReadyRoot
+& $fetchScript -RuntimeIdentifier $RuntimeIdentifier -LockPath $LockPath `
+  -CacheRoot $CacheRoot -ReadyRoot $ReadyRoot
 
 $lock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$targetMatches = @($lock.targets | Where-Object { [string]$_.rid -ceq $RuntimeIdentifier })
+if ($targetMatches.Count -ne 1) {
+  throw "O lock deve conter exatamente um target $RuntimeIdentifier."
+}
+$selectedTarget = $targetMatches[0]
 $expectedExecutables = @('deno.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe')
 $expectedLicenseNames = @(
   'deno-LICENSE.md',
@@ -218,14 +268,19 @@ $actualExecutables = @(Get-ChildItem -LiteralPath $ReadyRoot -File -Filter '*.ex
 if (($actualExecutables -join "`n") -cne ($expectedExecutables -join "`n")) {
   throw 'O diretório ready não contém exatamente os quatro executáveis esperados.'
 }
-foreach ($source in @($lock.sources)) {
+foreach ($source in @($selectedTarget.sources)) {
   $licensePath = Join-Path (Join-Path $ReadyRoot 'licenses') $source.license.fileName
   if ((Get-Sha256 -Path $licensePath) -cne [string]$source.license.sha256) {
     throw "Licença inválida para $($source.name)."
   }
 }
+
+$readyArchitecture = [string]$selectedTarget.architecture
+foreach ($executable in $expectedExecutables) {
+  Assert-PeArchitecture -Path (Join-Path $ReadyRoot $executable) -Architecture $readyArchitecture
+}
 $lockedLicenseNames = @(
-  foreach ($source in @($lock.sources)) {
+  foreach ($source in @($selectedTarget.sources)) {
     [string]$source.license.fileName
     foreach ($archiveLicense in @($source.archiveLicenses)) {
       [string]$archiveLicense.fileName
@@ -250,7 +305,7 @@ New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
 try {
   $dotnetScript = Join-Path $projectRoot 'scripts\dotnet.ps1'
   $hostProject = Join-Path $projectRoot 'native-host\VideoRadar.NativeHost\VideoRadar.NativeHost.csproj'
-  & $dotnetScript publish $hostProject -c Release -r win-x64 --self-contained true `
+  & $dotnetScript publish $hostProject -c Release -r $RuntimeIdentifier --self-contained true `
     -p:PublishSingleFile=true -p:PublishTrimmed=false -o $publishRoot
   if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish falhou com código $LASTEXITCODE."
@@ -280,6 +335,17 @@ try {
       -Destination (Join-Path $licenseDirectory $licenseName)
   }
 
+  $targetArchitecture = $readyArchitecture
+  foreach ($executablePath in @(
+    $packagedHost,
+    (Join-Path $hostToolsDirectory 'deno.exe'),
+    (Join-Path $hostToolsDirectory 'ffmpeg.exe'),
+    (Join-Path $hostToolsDirectory 'ffprobe.exe'),
+    (Join-Path $hostToolsDirectory 'yt-dlp.exe')
+  )) {
+    Assert-PeArchitecture -Path $executablePath -Architecture $targetArchitecture
+  }
+
   Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\install-native-host.ps1') `
     -Destination (Join-Path $installerDirectory 'install-native-host.ps1')
   Copy-Item -LiteralPath (Join-Path $projectRoot 'Instalar-Video-Radar.cmd') `
@@ -307,8 +373,10 @@ try {
     New-PayloadEntry -PackageRoot $packageStaging -RelativePath $_
   })
   $packageManifest = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     generatedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    targetRid = $RuntimeIdentifier
+    architecture = $targetArchitecture
     files = $payloadEntries
   }
   $packageManifestJson = ($packageManifest | ConvertTo-Json -Depth 5) + [Environment]::NewLine
@@ -318,7 +386,16 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
 
-  Invoke-PingDiagnostic -HostPath $packagedHost
+  $nativeArchitecture = Get-NativeWindowsArchitecture
+  if ($nativeArchitecture -ceq $targetArchitecture) {
+    Invoke-PingDiagnostic -HostPath $packagedHost
+  }
+  elseif (-not $AllowCrossArchitecturePackage) {
+    throw "O pacote $RuntimeIdentifier só pode ser validado em $targetArchitecture nativo. Use -AllowCrossArchitecturePackage apenas em um build cruzado acompanhado por smoke test nativo."
+  }
+  else {
+    Write-Warning "Diagnóstico de execução de $RuntimeIdentifier adiado para o runner Windows $targetArchitecture nativo."
+  }
 
   New-Item -ItemType Directory -Path (Split-Path -Parent $OutputRoot) -Force | Out-Null
   if (Test-Path -LiteralPath $OutputRoot) {

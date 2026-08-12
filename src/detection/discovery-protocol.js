@@ -8,6 +8,7 @@ export const DISCOVERY_ACTIONS = Object.freeze({
 });
 
 export const DISCOVERY_PREFIX = 'discovery:';
+export const MAX_DISCOVERY_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 
 const STATUSES = new Set(['scanning', 'results', 'error']);
 const KINDS = new Set(['page', 'youtube', 'remote-media']);
@@ -36,10 +37,23 @@ function boundedText(value, maximum, allowEmpty = false) {
 
 function boundedJson(value, maximum) {
   try {
-    return JSON.stringify(value).length <= maximum;
+    const serialized = JSON.stringify(value);
+    return typeof serialized === 'string' && utf8ByteLength(serialized) <= maximum;
   } catch {
     return false;
   }
+}
+
+function utf8ByteLength(value) {
+  let bytes = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0x7F) bytes += 1;
+    else if (codePoint <= 0x7FF) bytes += 2;
+    else if (codePoint <= 0xFFFF) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
 }
 
 function httpUrl(value) {
@@ -100,6 +114,14 @@ export function sanitizeYouTubeCatalog(value) {
     title: parsed.title,
     durationSeconds: parsed.durationSeconds,
     qualities: parsed.qualities.map((quality) => ({ ...quality })),
+    ...(parsed.formats ? {
+      formats: parsed.formats.map((format) => ({ ...format })),
+      subtitles: parsed.subtitles.map((subtitle) => ({
+        ...subtitle,
+        containers: [...subtitle.containers],
+      })),
+      audioLanguages: [...parsed.audioLanguages],
+    } : {}),
   };
 }
 
@@ -137,15 +159,24 @@ export function sanitizeDiscoveryView(value) {
     throw new Error('Visualização de descoberta inválida');
   }
   const selections = value.selections.map((selection) => {
+    const hasSubtitleIndex = plainObject(selection) && Object.hasOwn(selection, 'subtitleIndex');
     if (!plainObject(selection)
-      || !hasOnlyKeys(selection, ['id', 'selectedIndex'])
+      || (!hasOnlyKeys(selection, ['id', 'selectedIndex'])
+        && !hasOnlyKeys(selection, ['id', 'selectedIndex', 'subtitleIndex']))
       || !boundedText(selection.id, 8_192)
       || !Number.isSafeInteger(selection.selectedIndex)
       || selection.selectedIndex < 0
-      || selection.selectedIndex > 100) {
+      || selection.selectedIndex > 100
+      || (hasSubtitleIndex && (!Number.isSafeInteger(selection.subtitleIndex)
+        || selection.subtitleIndex < -1
+        || selection.subtitleIndex > 127))) {
       throw new Error('Visualização de descoberta inválida');
     }
-    return { id: selection.id, selectedIndex: selection.selectedIndex };
+    return {
+      id: selection.id,
+      selectedIndex: selection.selectedIndex,
+      ...(hasSubtitleIndex ? { subtitleIndex: selection.subtitleIndex } : {}),
+    };
   });
   const inspections = value.inspections.map((inspection) => {
     if (!plainObject(inspection)
@@ -173,7 +204,7 @@ export function sanitizeDiscoveryView(value) {
 }
 
 export function sanitizeDiscoverySnapshot(value) {
-  if (!boundedJson(value, 2 * 1024 * 1024)
+  if (!boundedJson(value, MAX_DISCOVERY_SNAPSHOT_BYTES)
     || !plainObject(value)
     || !hasOnlyKeys(value, SNAPSHOT_FIELDS)
     || value.schemaVersion !== 1

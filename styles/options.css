@@ -144,7 +144,8 @@ h2 {
   color: var(--danger);
 }
 
-#choose-folder {
+#choose-folder,
+.primary-action {
   min-height: 44px;
   padding: 0 18px;
   color: #fff;
@@ -155,11 +156,14 @@ h2 {
   cursor: pointer;
 }
 
-#choose-folder:hover {
+#choose-folder:hover,
+.primary-action:hover {
   background: var(--blue-dark);
 }
 
-#choose-folder:disabled {
+#choose-folder:disabled,
+.primary-action:disabled,
+.secondary-action:disabled {
   cursor: wait;
   opacity: 0.65;
 }
@@ -205,6 +209,100 @@ h2 {
   color: var(--danger);
 }
 
+.settings-card--divided {
+  border-top: 1px solid var(--line);
+}
+
+.diagnostics-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.diagnostics-summary > div {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 16px;
+  background: #f7f9fc;
+}
+
+.diagnostics-summary strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.tool-health {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool-health li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.tool-health li strong {
+  color: #17734c;
+  text-align: right;
+}
+
+.tool-health li[data-available="false"] strong {
+  color: var(--danger);
+}
+
+.switch-row--compact {
+  padding-top: 18px;
+}
+
+.diagnostics-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.primary-action,
+.secondary-action {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+  font-weight: 740;
+  cursor: pointer;
+}
+
+.secondary-action {
+  color: var(--text);
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+
+.secondary-action:hover {
+  border-color: #9eacc0;
+  background: #f7f9fc;
+}
+
+.diagnostics-path {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 @media (max-width: 560px) {
   .settings-shell {
     width: 100%;
@@ -220,6 +318,11 @@ h2 {
   }
 
   .folder-row {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnostics-summary,
+  .tool-health {
     grid-template-columns: 1fr;
   }
 

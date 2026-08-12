@@ -28,44 +28,97 @@ $assetHeaders['Accept'] = 'application/octet-stream'
 $rawHeaders = $apiHeaders.Clone()
 $rawHeaders['Accept'] = 'application/octet-stream'
 
-$sourceDefinitions = @(
+$targetDefinitions = @(
   [ordered]@{
-    name = 'deno'
-    repository = 'denoland/deno'
-    assetName = 'deno-x86_64-pc-windows-msvc.zip'
-    checksumAssetName = 'deno-x86_64-pc-windows-msvc.zip.sha256sum'
-    archive = 'zip'
-    outputs = @('deno.exe')
-    licensePath = 'LICENSE.md'
-    licenseFileName = 'deno-LICENSE.md'
-    archiveLicenses = @()
-  },
-  [ordered]@{
-    name = 'ffmpeg'
-    repository = 'yt-dlp/FFmpeg-Builds'
-    assetName = 'ffmpeg-master-latest-win64-gpl.zip'
-    checksumAssetName = 'checksums.sha256'
-    archive = 'zip'
-    outputs = @('ffmpeg.exe', 'ffprobe.exe')
-    licensePath = 'LICENSE'
-    licenseFileName = 'ffmpeg-builds-LICENSE.txt'
-    archiveLicenses = @(
+    rid = 'win-x64'
+    architecture = 'x64'
+    sources = @(
       [ordered]@{
-        archivePath = 'ffmpeg-master-latest-win64-gpl/LICENSE.txt'
-        fileName = 'ffmpeg-GPL-LICENSE.txt'
+        name = 'deno'
+        repository = 'denoland/deno'
+        assetName = 'deno-x86_64-pc-windows-msvc.zip'
+        checksumAssetName = 'deno-x86_64-pc-windows-msvc.zip.sha256sum'
+        archive = 'zip'
+        outputs = @('deno.exe')
+        licensePath = 'LICENSE.md'
+        licenseFileName = 'deno-LICENSE.md'
+        archiveLicenses = @()
+      },
+      [ordered]@{
+        name = 'ffmpeg'
+        repository = 'yt-dlp/FFmpeg-Builds'
+        releaseTag = 'autobuild-2026-07-31-16-16'
+        assetName = 'ffmpeg-N-125875-g5d4d3bdc61-win64-gpl.zip'
+        checksumAssetName = 'checksums.sha256'
+        archive = 'zip'
+        outputs = @('ffmpeg.exe', 'ffprobe.exe')
+        licensePath = 'LICENSE'
+        licenseFileName = 'ffmpeg-builds-LICENSE.txt'
+        archiveLicenses = @(
+          [ordered]@{
+            archivePath = 'ffmpeg-N-125875-g5d4d3bdc61-win64-gpl/LICENSE.txt'
+            fileName = 'ffmpeg-GPL-LICENSE.txt'
+          }
+        )
+      },
+      [ordered]@{
+        name = 'yt-dlp'
+        repository = 'yt-dlp/yt-dlp'
+        assetName = 'yt-dlp.exe'
+        checksumAssetName = 'SHA2-256SUMS'
+        archive = 'file'
+        outputs = @('yt-dlp.exe')
+        licensePath = 'LICENSE'
+        licenseFileName = 'yt-dlp-LICENSE.txt'
+        archiveLicenses = @()
       }
     )
   },
   [ordered]@{
-    name = 'yt-dlp'
-    repository = 'yt-dlp/yt-dlp'
-    assetName = 'yt-dlp.exe'
-    checksumAssetName = 'SHA2-256SUMS'
-    archive = 'file'
-    outputs = @('yt-dlp.exe')
-    licensePath = 'LICENSE'
-    licenseFileName = 'yt-dlp-LICENSE.txt'
-    archiveLicenses = @()
+    rid = 'win-arm64'
+    architecture = 'arm64'
+    sources = @(
+      [ordered]@{
+        name = 'deno'
+        repository = 'denoland/deno'
+        assetName = 'deno-aarch64-pc-windows-msvc.zip'
+        checksumAssetName = 'deno-aarch64-pc-windows-msvc.zip.sha256sum'
+        archive = 'zip'
+        outputs = @('deno.exe')
+        licensePath = 'LICENSE.md'
+        licenseFileName = 'deno-LICENSE.md'
+        archiveLicenses = @()
+      },
+      [ordered]@{
+        name = 'ffmpeg'
+        repository = 'yt-dlp/FFmpeg-Builds'
+        # Monthly snapshots are retained upstream; never lock the rolling alias.
+        releaseTag = 'autobuild-2026-07-31-16-16'
+        assetName = 'ffmpeg-N-125875-g5d4d3bdc61-winarm64-gpl.zip'
+        checksumAssetName = 'checksums.sha256'
+        archive = 'zip'
+        outputs = @('ffmpeg.exe', 'ffprobe.exe')
+        licensePath = 'LICENSE'
+        licenseFileName = 'ffmpeg-builds-LICENSE.txt'
+        archiveLicenses = @(
+          [ordered]@{
+            archivePath = 'ffmpeg-N-125875-g5d4d3bdc61-winarm64-gpl/LICENSE.txt'
+            fileName = 'ffmpeg-GPL-LICENSE.txt'
+          }
+        )
+      },
+      [ordered]@{
+        name = 'yt-dlp'
+        repository = 'yt-dlp/yt-dlp'
+        assetName = 'yt-dlp_arm64.exe'
+        checksumAssetName = 'SHA2-256SUMS'
+        archive = 'file'
+        outputs = @('yt-dlp.exe')
+        licensePath = 'LICENSE'
+        licenseFileName = 'yt-dlp-LICENSE.txt'
+        archiveLicenses = @()
+      }
+    )
   }
 )
 
@@ -157,80 +210,104 @@ function Resolve-CommitSha {
 
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 try {
-  $lockedSources = @()
-  foreach ($definition in $sourceDefinitions) {
-    $repository = [string]$definition.repository
-    $release = Invoke-RestMethod -Headers $apiHeaders -Uri "https://api.github.com/repos/$repository/releases/latest"
-    if ([bool]$release.draft -or [bool]$release.prerelease) {
-      throw "A release latest de $repository não é uma release estável."
-    }
-    if ([string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
-      throw "A release de $repository não possui tag."
-    }
-
-    $asset = Get-UniqueAsset -Release $release -AssetName $definition.assetName -Repository $repository
-    $assetDigest = Get-AssetDigest -Asset $asset -Label "$repository/$($definition.assetName)"
-    [long]$assetId = [long]$asset.id
-    [long]$assetSize = [long]$asset.size
-    if ($assetSize -le 0) {
-      throw "Asset vazio ou sem tamanho válido: $repository/$($definition.assetName)."
-    }
-
-    $checksumAsset = Get-UniqueAsset -Release $release -AssetName $definition.checksumAssetName -Repository $repository
-    $checksumDigest = Get-AssetDigest -Asset $checksumAsset -Label "$repository/$($definition.checksumAssetName)"
-    [long]$checksumAssetId = [long]$checksumAsset.id
-    $checksumPath = Join-Path $tempRoot ("$($definition.name)-checksum-$checksumAssetId.txt")
-    Save-OfficialAsset -Asset $checksumAsset -Repository $repository -Destination $checksumPath
-    if ((Get-Sha256 -Path $checksumPath) -cne $checksumDigest) {
-      throw "O próprio artefato de checksum de $repository não corresponde ao digest da API."
-    }
-    $checksumText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($checksumPath))
-    $publishedDigest = Get-PublishedChecksum -Content $checksumText -AssetName $definition.assetName
-    if ($publishedDigest -cne $assetDigest) {
-      throw "Digest da API e checksum publicado divergem para $repository/$($definition.assetName)."
-    }
-
-    $commitReference = if ([string]$release.tag_name -ceq 'latest') {
-      [string]$release.target_commitish
-    } else {
-      [string]$release.tag_name
-    }
-    $licenseCommit = Resolve-CommitSha -Repository $repository -Reference $commitReference
-    $licenseUrl = "https://raw.githubusercontent.com/$repository/$licenseCommit/$($definition.licensePath)"
-    $licensePath = Join-Path $tempRoot $definition.licenseFileName
-    Invoke-WebRequest -UseBasicParsing -Headers $rawHeaders -Uri $licenseUrl -OutFile $licensePath
-    $licenseDigest = Get-Sha256 -Path $licensePath
-
-    $lockedSources += [ordered]@{
-      name = [string]$definition.name
-      repository = $repository
-      version = [string]$release.tag_name
-      assetName = [string]$definition.assetName
-      assetId = $assetId
-      url = "https://api.github.com/repos/$repository/releases/assets/$assetId"
-      sha256 = $assetDigest
-      size = $assetSize
-      archive = [string]$definition.archive
-      outputs = @($definition.outputs)
-      archiveLicenses = @($definition.archiveLicenses)
-      checksum = [ordered]@{
-        assetName = [string]$definition.checksumAssetName
-        assetId = $checksumAssetId
-        url = "https://api.github.com/repos/$repository/releases/assets/$checksumAssetId"
-        sha256 = $checksumDigest
+  $lockedTargets = @()
+  foreach ($targetDefinition in $targetDefinitions) {
+    $lockedSources = @()
+    foreach ($definition in @($targetDefinition.sources)) {
+      $repository = [string]$definition.repository
+      $releaseEndpoint = if ($definition.Contains('releaseTag')) {
+        $releaseTag = [string]$definition.releaseTag
+        if ($releaseTag -cnotmatch '^autobuild-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}$') {
+          throw "A release fixada de $repository possui tag inválida."
+        }
+        "https://api.github.com/repos/$repository/releases/tags/$([Uri]::EscapeDataString($releaseTag))"
       }
-      license = [ordered]@{
-        fileName = [string]$definition.licenseFileName
-        url = $licenseUrl
-        sha256 = $licenseDigest
+      else {
+        "https://api.github.com/repos/$repository/releases/latest"
       }
+      $release = Invoke-RestMethod -Headers $apiHeaders -Uri $releaseEndpoint
+      if ([bool]$release.draft -or [bool]$release.prerelease) {
+        throw "A release de $repository não é uma release estável."
+      }
+      if ([string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
+        throw "A release de $repository não possui tag."
+      }
+      if ($definition.Contains('releaseTag') -and
+          [string]$release.tag_name -cne [string]$definition.releaseTag) {
+        throw "A API não retornou a release fixada de $repository."
+      }
+
+      $asset = Get-UniqueAsset -Release $release -AssetName $definition.assetName -Repository $repository
+      $assetDigest = Get-AssetDigest -Asset $asset -Label "$repository/$($definition.assetName)"
+      [long]$assetId = [long]$asset.id
+      [long]$assetSize = [long]$asset.size
+      if ($assetSize -le 0) {
+        throw "Asset vazio ou sem tamanho válido: $repository/$($definition.assetName)."
+      }
+
+      $checksumAsset = Get-UniqueAsset -Release $release -AssetName $definition.checksumAssetName -Repository $repository
+      $checksumDigest = Get-AssetDigest -Asset $checksumAsset -Label "$repository/$($definition.checksumAssetName)"
+      [long]$checksumAssetId = [long]$checksumAsset.id
+      $checksumPath = Join-Path $tempRoot ("$($targetDefinition.rid)-$($definition.name)-checksum-$checksumAssetId.txt")
+      if (-not (Test-Path -LiteralPath $checksumPath)) {
+        Save-OfficialAsset -Asset $checksumAsset -Repository $repository -Destination $checksumPath
+      }
+      if ((Get-Sha256 -Path $checksumPath) -cne $checksumDigest) {
+        throw "O próprio artefato de checksum de $repository não corresponde ao digest da API."
+      }
+      $checksumText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($checksumPath))
+      $publishedDigest = Get-PublishedChecksum -Content $checksumText -AssetName $definition.assetName
+      if ($publishedDigest -cne $assetDigest) {
+        throw "Digest da API e checksum publicado divergem para $repository/$($definition.assetName)."
+      }
+
+      $commitReference = if ([string]$release.tag_name -ceq 'latest') {
+        [string]$release.target_commitish
+      } else {
+        [string]$release.tag_name
+      }
+      $licenseCommit = Resolve-CommitSha -Repository $repository -Reference $commitReference
+      $licenseUrl = "https://raw.githubusercontent.com/$repository/$licenseCommit/$($definition.licensePath)"
+      $licensePath = Join-Path $tempRoot ("$($targetDefinition.rid)-$($definition.licenseFileName)")
+      Invoke-WebRequest -UseBasicParsing -Headers $rawHeaders -Uri $licenseUrl -OutFile $licensePath
+      $licenseDigest = Get-Sha256 -Path $licensePath
+
+      $lockedSources += [ordered]@{
+        name = [string]$definition.name
+        repository = $repository
+        version = [string]$release.tag_name
+        assetName = [string]$definition.assetName
+        assetId = $assetId
+        url = "https://api.github.com/repos/$repository/releases/assets/$assetId"
+        sha256 = $assetDigest
+        size = $assetSize
+        archive = [string]$definition.archive
+        outputs = @($definition.outputs)
+        archiveLicenses = @($definition.archiveLicenses)
+        checksum = [ordered]@{
+          assetName = [string]$definition.checksumAssetName
+          assetId = $checksumAssetId
+          url = "https://api.github.com/repos/$repository/releases/assets/$checksumAssetId"
+          sha256 = $checksumDigest
+        }
+        license = [ordered]@{
+          fileName = [string]$definition.licenseFileName
+          url = $licenseUrl
+          sha256 = $licenseDigest
+        }
+      }
+    }
+    $lockedTargets += [ordered]@{
+      rid = [string]$targetDefinition.rid
+      architecture = [string]$targetDefinition.architecture
+      sources = @($lockedSources | Sort-Object { $_.name })
     }
   }
 
   $lock = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     generatedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    sources = @($lockedSources | Sort-Object { $_.name })
+    targets = @($lockedTargets)
   }
   $json = ($lock | ConvertTo-Json -Depth 8) + [Environment]::NewLine
   $outputDirectory = Split-Path -Parent $OutputPath

@@ -365,3 +365,106 @@ test('on a TikTok feed resolves the visible card instead of a stale playback URL
     globalThis.innerHeight = originalInnerHeight;
   }
 });
+
+test('bounds videos and the structured-clone payload before returning scan results', () => {
+  const originalDocument = globalThis.document;
+  const originalPerformance = globalThis.performance;
+  const originalLocation = globalThis.location;
+  let currentSourceReads = 0;
+  let performanceReads = 0;
+  const videos = Array.from({ length: 500 }, (_, index) => ({
+    get currentSrc() {
+      currentSourceReads += 1;
+      return `https://cdn.test/video-${index}.mp4`;
+    },
+    src: '',
+    videoWidth: 1280,
+    videoHeight: 720,
+    getAttribute() { return null; },
+    title: '',
+    querySelectorAll() { return []; },
+  }));
+
+  globalThis.document = {
+    title: 'A'.repeat(5_000),
+    querySelectorAll(selector) {
+      return selector === 'video' ? videos : [];
+    },
+  };
+  globalThis.performance = {
+    getEntriesByType() {
+      performanceReads += 1;
+      return [];
+    },
+  };
+  globalThis.location = { href: 'https://site.test/lesson' };
+
+  try {
+    const result = scanPage();
+
+    assert.equal(result.pageTitle.length, 1_000);
+    assert.equal(result.candidates.length, 200);
+    assert.equal(currentSourceReads, 200);
+    assert.equal(performanceReads, 0);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.performance = originalPerformance;
+    globalThis.location = originalLocation;
+  }
+});
+
+test('caps source work and prioritizes recent bounded performance entries', () => {
+  const originalDocument = globalThis.document;
+  const originalPerformance = globalThis.performance;
+  const originalLocation = globalThis.location;
+  let sourceReads = 0;
+  const sourceNodes = new Proxy({ length: 10_000 }, {
+    get(target, property) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) {
+        sourceReads += 1;
+        return { src: `https://cdn.test/poster-${property}.jpg`, type: 'image/jpeg' };
+      }
+      return target[property];
+    },
+  });
+  const video = {
+    currentSrc: '',
+    src: '',
+    videoWidth: 0,
+    videoHeight: 0,
+    getAttribute() { return null; },
+    title: '',
+    querySelectorAll(selector) {
+      return selector === 'source' ? sourceNodes : [];
+    },
+  };
+
+  globalThis.document = {
+    title: 'Curso',
+    querySelectorAll(selector) {
+      return selector === 'video' ? [video] : [];
+    },
+  };
+  globalThis.performance = {
+    getEntriesByType() {
+      return Array.from({ length: 2_000 }, (_, index) => ({
+        name: `https://cdn.test/recent-${index}.mp4`,
+        startTime: index,
+      }));
+    },
+  };
+  globalThis.location = { href: 'https://site.test/lesson' };
+
+  try {
+    const result = scanPage();
+
+    assert.equal(sourceReads, 50);
+    assert.equal(result.candidates.length, 200);
+    assert.equal(result.candidates[0].url, 'https://cdn.test/recent-1999.mp4');
+    assert.equal(result.candidates.at(-1).url, 'https://cdn.test/recent-1800.mp4');
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.performance = originalPerformance;
+    globalThis.location = originalLocation;
+  }
+});

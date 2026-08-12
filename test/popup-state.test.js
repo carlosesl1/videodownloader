@@ -43,6 +43,22 @@ const youtubeSnapshot = {
   updatedAt: 1,
 };
 
+function queueJob(overrides = {}) {
+  return {
+    jobId: 'queue-job-1', operationId: 'queue-op-1', videoId: 'jNQXAC9IVRw',
+    title: 'Me at the zoo', url: youtubeSnapshot.url, height: 720,
+    selection: {
+      height: 720, audioOnly: false, subtitleLanguage: null,
+      includeAutomaticSubtitles: false,
+    },
+    state: 'queued', stage: 'queued', percent: null, downloadedBytes: null,
+    totalBytes: null, speedBytesPerSecond: null, etaSeconds: null, path: null,
+    error: null, position: 1, resumePartial: false, attemptCount: 0,
+    createdAt: '2026-08-12T12:00:00Z', updatedAt: '2026-08-12T12:00:00Z',
+    ...overrides,
+  };
+}
+
 test('moves from idle through scanning to results and empty', () => {
   const scanning = reduceState(initialState, { type: 'SCAN_STARTED' });
   assert.equal(scanning.status, 'scanning');
@@ -336,6 +352,215 @@ test('restores and updates persisted YouTube jobs without inventing unknown prog
   assert.equal(completed.downloads[0].active, false);
   assert.equal(completed.downloads[0].path, 'C:/Downloads/zoo.mp4');
   assert.equal(completed.downloads[0].statusLabel, 'Concluído');
+});
+
+test('restaura jobs repetidos da fila sem colapsar e preserva pausa/retomada', () => {
+  const first = queueJob();
+  const second = queueJob({
+    jobId: 'queue-job-2', operationId: 'queue-op-2', state: 'paused', stage: 'paused',
+    position: null, percent: 31, resumePartial: true,
+    createdAt: '2026-08-12T12:00:01Z', updatedAt: '2026-08-12T12:00:01Z',
+  });
+  const restored = reduceState(initialState, {
+    type: 'DOWNLOAD_QUEUE_RESTORED', jobs: [first, second],
+  });
+
+  assert.equal(restored.downloads.length, 2);
+  assert.equal(new Set(restored.downloads.map(({ id }) => id)).size, 2);
+  assert.equal(restored.downloads.find(({ jobId }) => jobId === 'queue-job-1').queueState, 'queued');
+  const paused = restored.downloads.find(({ jobId }) => jobId === 'queue-job-2');
+  assert.equal(paused.active, true);
+  assert.match(paused.statusLabel, /progresso preservado/);
+
+  const subtitled = reduceState(restored, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED',
+    job: queueJob({
+      state: 'failed', stage: 'failed', position: null, error: 'NETWORK_TIMEOUT',
+      selection: {
+        height: 720, audioOnly: false, subtitleLanguage: 'pt-BR',
+        includeAutomaticSubtitles: true,
+      },
+    }),
+  }).downloads.find(({ jobId }) => jobId === 'queue-job-1');
+  assert.equal(subtitled.variants[subtitled.selectedIndex].selection.subtitleLanguage, 'pt-BR');
+  assert.equal(subtitled.variants[subtitled.selectedIndex].selection.includeAutomaticSubtitles, true);
+
+  const resumed = reduceState(restored, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED',
+    job: { ...second, state: 'running', stage: 'video', position: null, percent: 40 },
+  });
+  assert.equal(resumed.downloads.length, 2);
+  assert.equal(resumed.downloads.find(({ jobId }) => jobId === 'queue-job-2').progress, 40);
+});
+
+test('snapshot de compatibilidade não substitui job durável nem remove pausa da fila', () => {
+  const scanned = reduceState(initialState, {
+    type: 'YOUTUBE_FORMATS_LOADED',
+    target: 'youtube.com',
+    item: {
+      id: 'youtube:jNQXAC9IVRw', kind: 'youtube', url: youtubeSnapshot.url,
+      title: youtubeSnapshot.title, filename: 'Me at the zoo-720p.mp4',
+      selectedIndex: 0, predictedFormat: 'mp4', phase: 'ready',
+      variants: [{
+        height: 720, label: '720p', container: 'mp4', combined: true,
+        filename: 'Me at the zoo-720p.mp4',
+      }],
+    },
+  });
+  const queued = reduceState(scanned, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED', job: queueJob(),
+  });
+  assert.equal(queued.downloads[0].isQueueJob, true);
+  assert.equal(queued.downloads[0].queueState, 'queued');
+
+  const compatibilitySnapshot = {
+    ...youtubeSnapshot,
+    jobId: 'queue-job-1',
+    operationId: 'queue-op-1',
+    stage: 'queued',
+  };
+  const updated = reduceState(queued, {
+    type: 'YOUTUBE_JOB_UPDATED', snapshot: compatibilitySnapshot,
+  });
+  const restored = reduceState(updated, {
+    type: 'YOUTUBE_JOB_RESTORED', snapshot: compatibilitySnapshot,
+  });
+
+  assert.equal(restored.items.length, 1);
+  assert.equal(restored.downloads.length, 1);
+  assert.equal(restored.downloads[0].isQueueJob, true);
+  assert.equal(restored.downloads[0].queueState, 'queued');
+  assert.equal(restored.downloads[0].jobId, 'queue-job-1');
+});
+
+test('adoção do queue job reseta o placeholder de busca e cria um card durável separado', () => {
+  const richItem = {
+    id: 'youtube:jNQXAC9IVRw', kind: 'youtube', platform: 'youtube',
+    url: youtubeSnapshot.url, title: youtubeSnapshot.title,
+    filename: 'Me at the zoo-720p.mp4', selectedIndex: 0, predictedFormat: 'mp4',
+    phase: 'ready', jobId: null, active: false, progress: null, statusLabel: '',
+    path: null, error: null,
+    variants: [{
+      height: 720, label: '720p · H.264 · AAC', container: 'mp4', combined: false,
+      filename: 'Me at the zoo-720p.mp4',
+      selection: {
+        height: 720, audioOnly: false, subtitleLanguage: null,
+        includeAutomaticSubtitles: false,
+      },
+    }],
+    subtitles: [{ language: 'pt-BR', label: 'Português', automatic: false, containers: ['vtt'] }],
+    selectedSubtitleIndex: 0,
+    audioLanguages: ['pt-BR'],
+  };
+  const loaded = reduceState(initialState, {
+    type: 'YOUTUBE_FORMATS_LOADED', target: 'youtube.com', item: richItem,
+  });
+  const starting = reduceState(loaded, {
+    type: 'MEDIA_DOWNLOAD_STARTED', id: richItem.id, selectedIndex: 0, kind: 'youtube',
+  });
+  assert.equal(starting.items[0].statusLabel, 'Iniciando download…');
+
+  const adopted = reduceState(starting, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED', job: queueJob(),
+  });
+
+  assert.equal(adopted.items.length, 1);
+  assert.equal(adopted.items[0].id, richItem.id);
+  assert.equal(adopted.items[0].phase, 'ready');
+  assert.equal(adopted.items[0].jobId, null);
+  assert.equal(adopted.items[0].statusLabel, '');
+  assert.equal(adopted.items[0].selectedSubtitleIndex, 0);
+  assert.equal(adopted.downloads.length, 1);
+  assert.equal(adopted.downloads[0].id, 'media-job:queue-job-1');
+  assert.equal(adopted.downloads[0].isQueueJob, true);
+  assert.match(adopted.downloads[0].variants[0].label, /H\.264 · AAC/);
+  assert.equal(adopted.busyId, null);
+});
+
+test('queue job também migra o placeholder quando o snapshot compatível chega primeiro', () => {
+  const richItem = {
+    id: 'youtube:jNQXAC9IVRw', kind: 'youtube', platform: 'youtube',
+    url: youtubeSnapshot.url, title: youtubeSnapshot.title,
+    filename: 'Me at the zoo-720p.mp4', selectedIndex: 0, predictedFormat: 'mp4',
+    phase: 'ready', jobId: null, active: false, progress: null, statusLabel: '',
+    path: null, error: null,
+    variants: [{
+      height: 720, label: '720p', container: 'mp4', combined: true,
+      filename: 'Me at the zoo-720p.mp4',
+    }],
+  };
+  const starting = reduceState(reduceState(initialState, {
+    type: 'YOUTUBE_FORMATS_LOADED', target: 'youtube.com', item: richItem,
+  }), {
+    type: 'MEDIA_DOWNLOAD_STARTED', id: richItem.id, selectedIndex: 0, kind: 'youtube',
+  });
+  const compatibility = reduceState(starting, {
+    type: 'YOUTUBE_JOB_UPDATED',
+    snapshot: {
+      ...youtubeSnapshot, jobId: 'queue-job-1', operationId: 'queue-op-1', stage: 'queued',
+    },
+  });
+  assert.equal(compatibility.items[0].jobId, 'queue-job-1');
+
+  const adopted = reduceState(compatibility, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED', job: queueJob(),
+  });
+  assert.equal(adopted.items[0].phase, 'ready');
+  assert.equal(adopted.items[0].jobId, null);
+  assert.equal(adopted.downloads[0].id, 'media-job:queue-job-1');
+  assert.equal(adopted.downloads[0].queueState, 'queued');
+});
+
+test('evento terminal como primeiro snapshot também limpa o placeholder de início', () => {
+  const item = {
+    id: 'youtube:jNQXAC9IVRw', kind: 'youtube', platform: 'youtube',
+    url: youtubeSnapshot.url, title: youtubeSnapshot.title,
+    filename: 'Me at the zoo-720p.mp4', selectedIndex: 0, predictedFormat: 'mp4',
+    phase: 'ready', jobId: null, active: false, progress: null, statusLabel: '',
+    path: null, error: null,
+    variants: [{
+      height: 720, label: '720p', container: 'mp4', combined: true,
+      filename: 'Me at the zoo-720p.mp4',
+    }],
+  };
+  const starting = reduceState(reduceState(initialState, {
+    type: 'YOUTUBE_FORMATS_LOADED', target: 'youtube.com', item,
+  }), {
+    type: 'MEDIA_DOWNLOAD_STARTED', id: item.id, selectedIndex: 0, kind: 'youtube',
+  });
+
+  const failed = reduceState(starting, {
+    type: 'DOWNLOAD_QUEUE_JOB_UPDATED',
+    job: queueJob({
+      state: 'failed', stage: 'failed', position: null, error: 'NETWORK_TIMEOUT',
+      updatedAt: '2026-08-12T12:00:01Z',
+    }),
+  });
+
+  assert.equal(failed.items[0].phase, 'ready');
+  assert.equal(failed.items[0].jobId, null);
+  assert.equal(failed.items[0].statusLabel, '');
+  assert.equal(failed.downloads[0].id, 'media-job:queue-job-1');
+  assert.equal(failed.downloads[0].queueState, 'failed');
+  assert.equal(failed.busyId, null);
+});
+
+test('restaura áudio-only durante finalização com saída M4A', () => {
+  const audio = queueJob({
+    jobId: 'queue-audio', operationId: 'queue-audio-op', height: 0,
+    selection: {
+      height: null, audioOnly: true, subtitleLanguage: null,
+      includeAutomaticSubtitles: false,
+    },
+    state: 'running', stage: 'finalize', position: null, percent: null,
+  });
+  const state = reduceState(initialState, {
+    type: 'DOWNLOAD_QUEUE_RESTORED', jobs: [audio],
+  });
+  const item = state.downloads[0];
+  assert.equal(item.predictedFormat, 'm4a');
+  assert.match(item.filename, /audio\.m4a$/);
+  assert.equal(item.statusLabel, 'Finalizando…');
 });
 
 test('reconciles a completed relocation with its existing download card without duplication', () => {

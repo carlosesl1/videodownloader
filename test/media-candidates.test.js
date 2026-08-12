@@ -48,10 +48,10 @@ test('infers extensionless media kinds from parameterized MIME types', () => {
   assert.deepEqual(candidates.map((candidate) => candidate.kind), ['direct', 'hls']);
 });
 
-test('dedupes rotated HLS query tokens while preserving the newest usable URL', () => {
+test('preserves HLS query parameters and dedupes only fragment variants', () => {
   const candidates = normalizeCandidates([
     {
-      url: 'https://cdn.test/playlist.m3u8?token=old',
+      url: 'https://cdn.test/playlist.m3u8?token=old#first',
       kind: 'hls',
       source: 'performance',
       startTime: 10,
@@ -63,14 +63,26 @@ test('dedupes rotated HLS query tokens while preserving the newest usable URL', 
       startTime: 20,
     },
     {
+      url: 'https://cdn.test/playlist.m3u8?token=new#second',
+      kind: 'hls',
+      source: 'dom-current',
+      startTime: 30,
+      label: 'Playlist ativa',
+    },
+    {
       url: 'https://cdn.test/other.m3u8?token=one',
       kind: 'hls',
       source: 'performance',
-      startTime: 30,
+      startTime: 40,
     },
   ]);
 
-  assert.equal(candidates.length, 2);
-  assert.equal(candidates[0].url, 'https://cdn.test/playlist.m3u8?token=new');
-  assert.equal(candidates[1].url, 'https://cdn.test/other.m3u8?token=one');
+  assert.equal(candidates.length, 3);
+  assert.deepEqual(candidates.map((candidate) => candidate.url), [
+    'https://cdn.test/playlist.m3u8?token=old',
+    'https://cdn.test/playlist.m3u8?token=new',
+    'https://cdn.test/other.m3u8?token=one',
+  ]);
+  assert.equal(candidates[1].source, 'dom-current');
+  assert.equal(candidates[1].label, 'Playlist ativa');
 });
